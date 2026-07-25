@@ -53,6 +53,11 @@ class Registry:
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path))
+        # `codeintel watch`'s background reindex and a manual `codeintel
+        # index`/`reindex` can legitimately race on this same file — a
+        # busy_timeout makes SQLite retry for up to 5s instead of raising
+        # "database is locked" on the first contended write.
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute(_SCHEMA)
         self._conn.commit()
 

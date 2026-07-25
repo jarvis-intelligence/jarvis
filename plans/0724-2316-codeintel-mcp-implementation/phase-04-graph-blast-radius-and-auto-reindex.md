@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "Graph Blast Radius and Auto-Reindex"
-status: pending
+status: completed
 effort: "~4h"
 priority: P2
 dependencies: [3]

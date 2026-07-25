@@ -41,7 +41,7 @@ Greenfield build of `codeintel`: single-process, local-first MCP stdio server ex
 | 1 | [Scaffold and Vendor Core](./phase-01-scaffold-and-vendor-core.md) | Completed |
 | 2 | [MCP Server and SCIP Navigation](./phase-02-mcp-server-and-scip-navigation.md) | Completed |
 | 3 | [Indexer CLI and Zoekt Search](./phase-03-indexer-cli-and-zoekt-search.md) | Completed |
-| 4 | [Graph Blast Radius and Auto-Reindex](./phase-04-graph-blast-radius-and-auto-reindex.md) | Pending |
+| 4 | [Graph Blast Radius and Auto-Reindex](./phase-04-graph-blast-radius-and-auto-reindex.md) | Completed |
 
 ## Acceptance (whole plan)
 

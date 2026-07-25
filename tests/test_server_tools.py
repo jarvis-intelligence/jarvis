@@ -1,6 +1,6 @@
-"""MCP in-memory client session: list_tools returns the 7 tools, and
-roundtrips for documentSymbols and searchCode against the synthetic
-fixture / a fake zoekt-webserver."""
+"""MCP in-memory client session: list_tools returns the 8 tools, and
+roundtrips for documentSymbols, searchCode, and blastRadius against the
+synthetic fixture / a fake zoekt-webserver / an in-memory package graph."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from codeintel import config, query, server
+from codeintel.graph import GraphStore
 from codeintel.search import ZoektLifecycle
 from tests.fixtures.synthetic_index import DOC_GREETER, build_published_index
 
@@ -25,6 +26,7 @@ EXPECTED_TOOLS = {
     "typeHierarchy",
     "getIndexStatus",
     "searchCode",
+    "blastRadius",
 }
 
 
@@ -38,7 +40,7 @@ def _wired_query_service(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_list_tools_returns_six_nav_tools():
+async def test_list_tools_returns_eight_tools():
     async with create_connected_server_and_client_session(server.mcp) as client:
         result = await client.list_tools()
         names = {tool.name for tool in result.tools}
@@ -143,3 +145,36 @@ async def test_search_code_roundtrip(tmp_path: Path, monkeypatch):
     finally:
         lifecycle.stop()
         monkeypatch.setattr(server, "_zoekt_lifecycle", None)
+
+
+@pytest.mark.anyio
+async def test_blast_radius_roundtrip(tmp_path: Path, monkeypatch):
+    store = GraphStore(tmp_path / "registry.db")
+    seed_id = store.upsert_package(repo=REPO, name="npm:seed")
+    dep_id = store.upsert_package(repo="dep-repo", name="npm:dep")
+    store.add_edge(from_package_id=dep_id, to_package_id=seed_id)
+    monkeypatch.setattr(server, "_graph_store", store)
+    try:
+        async with create_connected_server_and_client_session(server.mcp) as client:
+            result = await client.call_tool("blastRadius", {"repo": REPO, "symbol_or_package": "npm:seed"})
+            payload = json.loads(result.content[0].text)
+            assert payload["dependents"] == [{"repo": "dep-repo", "name": "npm:dep", "hops": 1}]
+            assert payload["freshness"] == "unknown"
+            assert payload["commit"] is None
+    finally:
+        store.close()
+        monkeypatch.setattr(server, "_graph_store", None)
+
+
+@pytest.mark.anyio
+async def test_blast_radius_unknown_package_returns_error_payload(tmp_path: Path, monkeypatch):
+    store = GraphStore(tmp_path / "registry.db")
+    monkeypatch.setattr(server, "_graph_store", store)
+    try:
+        async with create_connected_server_and_client_session(server.mcp) as client:
+            result = await client.call_tool("blastRadius", {"repo": REPO, "symbol_or_package": "npm:no-such"})
+            payload = json.loads(result.content[0].text)
+            assert "error" in payload
+    finally:
+        store.close()
+        monkeypatch.setattr(server, "_graph_store", None)

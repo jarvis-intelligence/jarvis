@@ -1,8 +1,8 @@
-"""codeintel MCP stdio server: thin tool wrappers around QueryService and
-the Zoekt search client.
+"""codeintel MCP stdio server: thin tool wrappers around QueryService, the
+Zoekt search client, and the package dependency graph.
 
-Registers 7 tools: documentSymbols, goToDefinition, findReferences,
-callHierarchy, typeHierarchy, getIndexStatus, searchCode.
+Registers 8 tools: documentSymbols, goToDefinition, findReferences,
+callHierarchy, typeHierarchy, getIndexStatus, searchCode, blastRadius.
 """
 
 from __future__ import annotations
@@ -14,12 +14,14 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from codeintel import config
+from codeintel.graph import GraphStore, blast_radius
 from codeintel.query import FreshnessSnapshot, QueryService
 from codeintel.search import ZoektLifecycle, search_zoekt
 
 mcp = FastMCP("codeintel")
 _query_service: QueryService | None = None
 _zoekt_lifecycle: ZoektLifecycle | None = None
+_graph_store: GraphStore | None = None
 
 
 def _service() -> QueryService:
@@ -35,6 +37,13 @@ def _zoekt() -> ZoektLifecycle:
         data_dir = config.data_dir()
         _zoekt_lifecycle = ZoektLifecycle(index_dir=data_dir / ".zoekt", data_dir=data_dir)
     return _zoekt_lifecycle
+
+
+def _graph() -> GraphStore:
+    global _graph_store
+    if _graph_store is None:
+        _graph_store = GraphStore(config.data_dir() / "registry.db")
+    return _graph_store
 
 
 def _json_safe(value: Any) -> Any:
@@ -150,6 +159,27 @@ def search_code(query: str, repo: str | None = None) -> dict[str, Any]:
             for hit in hits
         ],
         "total": len(hits),
+    }
+
+
+@mcp.tool(name="blastRadius")
+def blast_radius_tool(repo: str, symbol_or_package: str) -> dict[str, Any]:
+    """2-hop bounded BFS over the package dependency graph: every other
+    indexed repo whose package directly (1 hop) or transitively through one
+    intermediary (2 hops) depends on `symbol_or_package` as registered for
+    `repo` (built by `codeintel index`, e.g. `"npm:@scope/name"`). The
+    graph has no per-node timestamp, so freshness is always reported as
+    `unknown` here — an honest limitation, not a bug."""
+    try:
+        result = blast_radius(_graph(), repo, symbol_or_package)
+    except Exception as exc:
+        # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
+        return {"error": str(exc)}
+    return {
+        "repo": repo,
+        "symbolOrPackage": symbol_or_package,
+        "dependents": [_json_safe(asdict(d)) for d in result.dependents],
+        **_freshness_fields(result.freshness),
     }
 
 

@@ -1,7 +1,8 @@
 """`codeintel` CLI: detect language -> run the matching SCIP indexer ->
-`scip expt-convert` -> zoekt-index -> atomic pointer swap -> registry update.
+`scip expt-convert` -> populate package graph -> zoekt-index -> atomic
+pointer swap -> registry update.
 
-Subcommands: index, list, status, reindex, forget.
+Subcommands: index, list, status, reindex, forget, watch.
 """
 
 from __future__ import annotations
@@ -10,15 +11,19 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
 from codeintel import config
+from codeintel.graph import GraphStore, populate_graph_for_repo
 from codeintel.registry import Registry
+from codeintel.watch import Debouncer, should_ignore_path
 
 _LANGUAGE_INDEXERS: dict[str, tuple[str, list[str]]] = {
     ".ts": ("typescript", ["scip-typescript", "index"]),
@@ -122,6 +127,19 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
                 step="scip expt-convert",
             )
 
+            # Package graph lives in registry.db (a single RW database),
+            # never in index.db — keeps the published SCIP index immutable.
+            # Reads the just-built db_path directly, before it's even
+            # copied to its published location, so a graph-population
+            # failure is caught before anything is published.
+            graph_store = GraphStore(config.data_dir(root) / "registry.db")
+            index_conn = sqlite3.connect(db_path)
+            try:
+                populate_graph_for_repo(graph_store, slug, index_conn)
+            finally:
+                index_conn.close()
+                graph_store.close()
+
             zoekt_dir = config.data_dir(root) / ".zoekt"
             zoekt_dir.mkdir(parents=True, exist_ok=True)
             _run(["zoekt-index", "-index", str(zoekt_dir), str(repo_path)], cwd=repo_path, step="zoekt-index")
@@ -222,6 +240,76 @@ def _cmd_forget(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_watch(args: argparse.Namespace) -> int:
+    """Watch `path` for source-file changes and debounce-reindex it.
+
+    Not a daemon requirement — an optional foreground command a user runs
+    while actively editing. `watchdog` is an optional dependency (`uv sync
+    --extra watch`); its import is deferred so a base install never needs
+    it just to run `codeintel index`/`list`/`status`."""
+    try:
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers import Observer
+    except ImportError:
+        print(
+            "error: `watchdog` is required for `codeintel watch` — install with `uv sync --extra watch`",
+            file=sys.stderr,
+        )
+        return 1
+
+    repo_path = Path(args.path).resolve()
+    try:
+        slug = config.repo_slug(args.slug or repo_path.name)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    def _reindex() -> None:
+        print(f"[watch] change detected, reindexing {slug} ...")
+        try:
+            index_repo(repo_path, slug=slug)
+            print(f"[watch] {slug} reindexed")
+        except Exception as exc:
+            # Broad on purpose: index_repo() can raise before its own
+            # try/except is even entered (e.g. `_git_head()`'s subprocess
+            # call, or the first Registry() connection) — anything short
+            # of catching Exception here would let a single transient
+            # failure (a locked registry.db, a momentarily-corrupt .git)
+            # kill the whole watch process instead of just skipping this
+            # one reindex and continuing to watch.
+            print(f"[watch] reindex failed: {exc}", file=sys.stderr)
+
+    debouncer = Debouncer(delay_seconds=args.debounce, on_fire=_reindex)
+
+    class _Handler(FileSystemEventHandler):
+        def on_any_event(self, event) -> None:
+            if event.is_directory or should_ignore_path(event.src_path):
+                return
+            debouncer.notify()
+
+    observer = Observer()
+    observer.schedule(_Handler(), str(repo_path), recursive=True)
+    observer.start()
+    print(f"[watch] watching {repo_path} (slug={slug}, debounce={args.debounce}s) — Ctrl+C to stop")
+    try:
+        while True:
+            time.sleep(0.5)
+            try:
+                debouncer.poll()
+            except Exception as exc:
+                # Second line of defense: _reindex() already catches
+                # broadly, but the watch loop itself must never die from
+                # an unexpected error — that would silently stop watching
+                # with no obvious signal beyond a scrollback line.
+                print(f"[watch] unexpected error, still watching: {exc}", file=sys.stderr)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        observer.stop()
+        observer.join()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="codeintel")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -245,6 +333,12 @@ def build_parser() -> argparse.ArgumentParser:
     forget_parser = subparsers.add_parser("forget", help="remove a repo's registration and published index")
     forget_parser.add_argument("slug")
     forget_parser.set_defaults(func=_cmd_forget)
+
+    watch_parser = subparsers.add_parser("watch", help="watch a repo and debounce-reindex on change")
+    watch_parser.add_argument("path", help="path to the repo to watch")
+    watch_parser.add_argument("--slug", help="override the auto-derived slug")
+    watch_parser.add_argument("--debounce", type=float, default=5.0, help="quiet-period seconds (default: 5.0)")
+    watch_parser.set_defaults(func=_cmd_watch)
 
     return parser
 

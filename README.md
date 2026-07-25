@@ -28,7 +28,7 @@ Editable source: [`docs/assets/codeintel-system-architecture.excalidraw`](docs/a
 
 ## Status
 
-Phases 1–3 shipped; Phase 4 pending. See
+All 4 planned phases shipped. See
 [`plans/0724-2316-codeintel-mcp-implementation/plan.md`](plans/0724-2316-codeintel-mcp-implementation/plan.md).
 
 | Phase | Scope | Status |
@@ -36,7 +36,7 @@ Phases 1–3 shipped; Phase 4 pending. See
 | 1 | Scaffold + vendored SCIP core (`scip_pb2`, `scip_decoder`, `index_reader`) | Done |
 | 2 | MCP stdio server + 5 SCIP nav tools + `getIndexStatus` | Done |
 | 3 | Indexer CLI, registry, embedded Zoekt + `searchCode` | Done |
-| 4 | `blastRadius` (package dependency graph) + auto-reindex | Pending |
+| 4 | `blastRadius` (package dependency graph) + `codeintel watch` auto-reindex | Done |
 
 ## Install
 
@@ -77,15 +77,29 @@ Ties break by fixed priority (`.ts` → `.tsx` → `.py` → `.java` → `.kt`).
 skipped. Rust is **not** supported, and a monorepo gets indexed as whichever
 language has the most files — multi-language merge is out of scope.
 
-The pipeline then runs: chosen indexer → `scip expt-convert` → `zoekt-index`
-into `~/.codeintel/.zoekt` → copy to
+The pipeline then runs: chosen indexer → `scip expt-convert` → populate the
+package dependency graph (`packages`/`edges` tables in `registry.db`) →
+`zoekt-index` into `~/.codeintel/.zoekt` → copy to
 `~/.codeintel/scip/_/<slug>/_/index-<sha>.db` → atomic `current` pointer flip →
-registry update (`~/.codeintel/registry.db`).
+registry update.
 
 > The `scip/_/<slug>/_/` path shape reuses the vendored `IndexConnectionCache`'s
 > `(project, repo, branch)` 3-tuple layout with the outer two pinned to `_` (see
 > [`src/codeintel/config.py`](src/codeintel/config.py)). It is not a user-facing
 > contract — only `<slug>` matters when calling tools.
+
+## Watching a repo (auto-reindex)
+
+```bash
+codeintel watch /path/to/your/repo             # debounce defaults to 5s
+codeintel watch /path/to/your/repo --debounce 3
+```
+
+Runs in the foreground (not a daemon) using `watchdog` — install it with
+`uv sync --extra watch`. A burst of file changes (e.g. an editor's atomic
+save touching several files) coalesces into exactly **one** reindex, fired
+once `--debounce` seconds have passed since the *last* change. `.git`,
+`node_modules`, `.venv`, `__pycache__`, `dist`, and `build` are ignored.
 
 ## Register with Claude Code
 
@@ -96,7 +110,7 @@ claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run c
 ## MCP tools
 
 `documentSymbols` · `goToDefinition` · `findReferences` · `callHierarchy` ·
-`typeHierarchy` · `getIndexStatus` · `searchCode`
+`typeHierarchy` · `getIndexStatus` · `searchCode` · `blastRadius`
 
 Every nav tool takes `repo` (the slug from `codeintel index`) plus a
 tool-specific `symbol` or `path`. All tools report failure the same way — a
@@ -110,6 +124,18 @@ tool-specific `symbol` or `path`. All tools report failure the same way — a
   it lazy-spawns an embedded `zoekt-webserver` (pidfile'd so a second codeintel
   process reuses it instead of spawning a duplicate; killed on clean exit via
   `atexit`).
+- **`blastRadius`** takes `repo` plus `symbol_or_package` (e.g. `"npm:@scope/
+  name"`, the same `"{manager}:{name}"` string `codeintel index` derives from
+  each repo's SCIP symbols). Returns every other indexed repo whose package
+  depends on it, up to 2 hops, each tagged with its hop distance. The package
+  graph has no per-node timestamp, so `freshness` is always `"unknown"` here —
+  an honest limitation of the schema, not a bug. Cross-repo edges resolve by
+  exact package name against whatever has *already* been indexed: index the
+  dependency first, or re-run `codeintel index`/`reindex` after indexing it,
+  for an edge to appear. Each reindex retracts that repo's own stale edges
+  before recomputing them, so a removed dependency's edge disappears too —
+  the graph always reflects each repo's *last* index run, not an
+  accumulation of every run it's ever had.
 
 ### Known upstream limitations
 
