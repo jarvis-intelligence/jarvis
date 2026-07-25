@@ -110,9 +110,20 @@ codeintel watch /path/to/your/repo --debounce 3
 
 Runs in the foreground (not a daemon) using `watchdog` — install it with
 `uv sync --extra watch`. A burst of file changes (e.g. an editor's atomic
-save touching several files) coalesces into exactly **one** reindex, fired
-once `--debounce` seconds have passed since the *last* change. `.git`,
+save touching several files) coalesces into exactly **one** reindex. The
+reindex fires once `--debounce` seconds (default 5) have passed since the
+*last* file change — this prevents thrashing on rapid edits. `.git`,
 `node_modules`, `.venv`, `__pycache__`, `dist`, and `build` are ignored.
+
+## Configuration
+
+**Data directory** (default `~/.codeintel`):
+```bash
+CODEINTEL_DATA_DIR=/custom/path codeintel index /path/to/repo
+```
+
+**Environment variables:**
+- `CODEINTEL_DATA_DIR` — override default `~/.codeintel` for all indexes and registry
 
 ## Register with Claude Code
 
@@ -161,6 +172,15 @@ These are real behaviors of `scip expt-convert` v0.7.0, not codeintel bugs:
   basename of the directory you indexed — which can diverge from codeintel's
   slug if you passed `--slug`. If a scoped search comes back unexpectedly
   empty, retry unscoped to confirm the name.
+
+## Documentation
+
+For more details, see:
+- [`docs/project-overview-pdr.md`](docs/project-overview-pdr.md) — scope, value prop, out-of-scope items
+- [`docs/system-architecture.md`](docs/system-architecture.md) — architectural guarantees, storage layout, query paths
+- [`docs/codebase-summary.md`](docs/codebase-summary.md) — module map, test coverage
+- [`docs/code-standards.md`](docs/code-standards.md) — code patterns and conventions
+- [`docs/project-roadmap.md`](docs/project-roadmap.md) — all phases complete, future ideas
 
 ## Standards
 
