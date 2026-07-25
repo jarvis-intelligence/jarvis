@@ -11,20 +11,33 @@ favor of a single stdio process reading local SQLite files.
 
 ## Architecture
 
-![codeintel system architecture](docs/assets/codeintel-system-architecture.png)
+**Overview** — client, server, the 3 engines (Query / Search / Graph), and storage:
 
-Three things the diagram is worth reading for:
+![codeintel overview](docs/assets/codeintel-architecture.png)
+
+**Index pipeline & package graph** — how `codeintel index` builds and publishes
+an index, how the package dependency graph feeds `blastRadius`, and how
+`codeintel watch` debounces a burst of edits into one reindex:
+
+![codeintel index pipeline and package graph](docs/assets/codeintel-system-architecture.png)
+
+Three things worth reading the diagrams for:
 
 - **The runtime path never writes.** Queries open a published `index-<sha>.db`
   read-only (`mode=ro&immutable=1`). Index files are never mutated in place.
-- **Publishing is atomic.** A reindex writes a new versioned `.db`, then flips
-  the small `current` pointer via `os.replace` (POSIX `rename(2)`). A query
-  already reading the old file keeps working; there is no downtime window.
-- **Indexing is offline and sequential.** `zoekt-index` runs *before* the
-  pointer flip, so a failure at any step leaves the previously published index
-  live and marks the registry `failed` — never a half-published state.
+- **Publishing is atomic.** A reindex writes a new versioned `.db`, populates
+  the package graph, and runs `zoekt-index` — only once *all* of that succeeds
+  does `os.replace` (POSIX `rename(2)`) flip the small `current` pointer. A
+  query already reading the old file keeps working; there is no downtime
+  window, and a failure anywhere leaves the previously published index live.
+- **The package graph is rebuilt, not accumulated.** Each reindex clears that
+  repo's own outgoing edges before recomputing them, so a removed dependency's
+  edge is retracted — `blastRadius` always reflects each repo's *last* index
+  run.
 
-Editable source: [`docs/assets/codeintel-system-architecture.excalidraw`](docs/assets/codeintel-system-architecture.excalidraw)
+Editable sources:
+[`docs/assets/codeintel-architecture.excalidraw`](docs/assets/codeintel-architecture.excalidraw) ·
+[`docs/assets/codeintel-system-architecture.excalidraw`](docs/assets/codeintel-system-architecture.excalidraw)
 
 ## Status
 
