@@ -5,13 +5,38 @@ Personal, local-first code intelligence MCP server. SCIP-backed navigation
 Zoekt-backed lexical search, exposed as MCP tools to Claude Code, Cursor, or
 any MCP client — over stdio, no server, no auth, no network.
 
-Ported from `polaris-code-intelligence`'s query/search/graph logic; the
-enterprise shell (FastAPI, Postgres, Bitbucket auth, Cloud Build) is dropped
-in favor of a single stdio process reading local SQLite files.
+Core query/search logic is ported from `polaris-code-intelligence`; the
+enterprise shell (FastAPI, Postgres, Bitbucket auth, Cloud Build) is dropped in
+favor of a single stdio process reading local SQLite files.
+
+## Architecture
+
+![codeintel system architecture](docs/assets/codeintel-system-architecture.png)
+
+Three things the diagram is worth reading for:
+
+- **The runtime path never writes.** Queries open a published `index-<sha>.db`
+  read-only (`mode=ro&immutable=1`). Index files are never mutated in place.
+- **Publishing is atomic.** A reindex writes a new versioned `.db`, then flips
+  the small `current` pointer via `os.replace` (POSIX `rename(2)`). A query
+  already reading the old file keeps working; there is no downtime window.
+- **Indexing is offline and sequential.** `zoekt-index` runs *before* the
+  pointer flip, so a failure at any step leaves the previously published index
+  live and marks the registry `failed` — never a half-published state.
+
+Editable source: [`docs/assets/codeintel-system-architecture.excalidraw`](docs/assets/codeintel-system-architecture.excalidraw)
 
 ## Status
 
-Work in progress — implementing per `plans/0724-2316-codeintel-mcp-implementation/plan.md`.
+Phases 1–3 shipped; Phase 4 pending. See
+[`plans/0724-2316-codeintel-mcp-implementation/plan.md`](plans/0724-2316-codeintel-mcp-implementation/plan.md).
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Scaffold + vendored SCIP core (`scip_pb2`, `scip_decoder`, `index_reader`) | Done |
+| 2 | MCP stdio server + 5 SCIP nav tools + `getIndexStatus` | Done |
+| 3 | Indexer CLI, registry, embedded Zoekt + `searchCode` | Done |
+| 4 | `blastRadius` (package dependency graph) + auto-reindex | Pending |
 
 ## Install
 
@@ -19,9 +44,13 @@ Work in progress — implementing per `plans/0724-2316-codeintel-mcp-implementat
 uv sync
 ```
 
-Requires on `PATH`: a SCIP indexer for your language(s) — `scip-typescript`,
-`scip-python`, `rust-analyzer`, or `scip-java` — plus the `scip` CLI (for
-`scip expt-convert`) and, for search, `zoekt-index` / `zoekt-webserver`.
+Required on `PATH`:
+
+| Purpose | Binary |
+|---------|--------|
+| SCIP indexer (pick per language) | `scip-typescript` · `scip-python` · `scip-java` |
+| SCIP → SQLite conversion | `scip` (uses `scip expt-convert`) |
+| Lexical search | `zoekt-index` · `zoekt-webserver` |
 
 ## Indexing a repo
 
@@ -34,18 +63,29 @@ codeintel reindex foo
 codeintel forget foo
 ```
 
-This runs the full pipeline: detect language (by extension count: `.ts`/
-`.tsx` → scip-typescript, `.py` → scip-python, `.java`/`.kt` → scip-java) →
-run that indexer → `scip expt-convert` → copy into
-`~/.codeintel/scip/_/<slug>/_/index-<sha>.db` → atomically flip the
-`current` pointer (write-temp-then-rename) → `zoekt-index` into
-`~/.codeintel/.zoekt` → update the registry (`~/.codeintel/registry.db`).
-Requires `scip-typescript`/`scip-python`/`scip-java`, the `scip` CLI, and
-`zoekt-index` on `PATH`.
+**Language detection** counts source files by extension and picks the winner —
+one language per index:
 
-(The `scip/_/.../_/` path shape reuses `IndexConnectionCache`'s vendored
-3-tuple layout with pinned constants — see `src/codeintel/config.py` — not a
-user-facing contract; only the `<slug>` segment matters when calling tools.)
+| Extensions | Indexer |
+|------------|---------|
+| `.ts` `.tsx` | `scip-typescript` |
+| `.py` | `scip-python` |
+| `.java` `.kt` | `scip-java` |
+
+Ties break by fixed priority (`.ts` → `.tsx` → `.py` → `.java` → `.kt`).
+`.git`, `node_modules`, `.venv`, `__pycache__`, `dist`, and `build` are
+skipped. Rust is **not** supported, and a monorepo gets indexed as whichever
+language has the most files — multi-language merge is out of scope.
+
+The pipeline then runs: chosen indexer → `scip expt-convert` → `zoekt-index`
+into `~/.codeintel/.zoekt` → copy to
+`~/.codeintel/scip/_/<slug>/_/index-<sha>.db` → atomic `current` pointer flip →
+registry update (`~/.codeintel/registry.db`).
+
+> The `scip/_/<slug>/_/` path shape reuses the vendored `IndexConnectionCache`'s
+> `(project, repo, branch)` 3-tuple layout with the outer two pinned to `_` (see
+> [`src/codeintel/config.py`](src/codeintel/config.py)). It is not a user-facing
+> contract — only `<slug>` matters when calling tools.
 
 ## Register with Claude Code
 
@@ -58,28 +98,53 @@ claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run c
 `documentSymbols` · `goToDefinition` · `findReferences` · `callHierarchy` ·
 `typeHierarchy` · `getIndexStatus` · `searchCode`
 
-Phase 4 (planned): `blastRadius`.
-
 Every nav tool takes `repo` (the slug from `codeintel index`) plus a
-tool-specific `symbol` or `path`. `getIndexStatus` also takes an optional
-`repo_path` (the repo's local git working directory) to compare the
-published commit against `git rev-parse HEAD` — omitted, freshness is
-reported without a staleness check. `searchCode` takes `query` and an
-optional `repo` filter; on first call it lazy-spawns an embedded
-`zoekt-webserver` (killed on process exit via `atexit`, pidfile'd so a
-second codeintel process reuses it instead of spawning a duplicate).
+tool-specific `symbol` or `path`. All tools report failure the same way — a
+`{"error": "..."}` payload rather than a transport-level error.
 
-**searchCode's `repo` filter matches Zoekt's own repository name** — the
-basename of the directory you ran `codeintel index` against — which is
-usually but not necessarily the same as codeintel's slug (`--slug` can
-diverge from the directory name). If a `repo`-scoped search comes back
-empty unexpectedly, try it unscoped first to confirm the name.
+- **`getIndexStatus`** takes an optional `repo_path` (the repo's local git
+  working directory) to compare the published commit against
+  `git rev-parse HEAD`. Omitted, freshness is reported without a staleness
+  check — never `stale: true` without evidence.
+- **`searchCode`** takes `query` plus an optional `repo` filter. On first call
+  it lazy-spawns an embedded `zoekt-webserver` (pidfile'd so a second codeintel
+  process reuses it instead of spawning a duplicate; killed on clean exit via
+  `atexit`).
 
-`typeHierarchy` returns empty on real-world indexes today (TS and Python
-alike) — `scip expt-convert` v0.7.0 never populates `global_symbols.kind`/
-`display_name`/`relationships` in practice, a converter limitation, not a
-codeintel bug.
+### Known upstream limitations
 
-## Architecture
+These are real behaviors of `scip expt-convert` v0.7.0, not codeintel bugs:
 
-See `docs/assets/codeintel-system-architecture.png`.
+- **`typeHierarchy` returns empty** on real-world indexes (TypeScript and
+  Python alike) — the converter never populates `global_symbols.relationships`.
+- **`displayName` / `kind` are often `null`** for the same reason.
+- **`searchCode`'s `repo` filter matches Zoekt's own repository name** — the
+  basename of the directory you indexed — which can diverge from codeintel's
+  slug if you passed `--slug`. If a scoped search comes back unexpectedly
+  empty, retry unscoped to confirm the name.
+
+## Standards
+
+Blob decoding follows the [SCIP protocol](https://scip-code.org/docs.html):
+`scip_pb2.py` is generated from `scip.proto` at `sourcegraph/scip` tag
+**v0.7.0**, and occurrence/relationship blobs are decoded as real
+`scip.Document` / `scip.SymbolInformation` messages.
+
+The SQLite layer (`documents`, `chunks`, `global_symbols`, `mentions`,
+`defn_enclosing_ranges`) is **not** part of that published spec — it is the
+output shape of the experimental `scip expt-convert` sub-command, verified by
+hand against a real index. Treat it as a moving target across `scip` releases.
+
+## Tests
+
+```bash
+uv run pytest
+```
+
+Integration tests that shell out to the real `scip-python` / `scip` /
+`zoekt-index` binaries are marked `integration`:
+
+```bash
+uv run pytest -m "not integration"   # unit only
+uv run pytest -m integration         # real-binary pipeline
+```
