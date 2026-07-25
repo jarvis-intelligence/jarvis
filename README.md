@@ -61,9 +61,13 @@ Required on `PATH`:
 
 | Purpose | Binary |
 |---------|--------|
-| SCIP indexer (pick per language) | `scip-typescript` · `scip-python` · `scip-java` |
+| SCIP indexer (pick per language) | `scip-typescript` · `scip-python` · `scip-java` · `scip-swift`* |
 | SCIP → SQLite conversion | `scip` (uses `scip expt-convert`) |
 | Lexical search | `zoekt-index` · `zoekt-webserver` |
+
+\* `scip-swift` is a converter that chains Apple's `IndexStoreDB` to SCIP; no
+tagged release exists yet, so `.swift` repos raise `IndexingError` until one
+is installed on `PATH`.
 
 ## Indexing a repo
 
@@ -84,8 +88,9 @@ one language per index:
 | `.ts` `.tsx` | `scip-typescript` |
 | `.py` | `scip-python` |
 | `.java` `.kt` | `scip-java` |
+| `.swift` | `scip-swift` |
 
-Ties break by fixed priority (`.ts` → `.tsx` → `.py` → `.java` → `.kt`).
+Ties break by fixed priority (`.ts` → `.tsx` → `.py` → `.java` → `.kt` → `.swift`).
 `.git`, `node_modules`, `.venv`, `__pycache__`, `dist`, and `build` are
 skipped. Rust is **not** supported, and a monorepo gets indexed as whichever
 language has the most files — multi-language merge is out of scope.

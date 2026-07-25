@@ -116,7 +116,7 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 
 **Indexing pipeline (`index_cli.py`):**
 1. Language detection (count extensions)
-2. Run language indexer (scip-python, scip-typescript, scip-java)
+2. Run language indexer (scip-python, scip-typescript, scip-java, scip-swift)
 3. `scip expt-convert` → SQLite
 4. `populate_graph_for_repo()` — extract package names, store edges
 5. `zoekt-index` → shards in `.zoekt/`

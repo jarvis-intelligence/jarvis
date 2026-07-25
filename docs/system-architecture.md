@@ -10,11 +10,36 @@ The system is built around three core engines:
 2. **Search Engine** — manages embedded Zoekt instance, returns lexical search results
 3. **Graph Engine** — builds and queries package dependency relationships across indexed repos
 
-### Architecture Diagram
+### Layered Architecture (primary view)
 
-![codeintel overview](docs/assets/codeintel-architecture.png)
+![codeintel layered architecture](assets/codeintel-full-architecture-with-swift.png)
 
-*Editable source: [`docs/assets/codeintel-architecture.excalidraw`](docs/assets/codeintel-architecture.excalidraw)*
+*Editable source: [`assets/codeintel-full-architecture-with-swift.drawio`](assets/codeintel-full-architecture-with-swift.drawio) — also exported as `.svg` and as an XML-embedded `.drawio.png`*
+
+Seven layers, top to bottom. **Storage (layer 4) is the seam**: the runtime only ever reads
+down into it, the indexing pipeline only ever writes up into it, and the two halves share no
+other contract.
+
+| Layer | Contents |
+|---|---|
+| 1 · Clients | Claude Code, Cursor, any MCP host |
+| 2 · MCP Server | `server.py` — FastMCP over stdio, 8 tools |
+| 3 · Engines | Query (`query.py`), Search (`search.py`), Graph (`graph.py`) |
+| 4 · Storage | `index-<sha>.db` + pointer, `.zoekt/` shards, `registry.db` |
+| 5 · Indexing orchestration | `index_cli.py` — detect → run indexer → convert → graph/zoekt → atomic publish |
+| 6 · Language indexers | `scip-typescript`, `scip-python`, `scip-java`, `scip-swift` |
+| 7 · External toolchain | Node/npm, Python, JDK, and (Swift only) Xcode + iOS SDK |
+
+Layer 6→7 is where Swift differs from every other language: the other three indexers need only
+an ordinary runtime, while `scip-swift` needs Xcode and the iOS SDK, which Apple ships for macOS
+only. See [`openspec/changes/add-swift-indexing/`](../openspec/changes/add-swift-indexing/) for
+the Swift-specific pipeline and its host-topology decision.
+
+### Component Diagram (runtime detail)
+
+![codeintel overview](assets/codeintel-architecture.png)
+
+*Editable source: [`assets/codeintel-architecture.excalidraw`](assets/codeintel-architecture.excalidraw)*
 
 Diagram shows:
 - **Client**: Claude Code / Cursor / any MCP client → MCP stdio
@@ -28,9 +53,9 @@ Diagram shows:
 
 ## Indexing Pipeline & Publishing
 
-![codeintel index pipeline and package graph](docs/assets/codeintel-system-architecture.png)
+![codeintel index pipeline and package graph](assets/codeintel-system-architecture.png)
 
-*Editable source: [`docs/assets/codeintel-system-architecture.excalidraw`](docs/assets/codeintel-system-architecture.excalidraw)*
+*Editable source: [`assets/codeintel-system-architecture.excalidraw`](assets/codeintel-system-architecture.excalidraw)*
 
 Diagram shows the full indexing lifecycle from file changes → published index:
 
@@ -38,11 +63,11 @@ Diagram shows the full indexing lifecycle from file changes → published index:
 
 1. **Language Detection**
    - Count source files by extension
-   - Select language with most files (tie-break by priority: .ts → .tsx → .py → .java → .kt)
-   - Skip: .git, node_modules, .venv, __pycache__, dist, build
+   - Select language with most files (tie-break by priority: .ts → .tsx → .py → .java → .kt → .swift)
+   - Skip: .git, node_modules, .venv, __pycache__, dist, build, DerivedData, .build
 
 2. **Run Language Indexer**
-   - Execute `scip-typescript`, `scip-python`, or `scip-java` on repo root
+   - Execute `scip-typescript`, `scip-python`, `scip-java`, or `scip-swift` on repo root
    - Output: raw SCIP document (protobuf, optionally zstd-compressed)
 
 3. **SCIP Conversion**
@@ -77,6 +102,11 @@ Runs in foreground using `watchdog` library:
    - Buffer file change events
    - Wait `--debounce` seconds (default 5s) since *last* change
    - Coalesce burst of file edits into single reindex trigger
+
+   *Note: `watch.py`'s `should_ignore_path` uses its own ignore set, which does not
+   include the `DerivedData` / `.build` entries added to `detect_language()`'s
+   `_IGNORED_DIRS`. On an Xcode-project repo, build-artifact churn can therefore
+   still trigger a debounce cycle.*
 
 3. **Reindex**
    - Once debounce window closes, run the full indexing pipeline above
@@ -301,6 +331,10 @@ Indexing is exclusive — only one reindex can run at a time per slug (enforced 
   - `scip-typescript` — TypeScript/JavaScript indexing
   - `scip-python` — Python indexing
   - `scip-java` — Java/Kotlin indexing
+  - `scip-swift` — Swift indexing. **Does not exist yet** — no such indexer is published
+    upstream; `.swift` repos raise `IndexingError` until one is built and installed.
+    Requires a macOS host (Xcode + iOS SDK) for any repo importing Apple-platform
+    frameworks. See [`openspec/changes/add-swift-indexing/`](../openspec/changes/add-swift-indexing/).
 - **SCIP converter:**
   - `scip` (uses `scip expt-convert` subcommand)
 - **Search indexer & server:**
@@ -353,8 +387,12 @@ These are real behaviors of SCIP/Zoekt, not codeintel bugs:
 ### Adding a New Language Indexer
 
 1. Create a new SCIP indexer (e.g., `scip-go` for Go)
-2. Add to language detection in `index_cli.py`
+2. Add to language detection in `index_cli.py` (`_LANGUAGE_INDEXERS` + `_EXT_PRIORITY`)
 3. Test end-to-end (index repo → query nav tools)
+
+Swift is the worked example of this path — the codeintel-side entry landed in one table,
+but the indexer itself was the real work. See
+[`openspec/changes/add-swift-indexing/`](../openspec/changes/add-swift-indexing/).
 
 ### Adding a New Query Tool
 
