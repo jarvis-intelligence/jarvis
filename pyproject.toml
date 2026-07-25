@@ -1,0 +1,37 @@
+[project]
+name = "codeintel"
+version = "0.1.0"
+description = "Personal, local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
+readme = "README.md"
+authors = [
+    { name = "phuongdoanduy", email = "phuong.doanduy@axonactive.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=1.2.0",
+    # Runtime must stay >= the gencode version vendored in scip_pb2.py
+    # (generated against libprotoc 35.0 / grpcio-tools 7.35.1 — see that file's header).
+    "protobuf>=7.35.0,<8.0.0",
+    "zstandard>=0.23.0,<1.0.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+watch = ["watchdog>=4.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+]
+
+[project.scripts]
+codeintel = "codeintel.index_cli:main"
+codeintel-server = "codeintel.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: exercises real external binaries (scip-python, scip, zoekt-index)"]

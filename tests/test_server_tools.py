@@ -1,0 +1,145 @@
+"""MCP in-memory client session: list_tools returns the 7 tools, and
+roundtrips for documentSymbols and searchCode against the synthetic
+fixture / a fake zoekt-webserver."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+from mcp.shared.memory import create_connected_server_and_client_session
+
+from codeintel import config, query, server
+from codeintel.search import ZoektLifecycle
+from tests.fixtures.synthetic_index import DOC_GREETER, build_published_index
+
+REPO = "toy-repo"
+
+EXPECTED_TOOLS = {
+    "documentSymbols",
+    "goToDefinition",
+    "findReferences",
+    "callHierarchy",
+    "typeHierarchy",
+    "getIndexStatus",
+    "searchCode",
+}
+
+
+@pytest.fixture(autouse=True)
+def _wired_query_service(tmp_path: Path, monkeypatch):
+    build_published_index(tmp_path, config.PROJECT, REPO, config.BRANCH)
+    service = query.QueryService(config.new_connection_cache(tmp_path))
+    monkeypatch.setattr(server, "_query_service", service)
+    yield
+    monkeypatch.setattr(server, "_query_service", None)
+
+
+@pytest.mark.anyio
+async def test_list_tools_returns_six_nav_tools():
+    async with create_connected_server_and_client_session(server.mcp) as client:
+        result = await client.list_tools()
+        names = {tool.name for tool in result.tools}
+        assert names == EXPECTED_TOOLS
+
+
+@pytest.mark.anyio
+async def test_document_symbols_roundtrip():
+    async with create_connected_server_and_client_session(server.mcp) as client:
+        result = await client.call_tool("documentSymbols", {"repo": REPO, "path": DOC_GREETER})
+        assert result.isError is not True
+        payload = json.loads(result.content[0].text)
+        assert [s["displayName"] for s in payload["symbols"]] == ["Greeter", "greet", "DEFAULT_NAME", "sayHi"]
+
+
+@pytest.mark.anyio
+async def test_go_to_definition_missing_repo_returns_error_payload():
+    async with create_connected_server_and_client_session(server.mcp) as client:
+        result = await client.call_tool("goToDefinition", {"repo": "never-published", "symbol": "x"})
+        payload = json.loads(result.content[0].text)
+        assert "error" in payload
+
+
+@pytest.mark.anyio
+async def test_unexpected_exception_still_returns_structured_error_payload(monkeypatch):
+    """Every tool must fail the same way — a `{"error": ...}` dict, not an
+    MCP-level `isError` text result — regardless of which exception type
+    the underlying service raises."""
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(server.QueryService, "get_definitions", _boom)
+    async with create_connected_server_and_client_session(server.mcp) as client:
+        result = await client.call_tool("goToDefinition", {"repo": REPO, "symbol": "x"})
+        assert result.isError is not True
+        payload = json.loads(result.content[0].text)
+        assert payload == {"error": "boom"}
+
+
+_FAKE_ZOEKT_SEARCH_SCRIPT = """\
+#!PYTHON_SHEBANG_PLACEHOLDER
+import base64
+import http.server
+import json
+import socketserver
+import sys
+
+port = int(sys.argv[sys.argv.index("-listen") + 1].lstrip(":"))
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def do_POST(self):
+        line = base64.b64encode(b"def greet(name):").decode()
+        body = json.dumps({
+            "Result": {"Files": [{"Repository": "toy-repo", "FileName": "toy/greeter.py",
+                                   "LineMatches": [{"LineNumber": 5, "Line": line}]}]}
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
+    httpd.serve_forever()
+"""
+
+
+@pytest.mark.anyio
+async def test_search_code_roundtrip(tmp_path: Path, monkeypatch):
+    script_path = tmp_path / "fake-zoekt-webserver"
+    # An absolute shebang (vs. `#!/usr/bin/env python3`) avoids PATH-resolution
+    # flakiness spawning this fake server as a subprocess — this only affects
+    # the test double; the real ZoektLifecycle always spawns the actual
+    # zoekt-webserver binary directly, never through a shebang lookup.
+    script_path.write_text(
+        _FAKE_ZOEKT_SEARCH_SCRIPT.replace("PYTHON_SHEBANG_PLACEHOLDER", sys.executable), encoding="utf-8"
+    )
+    script_path.chmod(0o755)
+
+    lifecycle = ZoektLifecycle(
+        index_dir=tmp_path / "zoekt-index",
+        data_dir=tmp_path / "zoekt-data",
+        port=16090,
+        binary=[sys.executable, str(script_path)],
+    )
+    monkeypatch.setattr(server, "_zoekt_lifecycle", lifecycle)
+    try:
+        async with create_connected_server_and_client_session(server.mcp) as client:
+            result = await client.call_tool("searchCode", {"query": "greet"})
+            payload = json.loads(result.content[0].text)
+            assert payload["total"] == 1
+            assert payload["hits"][0]["repo"] == "toy-repo"
+            assert payload["hits"][0]["lineText"] == "def greet(name):"
+    finally:
+        lifecycle.stop()
+        monkeypatch.setattr(server, "_zoekt_lifecycle", None)
