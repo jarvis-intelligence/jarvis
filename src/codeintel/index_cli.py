@@ -31,11 +31,12 @@ _LANGUAGE_INDEXERS: dict[str, tuple[str, list[str]]] = {
     ".py": ("python", ["scip-python", "index"]),
     ".java": ("java", ["scip-java", "index"]),
     ".kt": ("java", ["scip-java", "index"]),
+    ".swift": ("swift", ["scip-swift", "index"]),
 }
 # Priority order for tie-breaking when extension counts are equal.
-_EXT_PRIORITY = [".ts", ".tsx", ".py", ".java", ".kt"]
+_EXT_PRIORITY = [".ts", ".tsx", ".py", ".java", ".kt", ".swift"]
 
-_IGNORED_DIRS = {".git", "node_modules", ".venv", "__pycache__", "dist", "build"}
+_IGNORED_DIRS = {".git", "node_modules", ".venv", "__pycache__", "dist", "build", "DerivedData", ".build"}
 
 
 class UnsupportedLanguageError(Exception):
@@ -59,7 +60,9 @@ def detect_language(repo_path: Path) -> tuple[str, list[str]]:
 
     present = [ext for ext in _EXT_PRIORITY if counts[ext] > 0]
     if not present:
-        raise UnsupportedLanguageError(f"no supported source files (.ts/.tsx/.py/.java/.kt) found under {repo_path}")
+        raise UnsupportedLanguageError(
+            f"no supported source files (.ts/.tsx/.py/.java/.kt/.swift) found under {repo_path}"
+        )
     best_ext = max(present, key=lambda ext: (counts[ext], -_EXT_PRIORITY.index(ext)))
     return _LANGUAGE_INDEXERS[best_ext]
 

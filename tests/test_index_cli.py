@@ -48,6 +48,36 @@ def test_detect_language_ignores_node_modules_and_git(tmp_path: Path):
     assert language == "python"
 
 
+def test_detect_language_ignores_derived_data_and_dot_build(tmp_path: Path):
+    (tmp_path / "src.swift").write_text("let x = 1\n")
+    derived_data = tmp_path / "DerivedData" / "SourcePackages" / "checkouts" / "SomeDep"
+    derived_data.mkdir(parents=True)
+    dot_build = tmp_path / ".build" / "checkouts" / "SomeDep"
+    dot_build.mkdir(parents=True)
+    for i in range(5):
+        (derived_data / f"f{i}.py").write_text("x = 1\n")
+        (dot_build / f"g{i}.py").write_text("x = 1\n")
+    language, _ = detect_language(tmp_path)
+    assert language == "swift"
+
+
+def test_detect_language_picks_swift_for_swift_files(tmp_path: Path):
+    (tmp_path / "a.swift").write_text("let x = 1\n")
+    (tmp_path / "b.swift").write_text("let y = 2\n")
+    language, cmd = detect_language(tmp_path)
+    assert language == "swift"
+    assert cmd[0] == "scip-swift"
+
+
+def test_detect_language_tie_break_prefers_earlier_priority_over_swift(tmp_path: Path):
+    (tmp_path / "a.java").write_text("class A {}\n")
+    (tmp_path / "b.java").write_text("class B {}\n")
+    (tmp_path / "a.swift").write_text("let x = 1\n")
+    (tmp_path / "b.swift").write_text("let y = 2\n")
+    language, _ = detect_language(tmp_path)
+    assert language == "java"
+
+
 def test_detect_language_raises_for_no_supported_files(tmp_path: Path):
     (tmp_path / "README.md").write_text("hello\n")
     with pytest.raises(UnsupportedLanguageError):
