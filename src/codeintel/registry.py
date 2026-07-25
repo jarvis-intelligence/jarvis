@@ -1,8 +1,8 @@
 """SQLite-backed registry of indexed repos: path, slug, language, commit_sha,
 last_indexed, status.
 
-Simplified from polaris-code-intelligence's `registry_store.py` (446 LOC,
-SQLAlchemy async + Postgres, a registration state machine, Bitbucket team
+Simplified from an internal reference implementation's `registry_store.py` (446 LOC,
+SQLAlchemy async + Postgres, a registration state machine, per-team
 quotas, an audit log) — codeintel is a single-user, local-first tool with
 no multi-tenancy, no auth, and no state machine to enforce, so this is a
 plain stdlib sqlite3 CRUD table instead.

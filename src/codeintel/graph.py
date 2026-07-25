@@ -1,7 +1,7 @@
 """Package-dependency graph: extraction from a SCIP index + a stdlib-sqlite3
 store + 2-hop bounded BFS traversal (blastRadius).
 
-Ported from polaris-code-intelligence's `service/graph_extraction.py` +
+Ported from an internal reference implementation's `service/graph_extraction.py` +
 `repository/graph_store.py` + `service/graph_query_service.py`, collapsed
 into one module and simplified for codeintel's single-user, single-tenant
 shape:
@@ -94,7 +94,7 @@ class BlastRadiusResult:
 
 def package_display_name(manager: str, name: str) -> str:
     """`packages.name` convention: `"{manager}:{package_name}"` (e.g.
-    `"npm:@epost-snapshot/luz-next"`) — folds the manager into the string
+    `"npm:@acme-org/acme-app"`) — folds the manager into the string
     to avoid cross-ecosystem name collisions without a speculative column."""
     return f"{manager}:{name}"
 

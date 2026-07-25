@@ -9,11 +9,11 @@ dependencies: []
 
 # Phase 1: Scaffold and Vendor Core
 
-`$POLARIS_CI` = `~/Projects/epost-workspace/polaris-ai-plaform/polaris-code-intelligence`
+`$SOURCE_REPO` = `<source-project>`
 
 ## Overview
 
-Create the repo skeleton, vendor the 4 core modules from polaris-ci unchanged, port the synthetic-SCIP test fixtures, and prove the decoder + index reader work via ported tests (TDD: fixtures + tests land before vendored modules are wired).
+Create the repo skeleton, vendor the 4 core modules from the source project unchanged, port the synthetic-SCIP test fixtures, and prove the decoder + index reader work via ported tests (TDD: fixtures + tests land before vendored modules are wired).
 
 ## Requirements
 
@@ -22,17 +22,17 @@ Create the repo skeleton, vendor the 4 core modules from polaris-ci unchanged, p
 
 ## Architecture
 
-Package `src/codeintel/` (snake_case modules per Python convention). Vendored files keep source names so future diffs against polaris-ci stay trivial. No `__init__` re-exports beyond package marker.
+Package `src/codeintel/` (snake_case modules per Python convention). Vendored files keep source names so future diffs against the source project stay trivial. No `__init__` re-exports beyond package marker.
 
 ## Related Code Files
 
 - Create: `pyproject.toml` (uv, requires-python >=3.12, hatchling or uv_build backend)
 - Create: `src/codeintel/__init__.py`
-- Create: `src/codeintel/scip_pb2.py` ← copy `$POLARIS_CI/src/polaris_code_intelligence/scip_pb2.py` (111 LOC, unchanged)
-- Create: `src/codeintel/scip_decoder.py` ← copy `$POLARIS_CI/.../service/scip_decoder.py` (279 LOC; fix import `polaris_code_intelligence.scip_pb2` → `codeintel.scip_pb2`)
-- Create: `src/codeintel/index_reader.py` ← copy `$POLARIS_CI/.../service/index_reader.py` (160 LOC; stdlib sqlite3 + OrderedDict LRU + threading — unchanged logic)
-- Create: `src/codeintel/models.py` ← copy the model classes `query_service.py` imports from `$POLARIS_CI/.../models.py` (only: Location, Position, DocumentSymbolEntry, CallHierarchyEntry, Freshness + whatever else query_service references — trim the FastAPI/registration models)
-- Create: `tests/fixtures/scip_encoder.py`, `tests/fixtures/synthetic_index.py` ← port from `$POLARIS_CI/tests/fixtures/` (strip polaris imports)
+- Create: `src/codeintel/scip_pb2.py` ← copy `$SOURCE_REPO/src/the_source_package/scip_pb2.py` (111 LOC, unchanged)
+- Create: `src/codeintel/scip_decoder.py` ← copy `$SOURCE_REPO/.../service/scip_decoder.py` (279 LOC; fix import `the_source_package.scip_pb2` → `codeintel.scip_pb2`)
+- Create: `src/codeintel/index_reader.py` ← copy `$SOURCE_REPO/.../service/index_reader.py` (160 LOC; stdlib sqlite3 + OrderedDict LRU + threading — unchanged logic)
+- Create: `src/codeintel/models.py` ← copy the model classes `query_service.py` imports from `$SOURCE_REPO/.../models.py` (only: Location, Position, DocumentSymbolEntry, CallHierarchyEntry, Freshness + whatever else query_service references — trim the FastAPI/registration models)
+- Create: `tests/fixtures/scip_encoder.py`, `tests/fixtures/synthetic_index.py` ← port from `$SOURCE_REPO/tests/fixtures/` (strip the source project imports)
 - Create: `tests/test_scip_decoder.py`, `tests/test_index_reader.py`
 - Create: `README.md` (one-screen: what, install, index, register)
 
@@ -52,5 +52,5 @@ Package `src/codeintel/` (snake_case modules per Python convention). Vendored fi
 
 ## Risk Assessment
 
-- Fixture coupling to polaris models → port fixtures first (step 2) to surface coupling early; inline minimal stand-ins rather than dragging extra modules.
-- protobuf version drift vs generated `scip_pb2.py` → pin `protobuf` to the major version in `$POLARIS_CI/pyproject.toml`.
+- Fixture coupling to the source project models → port fixtures first (step 2) to surface coupling early; inline minimal stand-ins rather than dragging extra modules.
+- protobuf version drift vs generated `scip_pb2.py` → pin `protobuf` to the major version in `$SOURCE_REPO/pyproject.toml`.

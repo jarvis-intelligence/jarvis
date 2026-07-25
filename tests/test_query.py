@@ -1,7 +1,8 @@
 """Tests for query.py against the real-schema fixture (see
 tests/fixtures/synthetic_index.py) — every method asserted against real
-decoded data; nothing fabricated. Ported from polaris-code-intelligence's
-test_query_service.py, targeting codeintel.query's bare-`repo`-slug API."""
+decoded data; nothing fabricated. Ported from an internal reference
+implementation's test_query_service.py, targeting codeintel.query's
+bare-`repo`-slug API."""
 
 from __future__ import annotations
 

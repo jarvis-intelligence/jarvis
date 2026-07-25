@@ -2,7 +2,7 @@
 plus a lazy lifecycle manager (spawn on first use, pidfile, health check,
 kill on exit).
 
-Ported from polaris-code-intelligence's `search_service.py`'s `search_zoekt`/
+Ported from an internal reference implementation's `search_service.py`'s `search_zoekt`/
 `_decode_line` — the authorization filtering (`_is_authorized_for_repo`,
 `filter_hits_by_authorization`) is dropped entirely: codeintel is single-
 user/local-first, every indexed repo belongs to the same person, so there is

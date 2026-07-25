@@ -4,8 +4,8 @@ defn_enclosing_ranges), with genuine zstd+protobuf occurrence blobs built via
 tests/fixtures/scip_encoder.py.
 
 DDL below is copied verbatim (`.schema` output, 2026-07-11) from a real index
-produced against `luz_next` at
-``.local-filestore/scip/axonivy-prod/luz_next/master/index-a32bf02baa47103108c7a69c321a67c9cfb19be9.db``
+produced against `acme-app` at
+``.local-filestore/scip/acme-prod/acme-app/master/index-a32bf02baa47103108c7a69c321a67c9cfb19be9.db``
 (gitignored, local-only — see plan.md "Verified Ground Truth").
 
 Fixture content models a small deterministic TypeScript-like repo:
@@ -22,10 +22,10 @@ Fixture content models a small deterministic TypeScript-like repo:
       occurrences whose `EnclosingRange` has fewer than 3 elements).
       Deliberately encoded with a COMBINED `symbol_roles` bitmask
       (Definition | Generated = 17, not a bare 1) — `mentions.role` is
-      verified (2026-07-11, against both the real luz_next index and
+      verified (2026-07-11, against both the real acme-app index and
       `convert.go`'s `insertOccurrenceData`) to be the RAW `SymbolRoles`
       bitmask value the converter saw for that (chunk, symbol) pair, not a
-      normalized 0/1 boolean; luz_next happens to only ever produce 0 or 1
+      normalized 0/1 boolean; acme-app happens to only ever produce 0 or 1
       because no occurrence there combines role bits, but the schema does
       not guarantee that. This row regression-tests that `get_definitions`
       filters `mentions.role` with a bitwise AND against the Definition

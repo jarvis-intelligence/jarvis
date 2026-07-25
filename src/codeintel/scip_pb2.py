@@ -6,7 +6,7 @@
 # Generated from `scip.proto` at sourcegraph/scip tag v0.7.0 (same pin as
 # pipeline/publish.sh's SCIP_CONVERTER_VERSION), the schema the real
 # `scip expt-convert` output (chunks.occurrences / global_symbols.relationships
-# blobs) is framed against — verified against a real luz_next index on
+# blobs) is framed against — verified against a real acme-app index on
 # 2026-07-11 (plan.md "Verified Ground Truth").
 #
 # Source: https://raw.githubusercontent.com/sourcegraph/scip/v0.7.0/scip.proto
@@ -16,7 +16,7 @@
 #   curl -sS -o /tmp/scip.proto \
 #     https://raw.githubusercontent.com/sourcegraph/scip/v0.7.0/scip.proto
 #   uv run --with grpcio-tools python -m grpc_tools.protoc \
-#     -I/tmp --python_out=src/polaris_code_intelligence /tmp/scip.proto
+#     -I/tmp --python_out=src/codeintel /tmp/scip.proto
 #   # then re-apply this header block (protoc overwrites the whole file)
 #
 # The `protobuf` runtime dependency in pyproject.toml must stay >= the

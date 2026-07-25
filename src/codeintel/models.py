@@ -1,6 +1,6 @@
 """Plain dataclasses for the nav-tool result shapes.
 
-Trimmed from polaris-code-intelligence's pydantic `models.py` (that file also
+Trimmed from an internal reference implementation's pydantic `models.py` (that file also
 carries FastAPI/registration/stats/blast-radius models codeintel doesn't
 need). Dataclasses instead of pydantic here: MCP tool functions in
 `server.py` return dicts built from these directly (`dataclasses.asdict`),

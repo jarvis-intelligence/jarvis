@@ -4,11 +4,11 @@ Date: 2026-07-24 | Mode: --research | Status: design approved by user
 
 ## Problem Statement
 
-Implement `codeintel` per `~/Projects/epost-workspace/polaris-ai-plaform/plans/personal-code-intelligence-plan.html`: personal, local-first, cloud-ready code intelligence MCP server. Greenfield repo (`~/Projects/codeintel` — only docs/assets exist). Vendor core IP from `polaris-code-intelligence` (polaris-ci).
+Implement `codeintel` per `<source-plan>`: personal, local-first, cloud-ready code intelligence MCP server. Greenfield repo (`~/Projects/codeintel` — only docs/assets exist). Vendor core IP from `the source project`.
 
 ## Scout Findings (load-bearing)
 
-- **Source repo**: `~/Projects/epost-workspace/polaris-ai-plaform/polaris-code-intelligence/src/polaris_code_intelligence/`
+- **Source repo**: `<source-project>/src/the_source_package/`
   - Vendorable: `scip_pb2.py` (111 LOC), `service/scip_decoder.py` (279), `service/index_reader.py` (160), `service/query_service.py` (522), `service/search_service.py` (225), `repository/registry_store.py` (446), `service/graph_extraction.py` (209), `repository/graph_store.py` (303). Tests + fixtures in `tests/`.
 - **Core uses stdlib `sqlite3` (sync) — NOT SQLAlchemy/aiosqlite.** Plan's dep list over-specified; drop both deps, port verbatim.
 - `query_service.py` battle-tested: verified ground-truth notes (`mentions.role` bitmask AND-filter, scip expt-convert v0.7.0 schema).
@@ -22,7 +22,7 @@ Implement `codeintel` per `~/Projects/epost-workspace/polaris-ai-plaform/plans/p
 |---|---|---|
 | Scope round 1 | **Phase 0–3** (full: nav + search + CLI + graph/blastRadius + watcher) | Against initial P0–2 recommendation; accepted — all portable code exists, phases ship incrementally |
 | Search backend | **Zoekt embedded** | Initially recommended ripgrep; withdrawn after scout confirmed full zoekt toolchain installed + verified `search_service.py` port path |
-| Validation targets | **polaris-ui (TS) + polaris-ci (Python)** | Proves both indexers + language auto-detection |
+| Validation targets | **a TS validation repo (TS) + the source project (Python)** | Proves both indexers + language auto-detection |
 | MCP registration | **User scope** (`claude mcp add --scope user`) | Personal multi-repo tool |
 | Deps | `mcp[cli]`, `protobuf`, `zstandard`, `httpx`, `watchdog` (P3) | No SQLAlchemy/aiosqlite; argparse CLI (stdlib) |
 
@@ -41,7 +41,7 @@ Module map (target ← source):
 | `src/codeintel/` | Source | Change |
 |---|---|---|
 | `scip_pb2.py`, `scip_decoder.py`, `index_reader.py` | same | vendored unchanged |
-| `query.py` | `query_service.py` | Bitbucket freshness → `git rev-parse HEAD` |
+| `query.py` | `query_service.py` | hosted-git freshness → `git rev-parse HEAD` |
 | `search.py` | `search_service.py` | + zoekt-webserver subprocess lifecycle (lazy start, pidfile, health check) |
 | `registry.py` | `registry_store.py` | drop state machine; keep repos table (path, language, SHA, last_indexed, status) |
 | `graph.py` | `graph_extraction.py` + `graph_store.py` | port for blastRadius (2-hop BFS) |
@@ -53,8 +53,8 @@ Storage: `~/.codeintel/repos/{project}/{repo}/index-{sha}.db` + `current` pointe
 
 ## Phases
 
-- **P0 (~2h)**: repo scaffold, pyproject (uv, py3.12+), vendor 4 modules, decoder unit test green (port fixture from polaris-ci tests).
-- **P1 (~6h)**: server.py + query.py + getIndexStatus. Acceptance: manual-index polaris-ui + polaris-ci; goToDefinition/findReferences hand-verified on known symbols; registered user-scope in Claude Code.
+- **P0 (~2h)**: repo scaffold, pyproject (uv, py3.12+), vendor 4 modules, decoder unit test green (port fixture from the source project tests).
+- **P1 (~6h)**: server.py + query.py + getIndexStatus. Acceptance: manual-index a TS validation repo + the source project; goToDefinition/findReferences hand-verified on known symbols; registered user-scope in Claude Code.
 - **P2 (~4h)**: index_cli + registry + search.py + zoekt pipeline. Acceptance: `codeintel index .` end-to-end both repos; searchCode returns expected hits; atomic swap (no downtime on reindex).
 - **P3 (~4h)**: graph.py + blastRadius + watchdog auto-reindex (5s debounce). Acceptance: blastRadius 2-hop correct on known dep; edit→auto-reindex→fresh status.
 
@@ -80,5 +80,5 @@ From Claude Code (user scope), on both target repos: all 8 tools return correct 
 
 ## Unresolved Questions
 
-- polaris-ui language mix unconfirmed (assumed TS) — verify at P1 acceptance; fallback: any TS repo in workspace.
+- a TS validation repo language mix unconfirmed (assumed TS) — verify at P1 acceptance; fallback: any TS repo in workspace.
 - Zoekt shard scope: per-repo shards vs single shard dir — decide in plan (lean per-repo, matches index.db layout).

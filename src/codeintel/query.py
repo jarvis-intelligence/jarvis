@@ -1,15 +1,15 @@
 """Query layer: SQL + occurrence-blob decoding against the `scip expt-convert`
 v0.7.0 schema (documents/chunks/global_symbols/mentions/defn_enclosing_ranges).
 
-Ported near-verbatim from polaris-code-intelligence's `query_service.py`.
+Ported near-verbatim from an internal reference implementation's `query_service.py`.
 Two changes from the source:
 
 * No project/branch dimension — every method takes a bare `repo` slug
   (see config.py); the vendored `IndexConnectionCache` 3-tuple is filled in
   with pinned constants under the hood.
 * `get_index_status` compares the published commit against a local
-  `git rev-parse HEAD` instead of a live Bitbucket API call — this is a
-  personal, local-first tool with no Bitbucket to ask. It is therefore
+  `git rev-parse HEAD` instead of a live git-hosting API call — this is a
+  personal, local-first tool with no remote service to ask. It is therefore
   synchronous, not async, and takes an optional `repo_path` (the git
   working directory to check); omitted, it can't determine staleness and
   reports the same honest "we know the commit, we haven't compared it"

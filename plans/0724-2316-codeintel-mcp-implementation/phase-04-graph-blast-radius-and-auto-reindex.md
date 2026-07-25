@@ -9,7 +9,7 @@ dependencies: [3]
 
 # Phase 4: Graph Blast Radius and Auto-Reindex
 
-`$POLARIS_CI` = `~/Projects/epost-workspace/polaris-ai-plaform/polaris-code-intelligence`
+`$SOURCE_REPO` = `<source-project>`
 
 ## Overview
 
@@ -22,14 +22,14 @@ Port the package dependency graph + blastRadius (2-hop BFS), and add watchdog-ba
 
 ## Architecture
 
-- `graph.py`: port `$POLARIS_CI/.../service/graph_extraction.py` (209 LOC — extracts package deps during indexing) + `$POLARIS_CI/.../repository/graph_store.py` (303 LOC — nodes/edges tables + 2-hop BFS query). Adapt storage to registry.db; strip Postgres/Alembic assumptions if any (source targets SQLAlchemy-free? verify — if graph_store uses SQLAlchemy, rewrite its ~10 queries on stdlib sqlite3 keeping SQL text).
+- `graph.py`: port `$SOURCE_REPO/.../service/graph_extraction.py` (209 LOC — extracts package deps during indexing) + `$SOURCE_REPO/.../repository/graph_store.py` (303 LOC — nodes/edges tables + 2-hop BFS query). Adapt storage to registry.db; strip Postgres/Alembic assumptions if any (source targets SQLAlchemy-free? verify — if graph_store uses SQLAlchemy, rewrite its ~10 queries on stdlib sqlite3 keeping SQL text).
 - `index_cli.py`: pipeline gains graph-extraction step post-convert; `codeintel watch` subcommand — watchdog observer, 5s debounce per repo, triggers reindex.
 - `server.py`: register blastRadius (tool #8).
 
 ## Related Code Files
 
 - Create: `src/codeintel/graph.py`
-- Create: `tests/test_graph.py` (port graph tests from `$POLARIS_CI/tests/` if present — check `test_api_dashboard.py`/graph tests; else new: synthetic 3-package chain A→B→C, blastRadius(C) = {B 1-hop, A 2-hop}), `tests/test_watch.py` (debounce logic unit test — fake clock, no real watcher)
+- Create: `tests/test_graph.py` (port graph tests from `$SOURCE_REPO/tests/` if present — check `test_api_dashboard.py`/graph tests; else new: synthetic 3-package chain A→B→C, blastRadius(C) = {B 1-hop, A 2-hop}), `tests/test_watch.py` (debounce logic unit test — fake clock, no real watcher)
 - Modify: `src/codeintel/index_cli.py`, `src/codeintel/server.py`, `pyproject.toml` (add `watchdog`), `README.md`
 
 ## Implementation Steps (TDD order)
@@ -37,7 +37,7 @@ Port the package dependency graph + blastRadius (2-hop BFS), and add watchdog-ba
 1. Check source for existing graph tests; port or write `tests/test_graph.py` (extraction from synthetic index + BFS assertions). **Red** → port `graph.py`. **Green.**
 2. `tests/test_watch.py` (debounce coalesces burst edits into one trigger). **Red** → watch subcommand. **Green.**
 3. Wire blastRadius into server; extend `tests/test_server_tools.py` (8 tools).
-4. Acceptance: blastRadius on polaris-ci internal package with known dependents — hand-verify 2-hop set; `codeintel watch` + edit file → single reindex after ~5s → `getIndexStatus` fresh.
+4. Acceptance: blastRadius on the source project internal package with known dependents — hand-verify 2-hop set; `codeintel watch` + edit file → single reindex after ~5s → `getIndexStatus` fresh.
 
 ## Success Criteria
 

@@ -5,9 +5,9 @@ Personal, local-first code intelligence MCP server. SCIP-backed navigation
 Zoekt-backed lexical search, exposed as MCP tools to Claude Code, Cursor, or
 any MCP client — over stdio, no server, no auth, no network.
 
-Core query/search logic is ported from `polaris-code-intelligence`; the
-enterprise shell (FastAPI, Postgres, Bitbucket auth, Cloud Build) is dropped in
-favor of a single stdio process reading local SQLite files.
+Core query/search logic is ported from an internal reference implementation;
+the enterprise shell (FastAPI, Postgres, hosted-git auth, Cloud Build) is
+dropped in favor of a single stdio process reading local SQLite files.
 
 ## Architecture
 

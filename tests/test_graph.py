@@ -1,5 +1,5 @@
 """Tests for graph.py: package-name extraction from a real-schema index.db
-(ported logic from polaris-code-intelligence's graph_extraction.py, adapted
+(ported logic from an internal reference implementation's graph_extraction.py, adapted
 to codeintel's bare-repo-slug keying) and the 2-hop bounded BFS traversal
 that backs blastRadius."""
 

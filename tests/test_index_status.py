@@ -1,5 +1,5 @@
 """getIndexStatus: fresh -> commit -> stale transition, and the missing-repo
-case — using a real temp git repo instead of a live Bitbucket call."""
+case — using a real temp git repo instead of a live hosted-git API call."""
 
 from __future__ import annotations
 

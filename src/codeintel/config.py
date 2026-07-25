@@ -1,6 +1,6 @@
 """Data-dir and repo-slug resolution for codeintel's single-tenant layout.
 
-`index_reader.IndexConnectionCache` keys entries on the polaris-ci 3-tuple
+`index_reader.IndexConnectionCache` keys entries on the vendored source's 3-tuple
 (project, repo, branch) — vendored unchanged (Phase 1). codeintel has no
 project/branch dimension (single user, one index per repo), so those two
 are pinned constants here and every repo maps to a bare slug. On disk this

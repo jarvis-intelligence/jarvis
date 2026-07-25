@@ -4,7 +4,7 @@ This is the ONLY module that imports `scip_pb2`/`zstandard` — the rest of the
 codebase works with the small local dataclasses below, staying protobuf-free
 (phase-01's isolation-seam requirement).
 
-Blob framing (verified against both the real luz_next index AND the v0.7.0
+Blob framing (verified against both the real acme-app index AND the v0.7.0
 `expt-convert` source, 2026-07-11 — see plan.md "Verified Ground Truth" and
 the phase-1 report):
 
@@ -19,7 +19,7 @@ the phase-1 report):
   global_symbols` statement lists only `(symbol, display_name, kind,
   documentation, enclosing_symbol)`; there is no code path that populates
   `relationships` at all. This is a structural gap in v0.7.0's output, not
-  an artifact of luz_next's content — every real v0.7.0 index has
+  an artifact of acme-app's content — every real v0.7.0 index has
   `relationships IS NULL` for every row. `decode_relationships` below
   therefore has no real blob to verify a framing against; it decodes a bare
   serialized `scip.SymbolInformation` message (its `relationships` field) —
@@ -184,7 +184,7 @@ class SymbolPackage:
 # SCIP symbols for a package-less/ambient context (e.g. TypeScript's global
 # `lib.dom.d.ts` typings, which ship with the compiler, not a package.json)
 # use "." as a placeholder for both name and version — verified in the real
-# luz_next index (e.g. ``scip-typescript npm . . `index.d.ts`/...``). These
+# acme-app index (e.g. ``scip-typescript npm . . `index.d.ts`/...``). These
 # carry no real package identity and must not become a package-graph node.
 _UNSPECIFIED_PACKAGE_TOKEN = "."
 
@@ -234,7 +234,7 @@ def parse_symbol_package(symbol: str) -> SymbolPackage | None:
     `global_symbols.symbol` string, or `None` if the symbol carries no real
     package identity.
 
-    Real SCIP symbols (verified against a real luz_next index, see
+    Real SCIP symbols (verified against a real acme-app index, see
     phase-04-dependency-graph-foundation.md's "Spike Result" section) follow
     the generic, language-agnostic grammar `<scheme> <manager> <name>
     <version> <descriptor>` — e.g.
@@ -269,7 +269,7 @@ def parse_symbol_package(symbol: str) -> SymbolPackage | None:
 
 def kind_name(kind: int | None) -> str | None:
     """Map a `SymbolInformation.Kind` int to its name, `None` for unknown
-    ints or a `None` input (global_symbols.kind is NULL in luz_next today —
+    ints or a `None` input (global_symbols.kind is NULL in acme-app today —
     an honest gap in the converter's output, not a decode failure)."""
     if kind is None:
         return None
