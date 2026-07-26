@@ -200,3 +200,103 @@ def test_single_line_range_message_shape():
     r.start_character = 2
     r.end_character = 9
     assert (r.line, r.start_character, r.end_character) == (4, 2, 9)
+
+
+def test_decode_occurrences_reads_single_line_typed_range():
+    """The case that broke Swift: only single_line_range is set."""
+    from codeintel import scip_pb2
+    from codeintel.scip_decoder import decode_occurrences
+    from tests.fixtures.scip_encoder import encode_occurrences
+
+    occ = scip_pb2.Occurrence()
+    occ.symbol = "swift . `s:5MyLib7GreeterV`."
+    occ.symbol_roles = scip_pb2.Definition
+    occ.single_line_range.line = 7
+    occ.single_line_range.start_character = 4
+    occ.single_line_range.end_character = 11
+
+    decoded = decode_occurrences(encode_occurrences([occ]))
+    assert len(decoded) == 1
+    # SCIP single-line wire order: [start_line, start_char, end_char]
+    assert decoded[0].range == (7, 4, 11)
+    assert decoded[0].is_definition()
+
+
+def test_decode_occurrences_reads_multi_line_typed_range():
+    from codeintel import scip_pb2
+    from codeintel.scip_decoder import decode_occurrences
+    from tests.fixtures.scip_encoder import encode_occurrences
+
+    occ = scip_pb2.Occurrence()
+    occ.symbol = "sym"
+    occ.multi_line_range.start_line = 3
+    occ.multi_line_range.start_character = 2
+    occ.multi_line_range.end_line = 5
+    occ.multi_line_range.end_character = 8
+
+    decoded = decode_occurrences(encode_occurrences([occ]))
+    # SCIP multi-line wire order: [start_line, start_char, end_line, end_char]
+    assert decoded[0].range == (3, 2, 5, 8)
+
+
+def test_decode_occurrences_still_reads_deprecated_range():
+    """Older indexes set only the deprecated repeated-int32 field."""
+    from codeintel import scip_pb2
+    from codeintel.scip_decoder import decode_occurrences
+    from tests.fixtures.scip_encoder import encode_occurrences
+
+    occ = scip_pb2.Occurrence()
+    occ.symbol = "sym"
+    occ.range.extend([2, 1, 9])
+
+    decoded = decode_occurrences(encode_occurrences([occ]))
+    assert decoded[0].range == (2, 1, 9)
+
+
+def test_typed_range_takes_precedence_over_deprecated_range():
+    """scip.proto: "When both are present, typed_range takes precedence"."""
+    from codeintel import scip_pb2
+    from codeintel.scip_decoder import decode_occurrences
+    from tests.fixtures.scip_encoder import encode_occurrences
+
+    occ = scip_pb2.Occurrence()
+    occ.symbol = "sym"
+    occ.range.extend([99, 99, 99])
+    occ.single_line_range.line = 1
+    occ.single_line_range.start_character = 2
+    occ.single_line_range.end_character = 3
+
+    decoded = decode_occurrences(encode_occurrences([occ]))
+    assert decoded[0].range == (1, 2, 3), "typed_range must win"
+
+
+def test_decode_occurrences_tolerates_absent_range():
+    from codeintel import scip_pb2
+    from codeintel.scip_decoder import decode_occurrences
+    from tests.fixtures.scip_encoder import encode_occurrences
+
+    occ = scip_pb2.Occurrence()
+    occ.symbol = "sym"
+
+    decoded = decode_occurrences(encode_occurrences([occ]))
+    assert decoded[0].range == ()
+
+
+def test_zero_valued_typed_range_is_preserved_not_treated_as_absent():
+    """A range at line 0, chars 0-1 is real data, not "missing".
+
+    Guards against resolving the range with a falsy check that discards a
+    legitimate all-zero start position.
+    """
+    from codeintel import scip_pb2
+    from codeintel.scip_decoder import decode_occurrences
+    from tests.fixtures.scip_encoder import encode_occurrences
+
+    occ = scip_pb2.Occurrence()
+    occ.symbol = "sym"
+    occ.single_line_range.line = 0
+    occ.single_line_range.start_character = 0
+    occ.single_line_range.end_character = 1
+
+    decoded = decode_occurrences(encode_occurrences([occ]))
+    assert decoded[0].range == (0, 0, 1)

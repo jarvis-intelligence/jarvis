@@ -47,6 +47,7 @@ __all__ = [
     "decode_occurrences",
     "decode_relationships",
     "kind_name",
+    "occurrence_range",
     "parse_symbol_package",
     "scip_range_to_positions",
 ]
@@ -101,6 +102,52 @@ def _decompress(blob: bytes) -> bytes:
         raise OccurrenceDecodeError(f"zstd decompression failed: {exc}") from exc
 
 
+def _typed_range_to_wire(occ) -> tuple[int, ...]:
+    """Convert the `typed_range` oneof into SCIP's packed wire order.
+
+    Returns () when the oneof is unset. SCIP packs single-line ranges as
+    [start_line, start_char, end_char] and multi-line as
+    [start_line, start_char, end_line, end_char] — the two shapes
+    `scip_range_to_positions()` already understands, so every downstream
+    caller keeps working unchanged.
+    """
+    which = occ.WhichOneof("typed_range")
+    if which == "single_line_range":
+        r = occ.single_line_range
+        return (r.line, r.start_character, r.end_character)
+    if which == "multi_line_range":
+        r = occ.multi_line_range
+        return (r.start_line, r.start_character, r.end_line, r.end_character)
+    return ()
+
+
+def occurrence_range(occ) -> tuple[int, ...]:
+    """Resolve an occurrence's source range, newest encoding first.
+
+    Mirrors upstream Go's `Occurrence.SourceRange()`: scip.proto specifies
+    that `typed_range` takes precedence when both encodings are set, and the
+    repeated-int32 `range` field is deprecated. Reading only the deprecated
+    field makes modern indexers (scip-swift emits solely
+    `single_line_range`) look position-less.
+    """
+    typed = _typed_range_to_wire(occ)
+    if typed:
+        return typed
+    return tuple(occ.range)
+
+
+def _enclosing_range(occ) -> tuple[int, ...]:
+    """Counterpart of `occurrence_range` for the enclosing-range fields."""
+    which = occ.WhichOneof("typed_enclosing_range")
+    if which == "single_line_enclosing_range":
+        r = occ.single_line_enclosing_range
+        return (r.line, r.start_character, r.end_character)
+    if which == "multi_line_enclosing_range":
+        r = occ.multi_line_enclosing_range
+        return (r.start_line, r.start_character, r.end_line, r.end_character)
+    return tuple(occ.enclosing_range)
+
+
 def decode_occurrences(blob: bytes) -> list[ScipOccurrence]:
     """Decompress + parse a ``chunks.occurrences`` blob into occurrences.
 
@@ -115,10 +162,10 @@ def decode_occurrences(blob: bytes) -> list[ScipOccurrence]:
 
     return [
         ScipOccurrence(
-            range=tuple(occ.range),
+            range=occurrence_range(occ),
             symbol=occ.symbol,
             symbol_roles=occ.symbol_roles,
-            enclosing_range=tuple(occ.enclosing_range),
+            enclosing_range=_enclosing_range(occ),
         )
         for occ in document.occurrences
     ]
