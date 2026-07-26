@@ -1,5 +1,12 @@
 # Upstream Fix: Populate `global_symbols.relationships` in `scip expt-convert`
 
+> **STATUS: Tasks 1-4 executed.** PR opened as
+> [scip-code/scip#465](https://github.com/scip-code/scip/pull/465) — 12/12 CI checks
+> green, both commits signed and authored as `phuongddx <95doanphuong@gmail.com>`.
+> Local clone: `~/Projects/scip-upstream`, branch
+> `fix/convert-populate-relationships`. Task 5 (link the PR from the codeintel
+> plan) is done. Remaining: await maintainer review.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Land a PR on [scip-code/scip](https://github.com/scip-code/scip) making `scip expt-convert` write `global_symbols.relationships`, closing the half of [#464](https://github.com/scip-code/scip/issues/464) that unblocks type-hierarchy consumers.
