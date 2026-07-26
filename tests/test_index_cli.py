@@ -17,9 +17,13 @@ from codeintel.index_cli import UnsupportedLanguageError, detect_language, index
 from codeintel.registry import Registry
 
 FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_py_repo"
+SWIFT_FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_swift_repo"
 
 _REQUIRED_BINARIES = ["scip-python", "scip", "zoekt-index"]
 _missing = [b for b in _REQUIRED_BINARIES if shutil.which(b) is None]
+
+_SWIFT_REQUIRED_BINARIES = ["scip-swift", "scip", "zoekt-index"]
+_missing_swift = [b for b in _SWIFT_REQUIRED_BINARIES if shutil.which(b) is None]
 
 
 def test_detect_language_picks_python_for_py_files(tmp_path: Path):
@@ -180,3 +184,32 @@ def test_index_repo_marks_failed_on_indexer_error(tmp_path: Path, monkeypatch):
         assert entry.status == "failed"
     finally:
         registry.close()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing_swift, reason=f"missing required binaries: {_missing_swift}")
+def test_index_repo_end_to_end_for_swift_repo(tmp_path: Path):
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(SWIFT_FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+
+    data_root = tmp_path / "data"
+    slug = index_repo(repo_dir, root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "indexed"
+        assert entry.language == "swift"
+    finally:
+        registry.close()
+
+    target_dir = config.index_dir(slug, data_root)
+    pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
+    db = sqlite3.connect(f"file:{target_dir / pointer}?mode=ro", uri=True)
+    try:
+        count = db.execute("SELECT COUNT(*) FROM global_symbols").fetchone()[0]
+        assert count > 0
+    finally:
+        db.close()
