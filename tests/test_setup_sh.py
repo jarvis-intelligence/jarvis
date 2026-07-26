@@ -309,6 +309,69 @@ def test_install_scip_skips_when_already_present(tmp_path):
     assert "already" in combined or "skip" in combined
 
 
+# --------------------------------------------------------- npm-based indexers ----
+
+
+def test_install_npm_indexer_warns_and_continues_without_npm(tmp_path):
+    """Missing npm is a soft skip with instructions, not a hard failure."""
+    empty_bin = tmp_path / "empty"
+    empty_bin.mkdir()
+    result = run_func(
+        'install_npm_indexer scip-typescript @sourcegraph/scip-typescript',
+        env={"PATH": f"{empty_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "npm" in combined
+
+
+def test_install_npm_indexer_skips_when_binary_present(tmp_path):
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    stub = fake_bin / "scip-typescript"
+    stub.write_text("#!/bin/sh\ntrue\n")
+    stub.chmod(0o755)
+    result = run_func(
+        'install_npm_indexer scip-typescript @sourcegraph/scip-typescript',
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "already" in combined or "skip" in combined
+
+
+def test_install_npm_indexer_invokes_npm_with_correct_package(tmp_path):
+    """Stub npm and assert the exact package name passed to it."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    log = tmp_path / "npm-args.txt"
+    npm_stub = fake_bin / "npm"
+    npm_stub.write_text(f'#!/bin/sh\necho "$@" > {log}\n')
+    npm_stub.chmod(0o755)
+    result = run_func(
+        'install_npm_indexer scip-python @sourcegraph/scip-python',
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "@sourcegraph/scip-python" in log.read_text()
+    assert "-g" in log.read_text()
+
+
+def test_scip_typescript_wrapper_uses_sourcegraph_package(tmp_path):
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    log = tmp_path / "args.txt"
+    npm_stub = fake_bin / "npm"
+    npm_stub.write_text(f'#!/bin/sh\necho "$@" > {log}\n')
+    npm_stub.chmod(0o755)
+    result = run_func(
+        'install_scip_typescript',
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    assert "@sourcegraph/scip-typescript" in log.read_text()
+
+
 # ----------------------------------------------------------- zoekt installer ----
 
 

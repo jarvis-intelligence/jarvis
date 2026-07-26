@@ -321,6 +321,41 @@ install_scip_swift() {
 	fi
 }
 
+# scip-typescript and scip-python are plain npm globals whose bin name matches
+# the binary, so one helper covers both.
+#
+#   install_npm_indexer <binary_name> <npm_package>
+install_npm_indexer() {
+	_bin=$1
+	_pkg=$2
+
+	if [ "${FORCE:-0}" != "1" ] && have_cmd "$_bin"; then
+		log_info "${_bin}: already installed, skipping"
+		return 0
+	fi
+
+	if ! have_cmd npm; then
+		log_warn "${_bin}: npm not found — skipping. Install Node.js, then: npm install -g ${_pkg}"
+		return 0
+	fi
+
+	log_info "${_bin}: installing via npm"
+	if npm install -g "$_pkg" >/dev/null 2>&1; then
+		log_info "${_bin}: installed"
+	else
+		log_error "${_bin}: npm install failed — try manually: npm install -g ${_pkg}"
+		return 1
+	fi
+}
+
+install_scip_typescript() {
+	install_npm_indexer scip-typescript @sourcegraph/scip-typescript
+}
+
+install_scip_python() {
+	install_npm_indexer scip-python @sourcegraph/scip-python
+}
+
 # ----------------------------------------------------------------- main ------
 
 main() {
