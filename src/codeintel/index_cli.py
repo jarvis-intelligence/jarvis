@@ -293,6 +293,26 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     return _cmd_index(argparse.Namespace(path=repo.path, slug=repo.slug))
 
 
+def _remove_zoekt_shards(slug: str, root: Path | None = None) -> list[Path]:
+    """Delete the Zoekt shards belonging to `slug`.
+
+    Zoekt names each shard `<repo-name>_v<N>.<NNNNN>.zoekt`, and Task 4 makes
+    `<repo-name>` the slug. The `_v` in the glob is deliberate: a bare
+    `slug*` would let "api" also match "api-gateway"'s shard.
+
+    Without this, `forget` left the shard in place and `searchCode` kept
+    returning hits for a repo codeintel no longer knows about.
+    """
+    zoekt_dir = config.data_dir(root) / ".zoekt"
+    if not zoekt_dir.is_dir():
+        return []
+    removed: list[Path] = []
+    for shard in sorted(zoekt_dir.glob(f"{slug}_v*.zoekt")):
+        shard.unlink(missing_ok=True)
+        removed.append(shard)
+    return removed
+
+
 def _cmd_forget(args: argparse.Namespace) -> int:
     try:
         slug = config.repo_slug(args.slug)
@@ -310,6 +330,7 @@ def _cmd_forget(args: argparse.Namespace) -> int:
     index_dir = config.index_dir(slug)
     if index_dir.exists():
         shutil.rmtree(index_dir)
+    _remove_zoekt_shards(slug)
     print(f"forgot {slug}")
     return 0
 

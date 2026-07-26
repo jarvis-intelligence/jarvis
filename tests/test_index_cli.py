@@ -306,3 +306,72 @@ def test_zoekt_shard_is_named_by_slug_not_directory(tmp_path: Path):
     names = [s.name for s in shards]
     assert any(n.startswith("totally-different-slug") for n in names), names
     assert not any(n.startswith("directoryname") for n in names), names
+
+
+def test_remove_zoekt_shards_deletes_matching_shard(tmp_path: Path, monkeypatch):
+    from codeintel.index_cli import _remove_zoekt_shards
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir(parents=True)
+    (zoekt_dir / "myslug_v16.00000.zoekt").write_bytes(b"x")
+    (zoekt_dir / "myslug_v16.00001.zoekt").write_bytes(b"x")
+    (zoekt_dir / "otherslug_v16.00000.zoekt").write_bytes(b"x")
+
+    removed = _remove_zoekt_shards("myslug", root=tmp_path)
+
+    assert len(removed) == 2
+    assert not (zoekt_dir / "myslug_v16.00000.zoekt").exists()
+    assert not (zoekt_dir / "myslug_v16.00001.zoekt").exists()
+    assert (zoekt_dir / "otherslug_v16.00000.zoekt").exists(), "must not touch other repos"
+
+
+def test_remove_zoekt_shards_does_not_prefix_match_other_slugs(tmp_path: Path):
+    """"api" must not delete "api-gateway"'s shard."""
+    from codeintel.index_cli import _remove_zoekt_shards
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir(parents=True)
+    (zoekt_dir / "api_v16.00000.zoekt").write_bytes(b"x")
+    (zoekt_dir / "api-gateway_v16.00000.zoekt").write_bytes(b"x")
+
+    removed = _remove_zoekt_shards("api", root=tmp_path)
+
+    assert len(removed) == 1
+    assert not (zoekt_dir / "api_v16.00000.zoekt").exists()
+    assert (zoekt_dir / "api-gateway_v16.00000.zoekt").exists()
+
+
+def test_remove_zoekt_shards_is_safe_when_absent(tmp_path: Path):
+    from codeintel.index_cli import _remove_zoekt_shards
+
+    assert _remove_zoekt_shards("nothing-here", root=tmp_path) == []
+
+
+def test_forget_removes_the_zoekt_shard(tmp_path: Path, monkeypatch, capsys):
+    """Regression: forgotten repos stayed searchable."""
+    import argparse
+
+    from codeintel import config
+    from codeintel.index_cli import _cmd_forget
+    from codeintel.registry import Registry
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("goneslug", str(tmp_path / "repo"), "python", "abc123", "indexed")
+    registry.close()
+
+    index_dir = config.index_dir("goneslug")
+    index_dir.mkdir(parents=True, exist_ok=True)
+    (index_dir / "index-abc123.db").write_bytes(b"x")
+
+    zoekt_dir = config.data_dir() / ".zoekt"
+    zoekt_dir.mkdir(parents=True, exist_ok=True)
+    shard = zoekt_dir / "goneslug_v16.00000.zoekt"
+    shard.write_bytes(b"x")
+
+    rc = _cmd_forget(argparse.Namespace(slug="goneslug"))
+
+    assert rc == 0
+    assert not shard.exists(), "a forgotten repo must not stay searchable"
+    assert not index_dir.exists()
