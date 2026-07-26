@@ -222,9 +222,11 @@ so `typeHierarchy` is empty on real indexes.
 ### Test File Organization
 
 Each test file mirrors its source module:
-- `test_models.py` → `models.py`
 - `test_query.py` → `query.py`
+- `test_graph.py` → `graph.py`
 - etc.
+
+(`models.py` and `__init__.py` are the only modules without a dedicated test file — see Test Coverage below.)
 
 ### Unit vs Integration Tests
 

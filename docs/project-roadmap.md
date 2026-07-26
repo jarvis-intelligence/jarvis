@@ -15,11 +15,20 @@ See [`plans/0724-2316-codeintel-mcp-implementation/`](../plans/0724-2316-codeint
 | **3** | Indexer CLI, registry, embedded Zoekt + searchCode | ✓ July 25 | End-to-end index pipeline, search working |
 | **4** | blastRadius (package graph) + codeintel watch (auto-reindex) | ✓ July 25 | Graph BFS tested, watch debounce functional |
 
+### Post-Phase-4: Swift Detection (Landed, July 25)
+
+`detect_language()` now recognizes `.swift` and routes majority-Swift repos to `scip-swift`,
+and `DerivedData`/`.build` are excluded from the extension-majority scan. The `scip-swift`
+converter itself does not exist upstream — this is an external prerequisite tracked in
+[`openspec/specs/swift-language-indexing/spec.md`](../openspec/specs/swift-language-indexing/spec.md),
+not something `codeintel` builds. Swift repos raise `IndexingError` until that binary exists
+and is installed on `PATH`.
+
 **Acceptance criteria met:**
 - ✓ All 8 MCP tools return correct results on real TypeScript/Python repos
 - ✓ `codeintel index` end-to-end: language detection → indexer → scip expt-convert → zoekt-index → atomic publish → registry update
 - ✓ `getIndexStatus` correctly flags stale after new commits; reindex has zero query downtime
-- ✓ Test suite green: `uv run pytest` passes, 16 test files, integration tests use real binaries
+- ✓ Test suite green: `uv run pytest` passes, 11 test modules (16 files total under `tests/` with fixtures), integration tests use real binaries
 
 ---
 

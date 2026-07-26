@@ -1,20 +1,39 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context
+context: |
+  codeintel: personal, local-first code intelligence MCP server (Python 3.12+).
+  SCIP-backed navigation (goToDefinition, findReferences, callHierarchy,
+  typeHierarchy, documentSymbols) + Zoekt-backed lexical search (searchCode),
+  plus package-dependency blastRadius. Single stdio process — no server, no
+  auth, no network. 8 MCP tools total.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  Tech stack: stdlib sqlite3 (no ORM), frozen dataclasses (no Pydantic),
+  FastMCP for the stdio server, protobuf/zstandard for SCIP blob decoding,
+  httpx for the Zoekt webserver client, watchdog (optional) for `codeintel watch`.
+
+  Language support: TypeScript, Python, Java — one language per repo, picked by
+  file-extension plurality. Swift is detection-only for now (see
+  openspec/specs/swift-language-indexing) — no `scip-swift` binary exists
+  upstream yet.
+
+  Architectural guarantees (do not break silently): read-only runtime
+  (`mode=ro&immutable=1`), atomic publish via `os.replace()` pointer swap
+  (zero query downtime), rebuild-not-accumulate package graph (each reindex
+  clears + recomputes that repo's own edges).
+
+  Conventions: snake_case modules/functions, PascalCase classes/dataclasses,
+  `CODEINTEL_`-prefixed env vars, `str | None` over `Optional[str]`,
+  parameterized SQL only, broad exception → uniform `{"error": ...}` payload
+  at the MCP tool boundary.
+
+  Out of scope: cloud deployment, GUI, incremental indexing, multi-language
+  monorepo merge, stats/dashboard endpoints.
+
+# Per-artifact rules
+rules:
+  proposal:
+    - Note which of the 8 MCP tools or CLI commands (index/list/status/reindex/forget/watch) are affected
+    - Call out any change to the 3 architectural guarantees (read-only runtime, atomic publish, rebuild-not-accumulate graph)
+  tasks:
+    - Match existing module boundaries in src/codeintel/ (see docs/codebase-summary.md) rather than introducing new ones

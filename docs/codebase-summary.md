@@ -19,34 +19,34 @@ codeintel/
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
-| `__init__.py` | ~15 | Stub entry; unused (`main()` prints "Hello from codeintel!") | — |
-| `config.py` | ~60 | Data-dir + repo-slug resolution; single-tenant layout | `data_dir()`, `repo_slug()`, `index_dir()`, `PROJECT`, `BRANCH`, `DEFAULT_DATA_DIR` |
-| `models.py` | ~65 | Frozen dataclasses for nav results (Position, Range, Location, SymbolInfo, etc.) + Freshness StrEnum | `Position`, `Range`, `Location`, `SymbolInfo`, `DocumentSymbolEntry`, `CallHierarchyEntry`, `TypeHierarchyEntry`, `Freshness` |
+| `__init__.py` | 2 | Stub entry; unused (`main()` prints "Hello from codeintel!") | — |
+| `config.py` | 58 | Data-dir + repo-slug resolution; single-tenant layout | `data_dir()`, `repo_slug()`, `index_dir()`, `PROJECT`, `BRANCH`, `DEFAULT_DATA_DIR` |
+| `models.py` | 64 | Frozen dataclasses for nav results (Position, Range, Location, SymbolInfo, etc.) + Freshness StrEnum | `Position`, `Range`, `Location`, `SymbolInfo`, `DocumentSymbolEntry`, `CallHierarchyEntry`, `TypeHierarchyEntry`, `Freshness` |
 
 ### Index & Search
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
-| `index_reader.py` | ~130 | Vendored filestore reader from SCIP source; `IndexConnectionCache` — thread-safe, size-bounded cache of read-only immutable SQLite connections keyed by `(project, repo, branch, pointer_content)`, NFS-safe pointer invalidation | `IndexConnectionCache`, current pointer file handling |
-| `scip_pb2.py` | ~400+ | Generated protobuf from scip.proto v0.7.0 (do not edit, vendored codegen) | scip.Document, scip.SymbolInformation, scip.Occurrence, scip.Relationship |
-| `scip_decoder.py` | ~100 | SCIP blob decoder (zstd+protobuf); isolation seam for protobuf dependency | `scip_range_to_positions()`, `kind_name()`, `parse_symbol_package()`, decode SCIP occurrences + relationships |
-| `query.py` | ~200 | QueryService: 5 SCIP nav ops + `getIndexStatus` via raw SQL against `scip expt-convert` schema | `QueryService`, `FreshnessSnapshot`, nav result builders |
-| `search.py` | ~100 | `searchCode` backend via real httpx client to zoekt-webserver; `ZoektLifecycle` lazy-spawns `zoekt-webserver -rpc`, pidfile-tracked | `searchCode()`, `ZoektLifecycle` |
+| `index_reader.py` | 160 | Vendored filestore reader from SCIP source; `IndexConnectionCache` — thread-safe, size-bounded cache of read-only immutable SQLite connections keyed by `(project, repo, branch, pointer_content)`, NFS-safe pointer invalidation | `IndexConnectionCache`, current pointer file handling |
+| `scip_pb2.py` | 111 | Generated protobuf from scip.proto v0.7.0 (do not edit, vendored codegen) | scip.Document, scip.SymbolInformation, scip.Occurrence, scip.Relationship |
+| `scip_decoder.py` | 279 | SCIP blob decoder (zstd+protobuf); isolation seam for protobuf dependency | `scip_range_to_positions()`, `kind_name()`, `parse_symbol_package()`, decode SCIP occurrences + relationships |
+| `query.py` | 436 | QueryService: 5 SCIP nav ops + `getIndexStatus` via raw SQL against `scip expt-convert` schema | `QueryService`, `FreshnessSnapshot`, nav result builders |
+| `search.py` | 183 | `searchCode` backend via real httpx client to zoekt-webserver; `ZoektLifecycle` lazy-spawns `zoekt-webserver -rpc`, pidfile-tracked | `searchCode()`, `ZoektLifecycle` |
 
 ### Graph & Registry
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
-| `graph.py` | ~120 | Package dependency graph: sqlite3 CRUD on `packages`/`edges` tables in registry.db, `populate_graph_for_repo()` (rebuild-not-accumulate), `blast_radius()` 2-hop BFS | `GraphStore`, `extract_package_names()`, `populate_graph_for_repo()`, `blast_radius()` |
-| `registry.py` | ~80 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed) | `RegistryDb`, repo table operations |
+| `graph.py` | 363 | Package dependency graph: sqlite3 CRUD on `packages`/`edges` tables in registry.db, `populate_graph_for_repo()` (rebuild-not-accumulate), `blast_radius()` 2-hop BFS | `GraphStore`, `extract_package_names()`, `populate_graph_for_repo()`, `blast_radius()` |
+| `registry.py` | 106 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed) | `Registry`, repo table operations |
 
 ### Server & CLI
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
-| `server.py` | ~200 | MCP stdio server entry (`FastMCP("codeintel")`), registers 8 tools with thin wrappers around QueryService/ZoektLifecycle/GraphStore, uniform `{"error": ...}` error payload | MCP tool handlers: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `blastRadius` |
-| `index_cli.py` | ~300 | The `codeintel` CLI: `index_repo()` pipeline (language detection → language indexer → scip expt-convert → populate graph → zoekt-index → atomic pointer swap → registry update), `_cmd_watch` wires Debouncer to watchdog.Observer | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` |
-| `watch.py` | ~50 | `Debouncer` (pure, thread-free, injectable clock) + `should_ignore_path` (.git/node_modules/.venv/__pycache__/dist/build) | `Debouncer`, `should_ignore_path()` |
+| `server.py` | 191 | MCP stdio server entry (`FastMCP("codeintel")`), registers 8 tools with thin wrappers around QueryService/ZoektLifecycle/GraphStore, uniform `{"error": ...}` error payload | MCP tool handlers: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `blastRadius` |
+| `index_cli.py` | 356 | The `codeintel` CLI: `index_repo()` pipeline (language detection → language indexer → scip expt-convert → populate graph → zoekt-index → atomic pointer swap → registry update), `_cmd_watch` wires Debouncer to watchdog.Observer | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` |
+| `watch.py` | 55 | `Debouncer` (pure, thread-free, injectable clock) + `should_ignore_path` (.git/node_modules/.venv/__pycache__/dist/build) | `Debouncer`, `should_ignore_path()` |
 
 ## Test Suite (`tests/`)
 
@@ -56,7 +56,6 @@ codeintel/
 |-----------|--------|-------|
 | `test_config.py` | config.py | Data-dir resolution, slug sanitization |
 | `test_index_reader.py` | index_reader.py | Vendored cache behavior, connection pooling |
-| `test_models.py` | models.py | Dataclass serialization, frozen semantics |
 | `test_scip_decoder.py` | scip_decoder.py | Blob decoding, range/symbol parsing |
 | `test_query.py` | query.py | SQL execution, nav result builders |
 | `test_search.py` | search.py | Zoekt HTTP client, lifecycle management |
@@ -94,7 +93,7 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 
 ### ENV Var Overrides
 - `CODEINTEL_DATA_DIR` — override default `~/.codeintel`
-- `CODEINTEL_ZOEKT_BIN` — override zoekt-webserver path (future support planned)
+- `CODEINTEL_ZOEKT_BIN` — override zoekt-webserver binary path (default: `zoekt-webserver`)
 
 ### Single-Tenant Hardcoding
 `config.py` pins `PROJECT = "_"` and `BRANCH = "_"` — the vendored `IndexConnectionCache` keys on 3-tuples, but codeintel has no project/branch concept. The disk path `scip/_/<slug>/_/` is an artifact of reusing the cache's path shape unchanged.
@@ -121,7 +120,7 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 4. `populate_graph_for_repo()` — extract package names, store edges
 5. `zoekt-index` → shards in `.zoekt/`
 6. Atomic `os.replace()` on `current` pointer
-7. `RegistryDb.update_repo()` — mark indexed
+7. `Registry.update_repo()` — mark indexed
 
 **Query path (`server.py` → `query.py`):**
 1. MCP tool handler unpacks `repo`, `symbol`/`path` args
@@ -145,7 +144,7 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 
 ## Size Profile
 
-- **Total LOC (src):** ~1,600 LOC (excluding generated scip_pb2.py)
-- **Total LOC (tests):** ~1,400 LOC (excluding fixtures)
-- **Largest module:** `index_cli.py` (~300 LOC)
-- **Smallest module:** `watch.py`, `config.py` (~50-60 LOC each)
+- **Total LOC (src):** 2,253 LOC (excluding generated scip_pb2.py); 2,364 LOC including it
+- **Total LOC (tests):** 1,868 LOC (across 16 test files; excluding fixtures)
+- **Largest module:** `query.py` (436 LOC)
+- **Smallest module:** `__init__.py` (2 LOC)

@@ -27,7 +27,7 @@
 | 3 | Indexer CLI (`codeintel index`), registry, embedded Zoekt + `searchCode` | ✓ Done |
 | 4 | `blastRadius` (package dependency graph) + `codeintel watch` (auto-reindex) | ✓ Done |
 
-**Language support:** TypeScript, Python, Java. One language per index; language detection by file-extension plurality.
+**Language support:** TypeScript, Python, Java, plus Swift *detection only* — `.swift` repos are recognized by `detect_language()` and routed to `scip-swift`, but no `scip-swift` binary exists upstream yet, so Swift repos raise `IndexingError` until one is built (see [`openspec/specs/swift-language-indexing/spec.md`](../openspec/specs/swift-language-indexing/spec.md)). One language per index; language detection by file-extension plurality.
 
 **8 MCP tools:** `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `blastRadius`
 
@@ -51,7 +51,7 @@
 ## Dependencies
 
 Core runtime:
-- Python 3.11+
+- Python 3.12+
 - `mcp[cli]` — FastMCP for stdio server
 - `protobuf` — scip_pb2 message decoding
 - `zstandard` — SCIP blob decompression
@@ -59,7 +59,7 @@ Core runtime:
 - `watchdog` (optional, `--extra watch`) — file monitor for `codeintel watch`
 
 External binaries (must be on `PATH`):
-- Language indexers: `scip-typescript`, `scip-python`, `scip-java` (pick per language)
+- Language indexers: `scip-typescript`, `scip-python`, `scip-java` (pick per language); `scip-swift` is wired into detection but does not exist upstream yet
 - SCIP converter: `scip` (uses `scip expt-convert`)
 - Search indexers: `zoekt-index`, `zoekt-webserver`
 
@@ -84,7 +84,7 @@ External binaries (must be on `PATH`):
 - From Claude Code (user-scope MCP), on real TypeScript and Python repos: all 8 tools return correct results; nav results hand-verified on known symbols ✓
 - `codeintel index <repo>` end-to-end: detect language → run language indexer → `scip expt-convert` → zoekt-index → atomic pointer swap → registry update ✓
 - `getIndexStatus` correctly flags stale after new commits; reindex has zero query downtime ✓
-- Test suite: all phases gate on `uv run pytest` green (16 test files, 1-1 map to src modules, fixtures with real SCIP/Zoekt blobs) ✓
+- Test suite: all phases gate on `uv run pytest` green (11 test modules, 1-1 map to src modules except `__init__.py`/`models.py`, plus fixtures with real SCIP/Zoekt blobs — 16 files total under `tests/`) ✓
 
 ## Non-Goals / Known Limitations
 
