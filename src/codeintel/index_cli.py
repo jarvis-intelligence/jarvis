@@ -150,6 +150,19 @@ def check_scip_version() -> None:
         )
 
 
+def _write_zoekt_meta(scratch: Path, slug: str) -> Path:
+    """Write the `.meta` file that names the Zoekt shard after `slug`.
+
+    Without this, zoekt-index derives the repository name from the indexed
+    directory's basename. `searchCode(repo=<slug>)` builds a Zoekt `r:<slug>`
+    filter, so a slug that differs from the directory name matches nothing
+    and the tool returns zero hits with no error -- a silent wrong answer.
+    """
+    meta_path = scratch / "zoekt.meta.json"
+    meta_path.write_text(json.dumps({"Name": slug}), encoding="utf-8")
+    return meta_path
+
+
 def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = None) -> str:
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
@@ -198,7 +211,12 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
 
             zoekt_dir = config.data_dir(root) / ".zoekt"
             zoekt_dir.mkdir(parents=True, exist_ok=True)
-            _run(["zoekt-index", "-index", str(zoekt_dir), str(repo_path)], cwd=repo_path, step="zoekt-index")
+            meta_path = _write_zoekt_meta(Path(scratch), slug)
+            _run(
+                ["zoekt-index", "-index", str(zoekt_dir), "-meta", str(meta_path), str(repo_path)],
+                cwd=repo_path,
+                step="zoekt-index",
+            )
 
             target_dir = config.index_dir(slug, root)
             target_dir.mkdir(parents=True, exist_ok=True)

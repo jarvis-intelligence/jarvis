@@ -274,3 +274,35 @@ def test_check_scip_version_tolerates_unparseable(monkeypatch):
 
     monkeypatch.setattr(cli, "_scip_version_output", lambda: "weird build")
     cli.check_scip_version()  # must not raise
+
+
+def test_write_zoekt_meta_contains_slug(tmp_path: Path):
+    import json as _json
+
+    from codeintel.index_cli import _write_zoekt_meta
+
+    meta_path = _write_zoekt_meta(tmp_path, "my-slug")
+    assert meta_path.is_file()
+    assert _json.loads(meta_path.read_text())["Name"] == "my-slug"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_zoekt_shard_is_named_by_slug_not_directory(tmp_path: Path):
+    """Regression: searchCode(repo=<slug>) silently returned zero hits.
+
+    Zoekt names shards from the directory basename unless -meta says
+    otherwise, so a slug differing from the directory produced a shard the
+    r: filter could never match.
+    """
+    repo_dir = tmp_path / "directoryname"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+
+    data_root = tmp_path / "data"
+    index_repo(repo_dir, slug="totally-different-slug", root=data_root)
+
+    shards = list((data_root / ".zoekt").glob("*.zoekt"))
+    names = [s.name for s in shards]
+    assert any(n.startswith("totally-different-slug") for n in names), names
+    assert not any(n.startswith("directoryname") for n in names), names
