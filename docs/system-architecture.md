@@ -32,8 +32,7 @@ other contract.
 
 Layer 6→7 is where Swift differs from every other language: the other three indexers need only
 an ordinary runtime, while `scip-swift` needs Xcode and the iOS SDK, which Apple ships for macOS
-only. See [`openspec/changes/add-swift-indexing/`](../openspec/changes/add-swift-indexing/) for
-the Swift-specific pipeline and its host-topology decision.
+only.
 
 ### Component Diagram (runtime detail)
 
@@ -334,7 +333,7 @@ Indexing is exclusive — only one reindex can run at a time per slug (enforced 
   - `scip-swift` — Swift indexing. **Does not exist yet** — no such indexer is published
     upstream; `.swift` repos raise `IndexingError` until one is built and installed.
     Requires a macOS host (Xcode + iOS SDK) for any repo importing Apple-platform
-    frameworks. See [`openspec/changes/add-swift-indexing/`](../openspec/changes/add-swift-indexing/).
+    frameworks.
 - **SCIP converter:**
   - `scip` (uses `scip expt-convert` subcommand)
 - **Search indexer & server:**
@@ -391,8 +390,7 @@ These are real behaviors of SCIP/Zoekt, not codeintel bugs:
 3. Test end-to-end (index repo → query nav tools)
 
 Swift is the worked example of this path — the codeintel-side entry landed in one table,
-but the indexer itself was the real work. See
-[`openspec/changes/add-swift-indexing/`](../openspec/changes/add-swift-indexing/).
+but the indexer itself was the real work.
 
 ### Adding a New Query Tool
 

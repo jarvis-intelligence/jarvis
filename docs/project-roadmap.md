@@ -19,8 +19,7 @@ See [`plans/0724-2316-codeintel-mcp-implementation/`](../plans/0724-2316-codeint
 
 `detect_language()` now recognizes `.swift` and routes majority-Swift repos to `scip-swift`,
 and `DerivedData`/`.build` are excluded from the extension-majority scan. The `scip-swift`
-converter itself does not exist upstream — this is an external prerequisite tracked in
-[`openspec/specs/swift-language-indexing/spec.md`](../openspec/specs/swift-language-indexing/spec.md),
+converter itself does not exist upstream — this is an external prerequisite,
 not something `codeintel` builds. Swift repos raise `IndexingError` until that binary exists
 and is installed on `PATH`.
 
