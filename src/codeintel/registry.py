@@ -34,7 +34,7 @@ class RegisteredRepo:
     language: str
     commit_sha: str | None
     last_indexed: datetime
-    status: str  # "indexed" | "indexing" | "failed"
+    status: str  # "indexed" | "indexing" | "failed" | "partial"
 
 
 def _row_to_repo(row: tuple) -> RegisteredRepo:

@@ -41,7 +41,7 @@ codeintel/
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
 | `graph.py` | 363 | Package dependency graph: sqlite3 CRUD on `packages`/`edges` tables in registry.db, `populate_graph_for_repo()` (rebuild-not-accumulate), `blast_radius()` 2-hop BFS | `GraphStore`, `extract_package_names()`, `populate_graph_for_repo()`, `blast_radius()` |
-| `registry.py` | 106 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed) | `Registry`, repo table operations |
+| `registry.py` | 106 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed/partial) | `Registry`, repo table operations |
 
 ### Server & CLI
 

@@ -186,7 +186,9 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
     on success, `failed` (with the exception's message) on any step's
-    failure.
+    failure, or `PARTIAL_STATUS` ("partial") on success when
+    `index_has_navigation_data()` finds symbols published but `chunks` and
+    `mentions` both empty.
 
     `zoekt-index` runs BEFORE the pointer swap: if it fails, no repo was
     ever left half-published — the previous version (if any) is still the

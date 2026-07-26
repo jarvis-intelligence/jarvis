@@ -89,6 +89,11 @@ codeintel reindex foo
 codeintel forget foo
 ```
 
+`status` (as shown by both `list` and `status`) is usually `indexed` or
+`failed`, but can also be `partial`: the index published real symbols but no
+navigable positions (an indexer/converter bug) — check the stderr warning
+from `codeintel index` for details.
+
 **Language detection** counts source files by extension and picks the winner —
 one language per index:
 
@@ -187,10 +192,11 @@ These are real behaviors of `scip expt-convert` (as of v0.9.0), not codeintel bu
   [scip-code/scip#465](https://github.com/scip-code/scip/pull/465) (open, CI green).
 - **`displayName` / `kind` are often `null`** for symbols the converter only
   ever sees as bare occurrences (no defining `SymbolInformation` was indexed).
-- **`searchCode`'s `repo` filter matches Zoekt's own repository name** — the
-  basename of the directory you indexed — which can diverge from codeintel's
-  slug if you passed `--slug`. If a scoped search comes back unexpectedly
-  empty, retry unscoped to confirm the name.
+- **`searchCode`'s `repo` filter matches Zoekt's own repository name**, which
+  `codeintel index` now names after the slug via `zoekt-index -meta` — so this
+  no longer diverges for repos indexed with current code. Shards published by
+  an older codeintel still carry their old directory-derived name until you
+  `codeintel reindex <slug>`.
 
 ## Documentation
 
