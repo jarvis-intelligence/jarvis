@@ -294,6 +294,68 @@ def test_scip_version_is_pinned_not_latest():
     assert "latest" not in version
 
 
+def test_already_installed_finds_binary_in_bin_dir_not_on_path(tmp_path):
+    """Idempotency must not depend on the install dir being on PATH.
+
+    setup.sh writes to ~/.codeintel/bin and only appends it to the shell rc --
+    so during the very run that creates it (and any re-run in the same shell)
+    the dir is NOT yet on PATH. A PATH-only presence check re-downloads
+    everything on every re-run.
+    """
+    bin_path = tmp_path / "bin"
+    bin_path.mkdir()
+    stub = bin_path / "scip"
+    stub.write_text("#!/bin/sh\ntrue\n")
+    stub.chmod(0o755)
+    result = run_func(
+        'already_installed scip && echo FOUND || echo MISSING',
+        env={"CODEINTEL_BIN_DIR": str(bin_path), "PATH": "/usr/bin:/bin"},
+    )
+    assert "FOUND" in result.stdout
+
+
+def test_already_installed_falls_back_to_path_lookup(tmp_path):
+    """npm-installed indexers land in npm's global bin, not ours."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    stub = fake_bin / "scip-typescript"
+    stub.write_text("#!/bin/sh\ntrue\n")
+    stub.chmod(0o755)
+    result = run_func(
+        'already_installed scip-typescript && echo FOUND || echo MISSING',
+        env={
+            "CODEINTEL_BIN_DIR": str(tmp_path / "empty-bin"),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        },
+    )
+    assert "FOUND" in result.stdout
+
+
+def test_already_installed_reports_missing_when_truly_absent(tmp_path):
+    result = run_func(
+        'already_installed scip && echo FOUND || echo MISSING',
+        env={"CODEINTEL_BIN_DIR": str(tmp_path / "empty"), "PATH": "/usr/bin:/bin"},
+    )
+    assert "MISSING" in result.stdout
+
+
+def test_install_scip_skips_when_present_only_in_bin_dir(tmp_path):
+    """Regression: CI caught setup.sh re-downloading on every re-run."""
+    bin_path = tmp_path / "bin"
+    bin_path.mkdir()
+    stub = bin_path / "scip"
+    stub.write_text("#!/bin/sh\ntrue\n")
+    stub.chmod(0o755)
+    result = run_func(
+        'install_scip linux amd64',
+        env={"CODEINTEL_BIN_DIR": str(bin_path), "PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "already" in combined or "skip" in combined
+    assert "installing" not in combined, "must not re-download"
+
+
 def test_install_scip_skips_when_already_present(tmp_path):
     """An existing scip on PATH must not be re-downloaded."""
     fake_bin = tmp_path / "fakebin"

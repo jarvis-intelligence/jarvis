@@ -162,6 +162,20 @@ have_cmd() {
 	command -v "$1" >/dev/null 2>&1
 }
 
+# A dependency counts as present if it is already in our install dir OR
+# anywhere on PATH.
+#
+# The bin_dir check is load-bearing: setup.sh only *appends* its install dir to
+# the shell rc, so that dir is not on PATH during the run that creates it, nor
+# on any re-run in the same shell. A PATH-only check therefore re-downloads
+# every binary on every re-run -- which CI caught.
+already_installed() {
+	if [ -x "$(bin_dir)/$1" ]; then
+		return 0
+	fi
+	have_cmd "$1"
+}
+
 # Echo the sha256 hex digest of a file. macOS ships shasum; Linux sha256sum.
 sha256_of() {
 	if have_cmd sha256sum; then
@@ -252,7 +266,7 @@ install_scip() {
 	_os=$1
 	_arch=$2
 
-	if [ "${FORCE:-0}" != "1" ] && have_cmd scip; then
+	if [ "${FORCE:-0}" != "1" ] && already_installed scip; then
 		log_info "scip: already installed, skipping"
 		return 0
 	fi
@@ -280,7 +294,7 @@ install_zoekt() {
 	_os=$1
 	_arch=$2
 
-	if [ "${FORCE:-0}" != "1" ] && have_cmd zoekt-index && have_cmd zoekt-webserver; then
+	if [ "${FORCE:-0}" != "1" ] && already_installed zoekt-index && already_installed zoekt-webserver; then
 		log_info "zoekt: already installed, skipping"
 		return 0
 	fi
@@ -340,7 +354,7 @@ install_scip_swift() {
 		return 0
 	fi
 
-	if [ "${FORCE:-0}" != "1" ] && have_cmd scip-swift; then
+	if [ "${FORCE:-0}" != "1" ] && already_installed scip-swift; then
 		log_info "scip-swift: already installed, skipping"
 		return 0
 	fi
@@ -365,7 +379,7 @@ install_npm_indexer() {
 	_bin=$1
 	_pkg=$2
 
-	if [ "${FORCE:-0}" != "1" ] && have_cmd "$_bin"; then
+	if [ "${FORCE:-0}" != "1" ] && already_installed "$_bin"; then
 		log_info "${_bin}: already installed, skipping"
 		return 0
 	fi
@@ -399,7 +413,7 @@ SCIP_JAVA_IMAGE="ghcr.io/scip-code/scip-java:latest"
 # runtime or JDK is deliberately out of scope. Always returns 0: neither a
 # missing runtime nor a declined prompt is a failure.
 install_scip_java() {
-	if [ "${FORCE:-0}" != "1" ] && have_cmd scip-java; then
+	if [ "${FORCE:-0}" != "1" ] && already_installed scip-java; then
 		log_info "scip-java: already installed, skipping"
 		return 0
 	fi
