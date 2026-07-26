@@ -11,6 +11,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import pytest
+
 SETUP_SH = Path(__file__).parent.parent / "setup.sh"
 
 # Prefer dash over sh. macOS /bin/sh is bash in POSIX mode and still ACCEPTS
@@ -261,3 +263,47 @@ def test_install_tarball_binary_refuses_on_checksum_mismatch(tmp_path):
     )
     assert result.returncode != 0
     assert not (bin_path / "mytool").exists(), "must not install an unverified binary"
+
+
+# ------------------------------------------------------------ scip installer ----
+
+
+@pytest.mark.parametrize(
+    "os_name,arch,expected",
+    [
+        ("darwin", "arm64", "scip-darwin-arm64.tar.gz"),
+        ("darwin", "amd64", "scip-darwin-amd64.tar.gz"),
+        ("linux", "amd64", "scip-linux-amd64.tar.gz"),
+        ("linux", "arm64", "scip-linux-arm64.tar.gz"),
+    ],
+)
+def test_scip_asset_name_covers_all_supported_platforms(os_name, arch, expected):
+    result = run_func(f'scip_asset_name {os_name} {arch}')
+    assert result.stdout.strip() == expected
+
+
+def test_scip_version_is_pinned_not_latest():
+    """A floating 'latest' could silently swap the expt-convert schema."""
+    result = run_func('echo "$SCIP_VERSION"')
+    version = result.stdout.strip()
+    assert version.startswith("v"), f"expected a pinned vX.Y.Z, got {version!r}"
+    assert "latest" not in version
+
+
+def test_install_scip_skips_when_already_present(tmp_path):
+    """An existing scip on PATH must not be re-downloaded."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    stub = fake_bin / "scip"
+    stub.write_text("#!/bin/sh\necho 'scip version v0.9.0'\n")
+    stub.chmod(0o755)
+    result = run_func(
+        'install_scip darwin arm64',
+        env={
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "CODEINTEL_BIN_DIR": str(tmp_path / "bin"),
+        },
+    )
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "already" in combined or "skip" in combined

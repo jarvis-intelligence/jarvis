@@ -9,6 +9,14 @@
 
 set -eu
 
+# ------------------------------------------------------------- versions ------
+
+# Pinned deliberately, never "latest": query.py targets the v0.7.0-era
+# `scip expt-convert` SQLite schema. v0.9.0's schema was verified
+# byte-identical to v0.7.0's before this pin was raised.
+SCIP_VERSION="v0.9.0"
+SCIP_REPO="scip-code/scip"
+
 # ---------------------------------------------------------------- logging ----
 
 log_info() {
@@ -188,6 +196,33 @@ install_tarball_binary() {
 
 	rm -rf "$_tmp"
 	trap - EXIT
+}
+
+# ------------------------------------------------------------ installers -----
+
+scip_asset_name() {
+	echo "scip-$1-$2.tar.gz"
+}
+
+install_scip() {
+	_os=$1
+	_arch=$2
+
+	if [ "${FORCE:-0}" != "1" ] && have_cmd scip; then
+		log_info "scip: already installed, skipping"
+		return 0
+	fi
+
+	_asset=$(scip_asset_name "$_os" "$_arch")
+	_base="https://github.com/${SCIP_REPO}/releases/download/${SCIP_VERSION}"
+
+	log_info "scip: installing ${SCIP_VERSION}"
+	if install_tarball_binary "${_base}/${_asset}" "${_base}/${_asset}.sha256" scip scip; then
+		log_info "scip: installed"
+	else
+		log_error "scip: install failed — see https://github.com/${SCIP_REPO}/releases"
+		return 1
+	fi
 }
 
 # ----------------------------------------------------------------- main ------
