@@ -347,6 +347,65 @@ def test_remove_zoekt_shards_is_safe_when_absent(tmp_path: Path):
     assert _remove_zoekt_shards("nothing-here", root=tmp_path) == []
 
 
+def _make_index_db(path: Path, *, chunks: int, mentions: int, symbols: int = 3) -> None:
+    """Minimal stand-in for the expt-convert schema, only the counted tables."""
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE documents (id INTEGER PRIMARY KEY, relative_path TEXT);
+        CREATE TABLE chunks (id INTEGER PRIMARY KEY, document_id INTEGER);
+        CREATE TABLE global_symbols (id INTEGER PRIMARY KEY, symbol TEXT);
+        CREATE TABLE mentions (chunk_id INTEGER, symbol_id INTEGER, role INTEGER);
+        """
+    )
+    conn.execute("INSERT INTO documents (relative_path) VALUES ('a.swift')")
+    for i in range(symbols):
+        conn.execute("INSERT INTO global_symbols (symbol) VALUES (?)", (f"sym{i}",))
+    for i in range(chunks):
+        conn.execute("INSERT INTO chunks (document_id) VALUES (1)")
+    for i in range(mentions):
+        conn.execute("INSERT INTO mentions (chunk_id, symbol_id, role) VALUES (1, 1, 1)")
+    conn.commit()
+    conn.close()
+
+
+def test_index_has_navigation_data_false_when_chunks_and_mentions_empty(tmp_path: Path):
+    """The exact fingerprint of a converter that dropped every range."""
+    from codeintel.index_cli import index_has_navigation_data
+
+    db = tmp_path / "i.db"
+    _make_index_db(db, chunks=0, mentions=0)
+    conn = sqlite3.connect(db)
+    try:
+        assert index_has_navigation_data(conn) is False
+    finally:
+        conn.close()
+
+
+def test_index_has_navigation_data_true_when_populated(tmp_path: Path):
+    from codeintel.index_cli import index_has_navigation_data
+
+    db = tmp_path / "i.db"
+    _make_index_db(db, chunks=1, mentions=14)
+    conn = sqlite3.connect(db)
+    try:
+        assert index_has_navigation_data(conn) is True
+    finally:
+        conn.close()
+
+
+def test_index_has_navigation_data_false_when_only_chunks(tmp_path: Path):
+    from codeintel.index_cli import index_has_navigation_data
+
+    db = tmp_path / "i.db"
+    _make_index_db(db, chunks=2, mentions=0)
+    conn = sqlite3.connect(db)
+    try:
+        assert index_has_navigation_data(conn) is False
+    finally:
+        conn.close()
+
+
 def test_forget_removes_the_zoekt_shard(tmp_path: Path, monkeypatch, capsys):
     """Regression: forgotten repos stayed searchable."""
     import argparse

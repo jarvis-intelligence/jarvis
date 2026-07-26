@@ -52,6 +52,12 @@ _IGNORED_DIRS = {".git", "node_modules", ".venv", "__pycache__", "dist", "build"
 # mentions=0 under v0.7.0 and chunks=1/mentions=14 under v0.9.0.
 MIN_SCIP_VERSION = (0, 9, 0)
 
+# Registry status for an index that published real symbols but no navigable
+# positions -- the fingerprint of a converter or indexer that dropped every
+# occurrence range. Publishing still proceeds (the symbol table is useful),
+# but the status must not claim unqualified success.
+PARTIAL_STATUS = "partial"
+
 
 class UnsupportedLanguageError(Exception):
     """Raised when no supported source extension is found under a repo."""
@@ -150,6 +156,19 @@ def check_scip_version() -> None:
         )
 
 
+def index_has_navigation_data(conn: sqlite3.Connection) -> bool:
+    """True when the index carries positional data, not just symbols.
+
+    `chunks` holds the occurrence blobs and `mentions` the symbol/role rows
+    that every per-file nav tool reads. Both empty while `global_symbols` is
+    populated means positions were dropped somewhere upstream -- the index
+    looks healthy and answers every nav query with an empty list.
+    """
+    chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    mentions = conn.execute("SELECT COUNT(*) FROM mentions").fetchone()[0]
+    return chunks > 0 and mentions > 0
+
+
 def _write_zoekt_meta(scratch: Path, slug: str) -> Path:
     """Write the `.meta` file that names the Zoekt shard after `slug`.
 
@@ -205,6 +224,7 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
             index_conn = sqlite3.connect(db_path)
             try:
                 populate_graph_for_repo(graph_store, slug, index_conn)
+                has_nav = index_has_navigation_data(index_conn)
             finally:
                 index_conn.close()
                 graph_store.close()
@@ -227,7 +247,15 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
             )
             _publish_atomically(target_dir, versioned_name, sha)
 
-        registry.upsert(slug, str(repo_path), language, sha, "indexed")
+        final_status = "indexed" if has_nav else PARTIAL_STATUS
+        registry.upsert(slug, str(repo_path), language, sha, final_status)
+        if not has_nav:
+            print(
+                f"warning: {slug} published with symbols but no navigable positions "
+                "(chunks/mentions empty) — per-file navigation will return no results. "
+                "Check that the indexer emits occurrence ranges and that scip is >= v0.9.0.",
+                file=sys.stderr,
+            )
     except Exception as exc:
         registry.mark_status(slug, "failed")
         raise IndexingError(str(exc)) from exc
