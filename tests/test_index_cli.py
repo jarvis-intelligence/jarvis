@@ -225,3 +225,52 @@ def test_index_repo_end_to_end_for_swift_repo(tmp_path: Path):
         assert count > 0
     finally:
         db.close()
+
+
+def test_parse_scip_version_reads_standard_output():
+    from codeintel.index_cli import parse_scip_version
+
+    assert parse_scip_version("scip version v0.9.0") == (0, 9, 0)
+    assert parse_scip_version("scip version v0.10.2\n") == (0, 10, 2)
+    assert parse_scip_version("v1.0.0") == (1, 0, 0)
+
+
+def test_parse_scip_version_returns_none_on_junk():
+    from codeintel.index_cli import parse_scip_version
+
+    assert parse_scip_version("") is None
+    assert parse_scip_version("not a version") is None
+
+
+def test_check_scip_version_rejects_v070(monkeypatch):
+    """v0.7.0 converts successfully but silently drops every range."""
+    import codeintel.index_cli as cli
+
+    monkeypatch.setattr(cli, "_scip_version_output", lambda: "scip version v0.7.0")
+    with pytest.raises(cli.IndexingError) as exc:
+        cli.check_scip_version()
+    message = str(exc.value)
+    assert "0.7.0" in message
+    assert "0.9.0" in message, "must state the required floor"
+
+
+def test_check_scip_version_accepts_v090(monkeypatch):
+    import codeintel.index_cli as cli
+
+    monkeypatch.setattr(cli, "_scip_version_output", lambda: "scip version v0.9.0")
+    cli.check_scip_version()  # must not raise
+
+
+def test_check_scip_version_accepts_newer(monkeypatch):
+    import codeintel.index_cli as cli
+
+    monkeypatch.setattr(cli, "_scip_version_output", lambda: "scip version v1.2.3")
+    cli.check_scip_version()
+
+
+def test_check_scip_version_tolerates_unparseable(monkeypatch):
+    """An unrecognized format must not block indexing outright."""
+    import codeintel.index_cli as cli
+
+    monkeypatch.setattr(cli, "_scip_version_output", lambda: "weird build")
+    cli.check_scip_version()  # must not raise

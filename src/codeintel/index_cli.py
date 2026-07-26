@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -43,6 +44,13 @@ _LANGUAGE_INDEXERS: dict[str, tuple[str, list[str]]] = {
 _EXT_PRIORITY = [".ts", ".tsx", ".py", ".java", ".kt", ".swift"]
 
 _IGNORED_DIRS = {".git", "node_modules", ".venv", "__pycache__", "dist", "build", "DerivedData", ".build"}
+
+# `scip expt-convert` below this version cannot read scip.proto's `typed_range`
+# oneof (its Go bindings predate occurrence_range.go), so it silently writes a
+# schema-valid database with zero chunks and zero mentions -- every navigation
+# query then returns empty. Verified: the same .scip file yields chunks=0/
+# mentions=0 under v0.7.0 and chunks=1/mentions=14 under v0.9.0.
+MIN_SCIP_VERSION = (0, 9, 0)
 
 
 class UnsupportedLanguageError(Exception):
@@ -104,6 +112,44 @@ def _publish_atomically(target_dir: Path, versioned_name: str, sha: str) -> None
         (target_dir / old_metadata).unlink(missing_ok=True)
 
 
+def parse_scip_version(output: str) -> tuple[int, int, int] | None:
+    """Parse `scip --version` output, e.g. "scip version v0.9.0".
+
+    Returns None when the format is unrecognized, so an unexpected build
+    string degrades to "cannot verify" rather than blocking indexing.
+    """
+    match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", output)
+    if match is None:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def _scip_version_output() -> str:
+    """Isolated for tests to monkeypatch."""
+    try:
+        result = subprocess.run(["scip", "--version"], capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        raise IndexingError("scip not found on PATH — run setup.sh") from exc
+    return f"{result.stdout}\n{result.stderr}"
+
+
+def check_scip_version() -> None:
+    """Raise IndexingError when `scip` is too old to preserve ranges."""
+    version = parse_scip_version(_scip_version_output())
+    if version is None:
+        # Unknown format: warn-by-omission rather than block. A wrong guess
+        # here would make indexing impossible against a valid future build.
+        return
+    if version < MIN_SCIP_VERSION:
+        current = ".".join(str(p) for p in version)
+        required = ".".join(str(p) for p in MIN_SCIP_VERSION)
+        raise IndexingError(
+            f"scip v{current} is too old (need >= v{required}): it cannot read scip.proto's "
+            "typed_range oneof, so occurrence positions are dropped and navigation returns "
+            "empty results. Re-run setup.sh, and remove any older scip earlier on PATH."
+        )
+
+
 def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = None) -> str:
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
@@ -120,6 +166,7 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
     slug = config.repo_slug(slug or repo_path.name)
     language, indexer_cmd = detect_language(repo_path)
     sha = _git_head(repo_path)
+    check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
     registry.upsert(slug, str(repo_path), language, None, "indexing")
