@@ -307,3 +307,71 @@ def test_install_scip_skips_when_already_present(tmp_path):
     assert result.returncode == 0
     combined = (result.stdout + result.stderr).lower()
     assert "already" in combined or "skip" in combined
+
+
+# ----------------------------------------------------------- zoekt installer ----
+
+
+@pytest.mark.parametrize(
+    "os_name,arch,expected",
+    [
+        ("darwin", "arm64", "zoekt-darwin-arm64.tar.gz"),
+        ("linux", "amd64", "zoekt-linux-amd64.tar.gz"),
+    ],
+)
+def test_zoekt_asset_name(os_name, arch, expected):
+    result = run_func(f'zoekt_asset_name {os_name} {arch}')
+    assert result.stdout.strip() == expected
+
+
+def test_zoekt_pin_matches_committed_file():
+    """The in-script pin must not drift from the ZOEKT_COMMIT file CI reads."""
+    on_disk = (Path(__file__).parent.parent / "ZOEKT_COMMIT").read_text().strip()
+    in_script = run_func('echo "$ZOEKT_COMMIT_PIN"').stdout.strip()
+    assert in_script == on_disk
+
+
+def test_install_zoekt_skips_when_both_binaries_present(tmp_path):
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    for name in ("zoekt-index", "zoekt-webserver"):
+        stub = fake_bin / name
+        stub.write_text("#!/bin/sh\ntrue\n")
+        stub.chmod(0o755)
+    result = run_func(
+        'install_zoekt darwin arm64',
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "CODEINTEL_BIN_DIR": str(tmp_path / "bin")},
+    )
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "already" in combined or "skip" in combined
+
+
+def test_install_zoekt_extracts_both_binaries(tmp_path):
+    """Verify both members land, using a local tarball over file://."""
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    for name in ("zoekt-index", "zoekt-webserver"):
+        p = stage / name
+        p.write_text("#!/bin/sh\ntrue\n")
+    tar_path = tmp_path / "zoekt-darwin-arm64.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        for name in ("zoekt-index", "zoekt-webserver"):
+            tf.add(stage / name, arcname=name)
+    sha_path = tmp_path / "zoekt-darwin-arm64.tar.gz.sha256"
+    digest = hashlib.sha256(tar_path.read_bytes()).hexdigest()
+    sha_path.write_text(f"{digest}  zoekt-darwin-arm64.tar.gz\n")
+
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        f'ZOEKT_BASE_URL="file://{tmp_path}" install_zoekt darwin arm64',
+        env={
+            "CODEINTEL_BIN_DIR": str(bin_path),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "FORCE": "1",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert (bin_path / "zoekt-index").is_file()
+    assert (bin_path / "zoekt-webserver").is_file()
+    assert (bin_path / "zoekt-index").stat().st_mode & 0o111

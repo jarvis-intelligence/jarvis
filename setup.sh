@@ -17,6 +17,11 @@ set -eu
 SCIP_VERSION="v0.9.0"
 SCIP_REPO="scip-code/scip"
 
+# Kept in sync with the repo-root ZOEKT_COMMIT file that CI builds from.
+# tests/test_setup_sh.py asserts the two never drift.
+ZOEKT_COMMIT_PIN="33f1f18af292"
+CODEINTEL_REPO="phuongddx/codeintel"
+
 # ---------------------------------------------------------------- logging ----
 
 log_info() {
@@ -223,6 +228,59 @@ install_scip() {
 		log_error "scip: install failed — see https://github.com/${SCIP_REPO}/releases"
 		return 1
 	fi
+}
+
+zoekt_asset_name() {
+	echo "zoekt-$1-$2.tar.gz"
+}
+
+# zoekt ships as one tarball containing both binaries. Upstream
+# sourcegraph/zoekt publishes no releases at all, so these come from
+# codeintel's own releases (see .github/workflows/build-zoekt.yml).
+install_zoekt() {
+	_os=$1
+	_arch=$2
+
+	if [ "${FORCE:-0}" != "1" ] && have_cmd zoekt-index && have_cmd zoekt-webserver; then
+		log_info "zoekt: already installed, skipping"
+		return 0
+	fi
+
+	_asset=$(zoekt_asset_name "$_os" "$_arch")
+	# ZOEKT_BASE_URL is overridable so tests can serve a local tarball.
+	_base="${ZOEKT_BASE_URL:-https://github.com/${CODEINTEL_REPO}/releases/download/zoekt-${ZOEKT_COMMIT_PIN}}"
+
+	log_info "zoekt: installing (pinned ${ZOEKT_COMMIT_PIN})"
+
+	_tmp=$(mktemp -d)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$_tmp'" EXIT
+
+	if ! download_to "${_base}/${_asset}" "${_tmp}/z.tar.gz"; then
+		log_error "zoekt: download failed (${_base}/${_asset})"
+		rm -rf "$_tmp"; trap - EXIT; return 1
+	fi
+	if ! download_to "${_base}/${_asset}.sha256" "${_tmp}/z.sha256"; then
+		log_error "zoekt: checksum download failed"
+		rm -rf "$_tmp"; trap - EXIT; return 1
+	fi
+	_expected=$(cut -d' ' -f1 <"${_tmp}/z.sha256")
+	if ! verify_sha256 "${_tmp}/z.tar.gz" "$_expected"; then
+		rm -rf "$_tmp"; trap - EXIT; return 1
+	fi
+	if ! tar -xzf "${_tmp}/z.tar.gz" -C "$_tmp" zoekt-index zoekt-webserver 2>/dev/null; then
+		log_error "zoekt: archive did not contain both binaries"
+		rm -rf "$_tmp"; trap - EXIT; return 1
+	fi
+
+	ensure_bin_dir
+	for _b in zoekt-index zoekt-webserver; do
+		mv "${_tmp}/${_b}" "$(bin_dir)/${_b}"
+		chmod +x "$(bin_dir)/${_b}"
+	done
+
+	rm -rf "$_tmp"; trap - EXIT
+	log_info "zoekt: installed"
 }
 
 # ----------------------------------------------------------------- main ------
