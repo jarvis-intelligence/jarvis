@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Personal, local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
 readme = "README.md"
 authors = [
-    { name = "phuongdoanduy", email = "phuong.doanduy@axonactive.com" }
+    { name = "phuongddx", email = "95doanphuong@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [

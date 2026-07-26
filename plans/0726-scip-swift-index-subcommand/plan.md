@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- scip-swift repo root: `/Users/ddphuong/Projects/scip-swift`. codeintel repo root: `/Users/ddphuong/Projects/codeintel`. This plan touches both.
+- scip-swift repo root: `~/Projects/scip-swift`. codeintel repo root: `~/Projects/codeintel`. This plan touches both.
 - **Backward compatibility is required**: `scip-swift <repo-path> [--output ...]` (no `index` keyword) must keep working exactly as before — it's scip-swift's own documented v0.1.0 public contract (README, published GitHub Release binary).
 - **No codeintel source changes** — `openspec/specs/swift-language-indexing/spec.md`'s "Swift extension detection" requirement already locks in `("swift", ["scip-swift", "index"])`; do not touch `src/codeintel/index_cli.py`, `README.md`, or existing tests in `tests/test_index_cli.py`.
 - The new codeintel integration test in Task 3 requires a `scip-swift` binary on `PATH` to actually run (not just build) — it will report `SKIPPED` otherwise, matching the existing pattern for `scip-python`/`zoekt-index`-gated tests in the same file. Install it from the v0.1.0 release or `swift build -c release` in the scip-swift repo and copy the binary onto `PATH` before running this test locally.
@@ -21,8 +21,8 @@
 ### Task 1: Restructure scip-swift into a router + `index` subcommand
 
 **Files:**
-- Modify: `/Users/ddphuong/Projects/scip-swift/Sources/scip-swift/ScipSwiftCommand.swift` (currently the full command — becomes a thin router)
-- Create: `/Users/ddphuong/Projects/scip-swift/Sources/scip-swift/Commands/IndexCommand.swift` (all the current logic, moved verbatim)
+- Modify: `~/Projects/scip-swift/Sources/scip-swift/ScipSwiftCommand.swift` (currently the full command — becomes a thin router)
+- Create: `~/Projects/scip-swift/Sources/scip-swift/Commands/IndexCommand.swift` (all the current logic, moved verbatim)
 
 **Interfaces:**
 - Consumes: `BuildTool`, `BuildConfiguration`, `BuildBackendDetector`, `SwiftPMBuildRunner`, `XcodebuildBuildRunner`, `XcodeProjectLocator`, `IndexStoreBuildResult`, `SCIPIndexBuilder`, `ScipSwiftVersion`, `ToolchainInfo` — all unchanged, already defined in `Sources/scip-swift/Build/`, `Sources/scip-swift/SCIPMapping/`, `Sources/scip-swift/Platform/`, `Sources/scip-swift/Version.swift`.
@@ -30,7 +30,7 @@
 
 - [ ] **Step 1: Move the current command body into a new `IndexCommand`**
 
-  Create `/Users/ddphuong/Projects/scip-swift/Sources/scip-swift/Commands/IndexCommand.swift`:
+  Create `~/Projects/scip-swift/Sources/scip-swift/Commands/IndexCommand.swift`:
 
   ```swift
   import ArgumentParser
@@ -118,7 +118,7 @@
 
 - [ ] **Step 2: Replace `ScipSwiftCommand.swift` with a thin router**
 
-  Replace the full contents of `/Users/ddphuong/Projects/scip-swift/Sources/scip-swift/ScipSwiftCommand.swift` with:
+  Replace the full contents of `~/Projects/scip-swift/Sources/scip-swift/ScipSwiftCommand.swift` with:
 
   ```swift
   import ArgumentParser
@@ -137,14 +137,14 @@
 
 - [ ] **Step 3: Build and confirm it compiles clean**
 
-  Run: `cd /Users/ddphuong/Projects/scip-swift && swift build`
+  Run: `cd ~/Projects/scip-swift && swift build`
   Expected: `Build complete!` with no warnings or errors.
 
 - [ ] **Step 4: Verify all three invocation shapes produce equivalent output**
 
   Run:
   ```bash
-  cd /Users/ddphuong/Projects/scip-swift
+  cd ~/Projects/scip-swift
   rm -rf Fixtures/MiniSwiftPackage/.build
 
   # Shape 1: old bare invocation (must still work)
@@ -154,7 +154,7 @@
   rm -rf Fixtures/MiniSwiftPackage/.build
 
   # Shape 2: codeintel's exact shape — cwd=repo, no positional arg, "index --output <path>"
-  (cd Fixtures/MiniSwiftPackage && /Users/ddphuong/Projects/scip-swift/.build/debug/scip-swift index --output /tmp/plan-verify-codeintel-shape.scip)
+  (cd Fixtures/MiniSwiftPackage && ~/Projects/scip-swift/.build/debug/scip-swift index --output /tmp/plan-verify-codeintel-shape.scip)
   echo "codeintel-shape exit: $?"
 
   # Both must report 1 document written, exit 0
@@ -163,12 +163,12 @@
 
 - [ ] **Step 5: Run scip-swift's existing test suite — nothing should regress**
 
-  Run: `cd /Users/ddphuong/Projects/scip-swift && swift test`
+  Run: `cd ~/Projects/scip-swift && swift test`
   Expected: `Test run with 23 tests in 4 suites passed` (same count as before this change — no test in `Tests/scip-swiftTests/` references `ScipSwiftCommand`/`IndexCommand` directly, so none needed updating).
 
 - [ ] **Step 6: Update README's usage section to mention the `index` subcommand**
 
-  In `/Users/ddphuong/Projects/scip-swift/README.md`, in the `## Usage` section, after the existing bare-invocation example, add:
+  In `~/Projects/scip-swift/README.md`, in the `## Usage` section, after the existing bare-invocation example, add:
 
   ```markdown
   Or explicitly via the `index` subcommand (identical behavior — this is the shape
@@ -182,7 +182,7 @@
 - [ ] **Step 7: Commit**
 
   ```bash
-  cd /Users/ddphuong/Projects/scip-swift
+  cd ~/Projects/scip-swift
   git add Sources/scip-swift/ScipSwiftCommand.swift Sources/scip-swift/Commands/IndexCommand.swift README.md
   git commit -m "feat: add index subcommand for external-tool invocation compatibility"
   git push origin main
@@ -193,7 +193,7 @@
 ### Task 2: Confirm codeintel needs zero source changes
 
 **Files:**
-- Read only: `/Users/ddphuong/Projects/codeintel/src/codeintel/index_cli.py:28-35` (the `_LANGUAGE_INDEXERS` table), `/Users/ddphuong/Projects/codeintel/openspec/specs/swift-language-indexing/spec.md` (the accepted spec)
+- Read only: `~/Projects/codeintel/src/codeintel/index_cli.py:28-35` (the `_LANGUAGE_INDEXERS` table), `~/Projects/codeintel/openspec/specs/swift-language-indexing/spec.md` (the accepted spec)
 
 **Interfaces:**
 - Consumes: nothing new — this task only verifies the existing `_LANGUAGE_INDEXERS[".swift"] = ("swift", ["scip-swift", "index"])` entry (line 34) and the `_run([*indexer_cmd, "--output", str(scip_path)], cwd=repo_path, ...)` call (line 126) already match Task 1's new `scip-swift index --output <path>` contract.
@@ -201,25 +201,25 @@
 
 - [ ] **Step 1: Re-read the accepted spec's locked-in contract**
 
-  Read `/Users/ddphuong/Projects/codeintel/openspec/specs/swift-language-indexing/spec.md`, "Requirement: Swift extension detection" scenario: `detect_language()` SHALL return `("swift", ["scip-swift", "index"])`. This is exactly what Task 1 makes real — confirm no other requirement in that file implies a different invocation shape (e.g. no positional-path requirement, no extra flags).
+  Read `~/Projects/codeintel/openspec/specs/swift-language-indexing/spec.md`, "Requirement: Swift extension detection" scenario: `detect_language()` SHALL return `("swift", ["scip-swift", "index"])`. This is exactly what Task 1 makes real — confirm no other requirement in that file implies a different invocation shape (e.g. no positional-path requirement, no extra flags).
 
 - [ ] **Step 2: Run codeintel's existing unit tests to prove nothing is currently broken by this plan**
 
-  Run: `cd /Users/ddphuong/Projects/codeintel && uv run pytest tests/test_index_cli.py -v -m "not integration"`
+  Run: `cd ~/Projects/codeintel && uv run pytest tests/test_index_cli.py -v -m "not integration"`
   Expected: all non-integration tests pass, including `test_detect_language_picks_swift_for_swift_files` (asserts `cmd[0] == "scip-swift"`) and `test_detect_language_ignores_derived_data_and_dot_build` (asserts `language == "swift"`). Neither test needs modification — they don't assert on `cmd[1]`.
 
 - [ ] **Step 3: Do not modify `index_cli.py`, `README.md`, or any existing test**
 
-  This step is a checklist confirmation, not code: verify `git status` in `/Users/ddphuong/Projects/codeintel` shows no unintended changes to `src/codeintel/index_cli.py` after Task 1/3 are done.
+  This step is a checklist confirmation, not code: verify `git status` in `~/Projects/codeintel` shows no unintended changes to `src/codeintel/index_cli.py` after Task 1/3 are done.
 
 ---
 
 ### Task 3: Add a real end-to-end Swift indexing test in codeintel
 
 **Files:**
-- Create: `/Users/ddphuong/Projects/codeintel/tests/fixtures/mini_swift_repo/Package.swift`
-- Create: `/Users/ddphuong/Projects/codeintel/tests/fixtures/mini_swift_repo/Sources/MiniSwiftRepo/Greeter.swift`
-- Modify: `/Users/ddphuong/Projects/codeintel/tests/test_index_cli.py` (add a Swift-specific binary-presence check near line 20, and a new test function immediately after `test_index_repo_end_to_end_atomic_swap_under_open_reader`, around line 150)
+- Create: `~/Projects/codeintel/tests/fixtures/mini_swift_repo/Package.swift`
+- Create: `~/Projects/codeintel/tests/fixtures/mini_swift_repo/Sources/MiniSwiftRepo/Greeter.swift`
+- Modify: `~/Projects/codeintel/tests/test_index_cli.py` (add a Swift-specific binary-presence check near line 20, and a new test function immediately after `test_index_repo_end_to_end_atomic_swap_under_open_reader`, around line 150)
 
 **Interfaces:**
 - Consumes: `codeintel.index_cli.index_repo` (existing, `index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = None) -> str`), `codeintel.registry.Registry` (existing, `Registry(db_path).get(slug) -> RegistryEntry | None`), `codeintel.config.index_dir(slug, root) -> Path` (existing).
@@ -227,7 +227,7 @@
 
 - [ ] **Step 1: Add the fixture SwiftPM package**
 
-  Create `/Users/ddphuong/Projects/codeintel/tests/fixtures/mini_swift_repo/Package.swift`:
+  Create `~/Projects/codeintel/tests/fixtures/mini_swift_repo/Package.swift`:
 
   ```swift
   // swift-tools-version: 6.2
@@ -241,7 +241,7 @@
   )
   ```
 
-  Create `/Users/ddphuong/Projects/codeintel/tests/fixtures/mini_swift_repo/Sources/MiniSwiftRepo/Greeter.swift`:
+  Create `~/Projects/codeintel/tests/fixtures/mini_swift_repo/Sources/MiniSwiftRepo/Greeter.swift`:
 
   ```swift
   public struct Greeter {
@@ -259,7 +259,7 @@
 
 - [ ] **Step 2: Write the failing test**
 
-  In `/Users/ddphuong/Projects/codeintel/tests/test_index_cli.py`, add near the top (after line 21's existing `_missing = [...]`, so both binary-presence checks live together):
+  In `~/Projects/codeintel/tests/test_index_cli.py`, add near the top (after line 21's existing `_missing = [...]`, so both binary-presence checks live together):
 
   ```python
   FIXTURE_REPO_SWIFT = Path(__file__).parent / "fixtures" / "mini_swift_repo"
@@ -306,30 +306,30 @@
 
 - [ ] **Step 3: Run it and confirm it's SKIPPED (not FAILED) if `scip-swift` isn't on PATH yet**
 
-  Run: `cd /Users/ddphuong/Projects/codeintel && uv run pytest tests/test_index_cli.py::test_index_repo_end_to_end_for_swift_repo -v`
+  Run: `cd ~/Projects/codeintel && uv run pytest tests/test_index_cli.py::test_index_repo_end_to_end_for_swift_repo -v`
   Expected (before installing `scip-swift`): `SKIPPED (missing required binaries: ['scip-swift'])` — proves the skip-gate itself works and the test doesn't error out just from being collected.
 
 - [ ] **Step 4: Install the real scip-swift binary and confirm the test passes**
 
   Run:
   ```bash
-  cp /Users/ddphuong/Projects/scip-swift/.build/release/scip-swift /usr/local/bin/scip-swift
-  # (build it first if not already: cd /Users/ddphuong/Projects/scip-swift && swift build -c release)
+  cp ~/Projects/scip-swift/.build/release/scip-swift /usr/local/bin/scip-swift
+  # (build it first if not already: cd ~/Projects/scip-swift && swift build -c release)
   which scip-swift scip zoekt-index
-  cd /Users/ddphuong/Projects/codeintel
+  cd ~/Projects/codeintel
   uv run pytest tests/test_index_cli.py::test_index_repo_end_to_end_for_swift_repo -v
   ```
   Expected: `PASSED` — confirms `entry.status == "indexed"`, `entry.language == "swift"`, and at least one symbol (`Greeter`, its `name` property, its `init`, its `greet()` method) landed in `global_symbols`.
 
 - [ ] **Step 5: Run the full existing test suite to confirm no regressions**
 
-  Run: `cd /Users/ddphuong/Projects/codeintel && uv run pytest -v`
+  Run: `cd ~/Projects/codeintel && uv run pytest -v`
   Expected: all previously-passing tests still pass; the new Swift test passes (if `scip-swift` is on `PATH`) or skips cleanly (if not).
 
 - [ ] **Step 6: Commit**
 
   ```bash
-  cd /Users/ddphuong/Projects/codeintel
+  cd ~/Projects/codeintel
   git add tests/fixtures/mini_swift_repo tests/test_index_cli.py
   git commit -m "test: add real end-to-end integration test for Swift indexing via scip-swift"
   ```
