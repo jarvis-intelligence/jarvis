@@ -1061,7 +1061,7 @@ reporting unqualified success."
   - `QueryService.type_hierarchy` returns a 4-tuple `(supertypes, subtypes, freshness, available)` — **breaking change** to that method's contract, consumed only by `server.py`
   - `server.py`'s `typeHierarchy` returns `{"error": "..."}` when unavailable
 
-Why: `scip expt-convert` never writes `global_symbols.relationships` — confirmed by reading `insertGlobalSymbols()` in `cmd/scip/convert.go` at v0.9.0, which binds only symbol/display_name/kind/documentation/enclosing_symbol. So `typeHierarchy` always returns `{"supertypes": [], "subtypes": []}`, which an agent reads as "this type has no supertypes" — a false statement rather than a missing capability. No upstream issue or PR targets this (PR #386 was closed unmerged and touched only the proto).
+Why: `scip expt-convert` never writes `global_symbols.relationships` — confirmed by reading `insertGlobalSymbols()` in `cmd/scip/convert.go` at v0.9.0, which binds only symbol/display_name/kind/documentation/enclosing_symbol. So `typeHierarchy` always returns `{"supertypes": [], "subtypes": []}`, which an agent reads as "this type has no supertypes" — a false statement rather than a missing capability. Reported upstream as [scip-code/scip#464](https://github.com/scip-code/scip/issues/464) (`signature` has the same gap); until that lands, the capability is genuinely unavailable on every real index.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1313,8 +1313,12 @@ display_name, kind, documentation and enclosing_symbol. The tool therefore
 returns an explicit `{"error": ...}` rather than empty arrays, because an empty
 result would assert "this type has no supertypes" when the truth is "cannot
 tell". `query.py`'s logic is complete and self-heals if a future converter
-populates the column. No upstream issue or PR currently targets this (PR #386
-was closed unmerged and touched only the proto).
+populates the column.
+
+Reported upstream: [scip-code/scip#464](https://github.com/scip-code/scip/issues/464)
+— `global_symbols.signature` is unpopulated for the same reason (only five of the
+eight declared columns are ever bound). When that lands, `typeHierarchy` starts
+working with no change here beyond installing the newer `scip`.
 ```
 
 - [ ] **Step 3: Refresh `docs/codebase-summary.md`**
