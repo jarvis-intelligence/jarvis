@@ -33,7 +33,24 @@ requested full coverage rather than scoping down to current usage.
 
 ## Architecture
 
-Single file: `setup.sh` at repo root. POSIX-ish bash.
+Single file: `setup.sh` at repo root.
+
+**Strictly POSIX `sh`, not bash.** When invoked as `curl -fsSL <url> | sh`, the shebang line is
+irrelevant — the interpreter is whatever `sh` is on that machine (bash-in-posix-mode on macOS,
+frequently `dash` on Debian/Ubuntu). So: no arrays, no `[[ ]]`, no `$'...'`, no `local -a`, no
+process substitution. Use `[ ]`, plain positional params, and newline-delimited strings where a
+list is needed. This is a correctness requirement, not a style preference — a bashism here fails
+only on Linux users' machines, which is exactly where it would go unnoticed during development
+on macOS.
+
+**Testability seam:** the script ends with a guard so tests can source it and call individual
+functions without triggering a real install:
+
+```sh
+if [ "${CODEINTEL_SETUP_SOURCED:-}" != "1" ]; then
+  main "$@"
+fi
+```
 
 1. Parse flags: `--only <name>` (install one dependency only), `--force` (reinstall even if
    present and satisfies pinned version).
@@ -50,34 +67,50 @@ Single file: `setup.sh` at repo root. POSIX-ish bash.
 
 ## New CI: zoekt binaries
 
-`google/zoekt` (the `zoekt-index`/`zoekt-webserver` source) publishes **zero GitHub releases** —
-confirmed via `gh api repos/google/zoekt/releases` returning an empty list. There is no
-prebuilt binary to download from upstream on any platform, ever. To give `setup.sh` a real
-zero-prerequisite path for zoekt, codeintel itself will:
+The real upstream is **`github.com/sourcegraph/zoekt`** (confirmed via `go version -m` on the
+working local binaries — *not* `google/zoekt`, which is the long-dormant original). It publishes
+**zero GitHub releases and zero tags** — confirmed via `gh api repos/sourcegraph/zoekt/releases`
+returning `0` and `.../tags` returning empty. There is no prebuilt binary to download from
+upstream on any platform, ever. To give `setup.sh` a real zero-prerequisite path for zoekt,
+codeintel itself will:
 
 - Add a GitHub Actions workflow that cross-compiles `zoekt-index` and `zoekt-webserver` for
-  macOS (arm64, amd64) and Linux (amd64, arm64) — pure Go cross-compilation via `GOOS`/`GOARCH`,
-  no cgo expected (needs verification during implementation).
-- Pin the exact upstream `google/zoekt` commit SHA to build in a version file (e.g.
-  `ZOEKT_COMMIT` at repo root). The workflow only rebuilds/republishes when that file changes
-  (manual PR bump) or on `workflow_dispatch` — no scheduled/automatic tracking of upstream
-  `main`, to avoid inheriting upstream breakage without warning.
+  macOS (arm64, amd64) and Linux (amd64, arm64). **Feasibility verified during design:**
+  `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build github.com/sourcegraph/zoekt/cmd/zoekt-index`
+  from macOS arm64 produces a statically-linked Linux ELF binary. No cgo required.
+- Pin the exact upstream commit SHA to build in a `ZOEKT_COMMIT` file at repo root. Current
+  known-good value: `33f1f18af292` (pseudo-version `v0.0.0-20260709064101-33f1f18af292`, the
+  build the working local binaries came from). The workflow only rebuilds/republishes when that
+  file changes (manual PR bump) or on `workflow_dispatch` — no scheduled/automatic tracking of
+  upstream `main`, to avoid inheriting upstream breakage without warning.
+
+**Runtime caveat:** `zoekt-index` optionally shells out to `universal-ctags` for symbol
+extraction (`-disable_ctags`/`-require_ctags` flags). A `CGO_ENABLED=0` static build still runs
+without ctags present; search works, symbol-aware ranking is reduced. codeintel's
+`index_cli.py` invokes `zoekt-index` without either flag, so ctags is best-effort. Not a
+blocker; noted so the absence of ctags isn't later mistaken for a broken install.
 - Publish the built binaries as assets on codeintel's own GitHub Releases.
 - `setup.sh`'s zoekt installer downloads from codeintel's release assets, not upstream.
 
-## Known risk: `scip` version pinning
+## Resolved: `scip` version pinning
 
-`query.py` explicitly targets the **v0.7.0-era `scip expt-convert` SQLite schema** (per its own
-inline comments — "PRESERVE the v0.7.0 schema notes verbatim"). `scip-code/scip` (the upstream
-project, renamed from `sourcegraph/scip`) is currently at v0.9.0+. If the `expt-convert` SQLite
-schema changed between v0.7.0 and the current release, blindly downloading "latest" in
-`setup.sh` could silently break codeintel's query layer.
+`query.py` explicitly targets the **v0.7.0-era `scip expt-convert` SQLite schema**, and the
+locally verified-working binary is exactly `scip v0.7.0` (confirmed via `scip --version` and
+`go version -m ~/go/bin/scip`). Upstream is now at v0.9.0, raising the question of whether
+fetching a newer version would silently break the query layer.
 
-**Decision needed before implementation:** pin `scip`'s download to a specific version verified
-compatible with codeintel's current schema assumptions, rather than always fetching "latest".
-This requires checking what version was actually tested against, or re-verifying the schema is
-unchanged in v0.9.0 — flagged here as an open item for the implementation phase, not resolved
-by this design.
+**Investigated and resolved during design:** the `expt-convert` SQLite schema is **byte-identical
+between v0.7.0 and v0.9.0** — verified by diffing every `CREATE TABLE`/`CREATE INDEX`/`PRAGMA`
+and column-definition line in `cmd/scip/convert.go` at both tags. All five tables
+(`documents`, `chunks`, `global_symbols`, `mentions`, `defn_enclosing_ranges`) and all indices
+match exactly.
+
+**Decision:** pin to `v0.9.0` via a single `SCIP_VERSION` variable at the top of `setup.sh`
+(never "latest", so an upstream release can't silently change what gets installed). Because
+v0.9.0 has not yet been *executed* against codeintel — only its schema proven identical —
+Task 10 empirically verifies it by running the real integration suite
+(`uv run pytest -m integration`) against the newly installed v0.9.0. If that fails, the pin
+drops to `v0.7.0`, the known-good version.
 
 ## Error handling
 
