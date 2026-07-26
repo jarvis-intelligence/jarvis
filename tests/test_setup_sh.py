@@ -375,3 +375,49 @@ def test_install_zoekt_extracts_both_binaries(tmp_path):
     assert (bin_path / "zoekt-index").is_file()
     assert (bin_path / "zoekt-webserver").is_file()
     assert (bin_path / "zoekt-index").stat().st_mode & 0o111
+
+
+# ------------------------------------------------------ scip-swift installer ----
+
+
+def test_install_scip_swift_skips_on_linux_without_failing(tmp_path):
+    """Swift indexing needs Xcode; a Linux skip is by design, not an error."""
+    result = run_func(
+        'install_scip_swift linux amd64',
+        env={"CODEINTEL_BIN_DIR": str(tmp_path / "bin"), "PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, "skip-by-design must not be a failure"
+    combined = (result.stdout + result.stderr).lower()
+    assert "not available" in combined or "macos" in combined
+
+
+def test_install_scip_swift_skips_on_intel_mac(tmp_path):
+    """Only an arm64 asset is published upstream."""
+    result = run_func(
+        'install_scip_swift darwin amd64',
+        env={"CODEINTEL_BIN_DIR": str(tmp_path / "bin"), "PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    assert "not available" in (result.stdout + result.stderr).lower()
+
+
+def test_scip_swift_asset_name_uses_macos_not_darwin():
+    """The upstream asset is scip-swift-v0.1.0-macos-arm64.tar.gz."""
+    result = run_func('scip_swift_asset_name')
+    name = result.stdout.strip()
+    assert name == "scip-swift-v0.1.0-macos-arm64.tar.gz"
+
+
+def test_install_scip_swift_skips_when_present(tmp_path):
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    stub = fake_bin / "scip-swift"
+    stub.write_text("#!/bin/sh\ntrue\n")
+    stub.chmod(0o755)
+    result = run_func(
+        'install_scip_swift darwin arm64',
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "CODEINTEL_BIN_DIR": str(tmp_path / "b")},
+    )
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "already" in combined or "skip" in combined
