@@ -20,13 +20,31 @@ See [`plans/0724-2316-codeintel-mcp-implementation/`](../plans/0724-2316-codeint
 `detect_language()` now recognizes `.swift` and routes majority-Swift repos to `scip-swift`,
 and `DerivedData`/`.build` are excluded from the extension-majority scan.
 
-**Update (July 26):** [`scip-swift`](https://github.com/phuongddx/scip-swift) now exists, builds,
-and installs on `PATH`. Verified end-to-end against a real 21-file Swift repo: `codeintel index`
-completes without error, `getIndexStatus` reports `language: swift` / `indexed`, and
-`global_symbols` populates (1127 rows). However, `scip-swift`'s emitted occurrences carry no
-`Range` data, so `chunks`/`mentions` stay empty and every per-file nav tool (`documentSymbols`,
-`goToDefinition`, `findReferences`, `callHierarchy`) returns empty results on real Swift repos —
-a gap in `scip-swift` itself, not in `codeintel`'s query layer.
+**Update (July 26) — Swift navigation works; the earlier diagnosis was wrong.**
+An earlier note here claimed `scip-swift` emitted no occurrence ranges. That was
+incorrect. `scip-swift` sets `single_line_range`, the `typed_range` oneof
+introduced in scip.proto (`SingleLineRange single_line_range = 8`), and does not
+set the deprecated repeated-int32 `range` field — which is exactly what the
+current spec tells producers to do.
+
+The ranges were being dropped by two consumers:
+
+1. **`scip expt-convert` v0.7.0** predates `bindings/go/scip/occurrence_range.go`
+   and cannot read `typed_range`, so it silently produced a schema-valid database
+   with `chunks=0, mentions=0`. Verified: the same `.scip` file yields
+   `chunks=0/mentions=0` under v0.7.0 and `chunks=1/mentions=14` under v0.9.0.
+   `setup.sh` pins v0.9.0, and `index_repo()` now refuses anything older.
+2. **codeintel's vendored `scip_pb2.py`** was generated from scip.proto v0.7.0 and
+   had no `typed_range` field, so even a v0.9.0-produced index decoded 0/16
+   occurrence ranges. Regenerated from v0.9.0; `scip_decoder.py` now reads
+   `typed_range` first with a deprecated-`range` fallback, mirroring upstream
+   Go's `Occurrence.SourceRange()`.
+
+Verified end-to-end against a real 21-file Swift repo: `codeintel index` completes
+without error, `getIndexStatus` reports `language: swift` / `indexed`, and both
+`global_symbols` and `chunks`/`mentions` populate — `documentSymbols`,
+`goToDefinition`, `findReferences`, and `callHierarchy` all return real results
+on Swift repos.
 
 **Invocation compatibility (July 26):** `scip-swift` is invoked in its *bare* form
 (`scip-swift --output <path>`, no `index` subcommand token) — unlike the other indexers, which all
@@ -36,6 +54,22 @@ bare form works on every version — old binaries default the repo path to the w
 newer ones dispatch to `index` as their default subcommand. Verified against both v0.1.0 and
 v0.1.1. `scip-swift v0.1.1` was cut to make the released binary match committed behavior (both
 earlier builds reported `0.1.0` despite differing), and `setup.sh` pins `v0.1.1` as the floor.
+
+**`typeHierarchy` is unavailable, and now says so.** `scip expt-convert` declares
+`global_symbols.relationships` in its schema but never writes it —
+`insertGlobalSymbols()` in `cmd/scip/convert.go` (v0.9.0) binds only symbol,
+display_name, kind, documentation and enclosing_symbol. The tool therefore
+returns an explicit `{"error": ...}` rather than empty arrays, because an empty
+result would assert "this type has no supertypes" when the truth is "cannot
+tell". `query.py`'s logic is complete and self-heals if a future converter
+populates the column.
+
+Reported upstream: [scip-code/scip#464](https://github.com/scip-code/scip/issues/464),
+fixed by [scip-code/scip#465](https://github.com/scip-code/scip/pull/465) (open, CI
+green). `global_symbols.signature` is left unpopulated there deliberately — the
+column name and the proto field (`signature_documentation`) diverge. Once #465
+lands, `typeHierarchy` starts working with no change here beyond installing the
+newer `scip`.
 
 **Acceptance criteria met:**
 - ✓ All 8 MCP tools return correct results on real TypeScript/Python repos

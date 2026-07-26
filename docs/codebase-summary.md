@@ -9,6 +9,9 @@ codeintel/
 ├── docs/                    # Documentation
 ├── docs/assets/             # Architecture diagrams
 ├── plans/                   # Implementation plans
+├── .github/workflows/       # CI: build-zoekt.yml, setup-smoke.yml
+├── setup.sh                 # Dependency bootstrapper (scip, zoekt, indexers)
+├── ZOEKT_COMMIT             # Pinned upstream sourcegraph/zoekt commit
 ├── pyproject.toml           # uv-managed project config
 └── README.md                # User-facing getting started
 ```
@@ -28,7 +31,7 @@ codeintel/
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
 | `index_reader.py` | 160 | Vendored filestore reader from SCIP source; `IndexConnectionCache` — thread-safe, size-bounded cache of read-only immutable SQLite connections keyed by `(project, repo, branch, pointer_content)`, NFS-safe pointer invalidation | `IndexConnectionCache`, current pointer file handling |
-| `scip_pb2.py` | 111 | Generated protobuf from scip.proto v0.7.0 (do not edit, vendored codegen) | scip.Document, scip.SymbolInformation, scip.Occurrence, scip.Relationship |
+| `scip_pb2.py` | 111 | Generated protobuf from scip.proto v0.9.0 — regenerated from v0.7.0 because v0.7.0 lacked the `typed_range` oneof that `scip-swift` requires (do not edit, vendored codegen) | scip.Document, scip.SymbolInformation, scip.Occurrence, scip.Relationship |
 | `scip_decoder.py` | 279 | SCIP blob decoder (zstd+protobuf); isolation seam for protobuf dependency | `scip_range_to_positions()`, `kind_name()`, `parse_symbol_package()`, decode SCIP occurrences + relationships |
 | `query.py` | 436 | QueryService: 5 SCIP nav ops + `getIndexStatus` via raw SQL against `scip expt-convert` schema | `QueryService`, `FreshnessSnapshot`, nav result builders |
 | `search.py` | 183 | `searchCode` backend via real httpx client to zoekt-webserver; `ZoektLifecycle` lazy-spawns `zoekt-webserver -rpc`, pidfile-tracked | `searchCode()`, `ZoektLifecycle` |
@@ -48,6 +51,13 @@ codeintel/
 | `index_cli.py` | 356 | The `codeintel` CLI: `index_repo()` pipeline (language detection → language indexer → scip expt-convert → populate graph → zoekt-index → atomic pointer swap → registry update), `_cmd_watch` wires Debouncer to watchdog.Observer | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` |
 | `watch.py` | 55 | `Debouncer` (pure, thread-free, injectable clock) + `should_ignore_path` (.git/node_modules/.venv/__pycache__/dist/build) | `Debouncer`, `should_ignore_path()` |
 
+### Root-Level Files
+
+| File | Lines | Purpose | Key Exports |
+|------|-------|---------|-------------|
+| `setup.sh` | ~430 | POSIX-sh dependency bootstrapper: installs scip, zoekt, scip-swift, and the npm indexers into `~/.codeintel/bin`; detect-only for scip-java | `--only`, `--force` |
+| `ZOEKT_COMMIT` | 1 | Pinned upstream `sourcegraph/zoekt` commit that CI cross-compiles | — |
+
 ## Test Suite (`tests/`)
 
 ### Test Files (1:1 map to src modules)
@@ -65,6 +75,7 @@ codeintel/
 | `test_server_tools.py` | server.py | MCP tool payloads, error handling |
 | `test_index_cli.py` | index_cli.py | Full pipeline (e-2-e); marked `@pytest.mark.integration` — calls real scip-python/scip/zoekt binaries |
 | `test_index_status.py` | index_cli.py + query.py | Freshness snapshot, staleness detection |
+| `test_setup_sh.py` | setup.sh | Sources the script under `dash` (not `sh` — macOS `/bin/sh` accepts bashisms) and tests each function in isolation |
 
 ### Fixtures (`tests/fixtures/`)
 
@@ -103,6 +114,13 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 - **Unit tests** cover all modules except `__init__.py` (dead stub) and `models.py` (trivial frozen dataclasses)
 - **Integration tests** (marked `@pytest.mark.integration`) run real SCIP indexers, `scip expt-convert`, and `zoekt-index` on a mini Python repo
 - **Run tests:** `uv run pytest` (all), `uv run pytest -m "not integration"` (unit only), `uv run pytest -m integration` (real binaries only)
+
+## CI Workflows
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `.github/workflows/build-zoekt.yml` | `ZOEKT_COMMIT` change or manual dispatch | Cross-compiles `zoekt-index`/`zoekt-webserver` for macOS+Linux (arm64/amd64) and publishes them to this repo's releases — upstream `sourcegraph/zoekt` ships no binaries at all |
+| `.github/workflows/setup-smoke.yml` | `setup.sh`/test changes, PRs, manual | Runs `setup.sh` on `ubuntu-latest` (where `/bin/sh` is dash) and `macos-latest`: parse check, install, idempotency, full unit suite |
 
 ## Dependencies & Imports
 

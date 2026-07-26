@@ -63,7 +63,7 @@ and adds it to your shell rc. macOS and Linux; Windows is not supported.
 
 | Purpose | Binary | Source |
 |---------|--------|--------|
-| SCIP → SQLite conversion | `scip` | prebuilt, pinned `v0.9.0` |
+| SCIP → SQLite conversion | `scip` | prebuilt, pinned `v0.9.0` (**minimum** — older versions silently drop occurrence ranges) |
 | Lexical search | `zoekt-index` · `zoekt-webserver` | cross-compiled by [our CI](.github/workflows/build-zoekt.yml) — upstream publishes no binaries |
 | TypeScript indexing | `scip-typescript` | `npm install -g` |
 | Python indexing | `scip-python` | `npm install -g` |
@@ -73,9 +73,10 @@ and adds it to your shell rc. macOS and Linux; Windows is not supported.
 Options: `--only <name>` to install one dependency, `--force` to reinstall,
 `--help` for usage. Re-running is safe: anything already present is skipped.
 
-Swift caveat: `scip-swift` indexes and populates the symbol table, but its
-occurrences carry no source ranges yet, so per-file nav returns empty on Swift
-repos. See [`docs/project-roadmap.md`](docs/project-roadmap.md).
+Swift indexing works end-to-end. It requires `scip >= v0.9.0`: older converters
+cannot read scip.proto's `typed_range` oneof, which is the only range encoding
+`scip-swift` emits, and silently produce an index with no navigable positions.
+`codeintel index` refuses an older `scip` rather than publishing one.
 
 ## Indexing a repo
 
@@ -176,11 +177,16 @@ tool-specific `symbol` or `path`. All tools report failure the same way — a
 
 ### Known upstream limitations
 
-These are real behaviors of `scip expt-convert` v0.7.0, not codeintel bugs:
+These are real behaviors of `scip expt-convert` (as of v0.9.0), not codeintel bugs:
 
-- **`typeHierarchy` returns empty** on real-world indexes (TypeScript and
-  Python alike) — the converter never populates `global_symbols.relationships`.
-- **`displayName` / `kind` are often `null`** for the same reason.
+- **`typeHierarchy` returns an explicit `{"error": ...}`**, not empty arrays, on
+  every real-world index — the converter declares `global_symbols.relationships`
+  in its schema but never writes it. An empty result would wrongly assert "no
+  supertypes"; the error says "cannot tell" instead. Reported upstream:
+  [scip-code/scip#464](https://github.com/scip-code/scip/issues/464), fixed by
+  [scip-code/scip#465](https://github.com/scip-code/scip/pull/465) (open, CI green).
+- **`displayName` / `kind` are often `null`** for symbols the converter only
+  ever sees as bare occurrences (no defining `SymbolInformation` was indexed).
 - **`searchCode`'s `repo` filter matches Zoekt's own repository name** — the
   basename of the directory you indexed — which can diverge from codeintel's
   slug if you passed `--slug`. If a scoped search comes back unexpectedly
@@ -198,8 +204,9 @@ For more details, see:
 ## Standards
 
 Blob decoding follows the [SCIP protocol](https://scip-code.org/docs.html):
-`scip_pb2.py` is generated from `scip.proto` at `sourcegraph/scip` tag
-**v0.7.0**, and occurrence/relationship blobs are decoded as real
+`scip_pb2.py` is generated from `scip.proto` at `scip-code/scip` tag
+**v0.9.0** (regenerated up from v0.7.0, which lacked the `typed_range` oneof
+`scip-swift` requires), and occurrence/relationship blobs are decoded as real
 `scip.Document` / `scip.SymbolInformation` messages.
 
 The SQLite layer (`documents`, `chunks`, `global_symbols`, `mentions`,
