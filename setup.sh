@@ -104,6 +104,92 @@ ensure_on_path() {
 	log_info "added ${_dir} to ${_rc} — run 'exec \$SHELL' or open a new terminal"
 }
 
+# -------------------------------------------------------------- download -----
+
+have_cmd() {
+	command -v "$1" >/dev/null 2>&1
+}
+
+# Echo the sha256 hex digest of a file. macOS ships shasum; Linux sha256sum.
+sha256_of() {
+	if have_cmd sha256sum; then
+		sha256sum "$1" | cut -d' ' -f1
+	elif have_cmd shasum; then
+		shasum -a 256 "$1" | cut -d' ' -f1
+	else
+		log_error "neither sha256sum nor shasum found; cannot verify downloads"
+		return 1
+	fi
+}
+
+verify_sha256() {
+	_file=$1
+	_expected=$2
+	_actual=$(sha256_of "$_file") || return 1
+	if [ "$_actual" != "$_expected" ]; then
+		log_error "checksum mismatch for ${_file}"
+		log_error "  expected: ${_expected}"
+		log_error "  actual:   ${_actual}"
+		return 1
+	fi
+}
+
+download_to() {
+	curl -fsSL --retry 3 -o "$2" "$1"
+}
+
+# Download a .tar.gz plus its .sha256 sidecar, verify, extract one member,
+# and install it into bin_dir() under dest_name.
+#
+#   install_tarball_binary <tar_url> <sha_url> <member> <dest_name>
+install_tarball_binary() {
+	_tar_url=$1
+	_sha_url=$2
+	_member=$3
+	_dest_name=$4
+
+	_tmp=$(mktemp -d)
+	# Clean up the temp dir on every exit path, including failure.
+	# shellcheck disable=SC2064
+	trap "rm -rf '$_tmp'" EXIT
+
+	if ! download_to "$_tar_url" "${_tmp}/archive.tar.gz"; then
+		log_error "download failed: ${_tar_url}"
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	if ! download_to "$_sha_url" "${_tmp}/archive.sha256"; then
+		log_error "checksum download failed: ${_sha_url}"
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	# Sidecar format is "<digest>  <filename>"; take the first field.
+	_expected=$(cut -d' ' -f1 <"${_tmp}/archive.sha256")
+	if ! verify_sha256 "${_tmp}/archive.tar.gz" "$_expected"; then
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	if ! tar -xzf "${_tmp}/archive.tar.gz" -C "$_tmp" "$_member" 2>/dev/null; then
+		log_error "could not extract '${_member}' from archive"
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	ensure_bin_dir
+	mv "${_tmp}/${_member}" "$(bin_dir)/${_dest_name}"
+	chmod +x "$(bin_dir)/${_dest_name}"
+
+	rm -rf "$_tmp"
+	trap - EXIT
+}
+
 # ----------------------------------------------------------------- main ------
 
 main() {

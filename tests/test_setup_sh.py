@@ -5,8 +5,10 @@ main()) and then calls one function, so functions are tested in isolation
 without performing a real install.
 """
 
+import hashlib
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 SETUP_SH = Path(__file__).parent.parent / "setup.sh"
@@ -181,3 +183,81 @@ def test_ensure_on_path_skips_when_already_on_path(tmp_path):
     }
     run_func('ensure_on_path', env=env)
     assert rc.read_text() == ""
+
+
+# ------------------------------------------------- download / verify helper ----
+
+
+def test_have_cmd_true_for_existing_binary():
+    assert run_func('have_cmd sh && echo yes').stdout.strip() == "yes"
+
+
+def test_have_cmd_false_for_missing_binary():
+    result = run_func('have_cmd definitely-not-a-real-binary-xyz && echo yes || echo no')
+    assert result.stdout.strip() == "no"
+
+
+def test_sha256_of_matches_hashlib(tmp_path):
+    f = tmp_path / "data.bin"
+    f.write_bytes(b"codeintel")
+    expected = hashlib.sha256(b"codeintel").hexdigest()
+    result = run_func(f'sha256_of {f}')
+    assert result.stdout.strip() == expected
+
+
+def test_verify_sha256_accepts_correct_digest(tmp_path):
+    f = tmp_path / "data.bin"
+    f.write_bytes(b"codeintel")
+    digest = hashlib.sha256(b"codeintel").hexdigest()
+    result = run_func(f'verify_sha256 {f} {digest} && echo ok')
+    assert result.returncode == 0
+    assert "ok" in result.stdout
+
+
+def test_verify_sha256_rejects_wrong_digest(tmp_path):
+    f = tmp_path / "data.bin"
+    f.write_bytes(b"codeintel")
+    result = run_func(f'verify_sha256 {f} {"0" * 64} || echo rejected')
+    assert "rejected" in result.stdout
+    assert "checksum" in (result.stdout + result.stderr).lower()
+
+
+def test_install_tarball_binary_extracts_and_marks_executable(tmp_path):
+    """End-to-end on a locally built tarball served over file:// — no network."""
+    payload = tmp_path / "mytool"
+    payload.write_text("#!/bin/sh\necho hello-from-mytool\n")
+    tar_path = tmp_path / "mytool.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(payload, arcname="mytool")
+    sha_path = tmp_path / "mytool.tar.gz.sha256"
+    digest = hashlib.sha256(tar_path.read_bytes()).hexdigest()
+    # Upstream .sha256 files use the "<digest>  <filename>" format.
+    sha_path.write_text(f"{digest}  mytool.tar.gz\n")
+
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        f'install_tarball_binary file://{tar_path} file://{sha_path} mytool mytool',
+        env={"CODEINTEL_BIN_DIR": str(bin_path), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    assert result.returncode == 0, result.stderr
+    installed = bin_path / "mytool"
+    assert installed.is_file()
+    assert installed.stat().st_mode & 0o111, "must be executable"
+
+
+def test_install_tarball_binary_refuses_on_checksum_mismatch(tmp_path):
+    payload = tmp_path / "mytool"
+    payload.write_text("#!/bin/sh\ntrue\n")
+    tar_path = tmp_path / "mytool.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(payload, arcname="mytool")
+    sha_path = tmp_path / "mytool.tar.gz.sha256"
+    sha_path.write_text(f"{'0' * 64}  mytool.tar.gz\n")
+
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        f'install_tarball_binary file://{tar_path} file://{sha_path} mytool mytool',
+        env={"CODEINTEL_BIN_DIR": str(bin_path), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    assert result.returncode != 0
+    assert not (bin_path / "mytool").exists(), "must not install an unverified binary"
