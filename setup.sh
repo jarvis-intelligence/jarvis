@@ -52,6 +52,58 @@ detect_arch() {
 	esac
 }
 
+# ------------------------------------------------------------ install dir ----
+
+# Where downloaded binaries go. CODEINTEL_BIN_DIR exists so tests can redirect
+# writes away from the real home directory.
+bin_dir() {
+	if [ -n "${CODEINTEL_BIN_DIR:-}" ]; then
+		echo "$CODEINTEL_BIN_DIR"
+	else
+		echo "${HOME}/.codeintel/bin"
+	fi
+}
+
+ensure_bin_dir() {
+	mkdir -p "$(bin_dir)"
+}
+
+# Echo the shell rc file to modify, or empty if the shell is unrecognized.
+shell_rc_path() {
+	case "${SHELL:-}" in
+	*/zsh) echo "${HOME}/.zshrc" ;;
+	*/bash) echo "${HOME}/.bashrc" ;;
+	*) echo "" ;;
+	esac
+}
+
+# Append the bin dir to the user's shell rc, unless it is already on PATH or
+# the line is already present. Idempotent.
+ensure_on_path() {
+	_dir=$(bin_dir)
+
+	# Already active in this environment: nothing to do.
+	case ":${PATH}:" in
+	*":${_dir}:"*)
+		return 0
+		;;
+	esac
+
+	_rc=$(shell_rc_path)
+	if [ -z "$_rc" ]; then
+		log_warn "unrecognized shell '${SHELL:-}'; add ${_dir} to PATH yourself"
+		return 0
+	fi
+
+	# Already written on a previous run: don't duplicate.
+	if [ -f "$_rc" ] && grep -qF "$_dir" "$_rc" 2>/dev/null; then
+		return 0
+	fi
+
+	printf '\n# added by codeintel setup\nexport PATH="%s:$PATH"\n' "$_dir" >>"$_rc"
+	log_info "added ${_dir} to ${_rc} — run 'exec \$SHELL' or open a new terminal"
+}
+
 # ----------------------------------------------------------------- main ------
 
 main() {

@@ -95,3 +95,89 @@ def test_sourcing_does_not_run_main():
     assert "sourced-ok" in result.stdout
     # main() would print a banner; it must not appear
     assert "codeintel setup" not in result.stdout.lower()
+
+
+# ----------------------------------------------- install dir / PATH wiring ----
+
+
+def test_bin_dir_defaults_under_home():
+    result = run_func('bin_dir', env={"HOME": "/tmp/fake-home"})
+    assert result.stdout.strip() == "/tmp/fake-home/.codeintel/bin"
+
+
+def test_bin_dir_respects_override():
+    result = run_func('bin_dir', env={"CODEINTEL_BIN_DIR": "/custom/bin"})
+    assert result.stdout.strip() == "/custom/bin"
+
+
+def test_ensure_bin_dir_creates_directory(tmp_path):
+    target = tmp_path / "nested" / "bin"
+    result = run_func('ensure_bin_dir', env={"CODEINTEL_BIN_DIR": str(target)})
+    assert result.returncode == 0
+    assert target.is_dir()
+
+
+def test_ensure_bin_dir_is_idempotent(tmp_path):
+    target = tmp_path / "bin"
+    env = {"CODEINTEL_BIN_DIR": str(target)}
+    assert run_func('ensure_bin_dir', env=env).returncode == 0
+    assert run_func('ensure_bin_dir', env=env).returncode == 0
+    assert target.is_dir()
+
+
+def test_shell_rc_path_picks_zshrc_for_zsh():
+    result = run_func('shell_rc_path', env={"SHELL": "/bin/zsh", "HOME": "/tmp/h"})
+    assert result.stdout.strip() == "/tmp/h/.zshrc"
+
+
+def test_shell_rc_path_picks_bashrc_for_bash():
+    result = run_func('shell_rc_path', env={"SHELL": "/bin/bash", "HOME": "/tmp/h"})
+    assert result.stdout.strip() == "/tmp/h/.bashrc"
+
+
+def test_shell_rc_path_empty_for_unknown_shell():
+    result = run_func('shell_rc_path', env={"SHELL": "/usr/bin/fish", "HOME": "/tmp/h"})
+    assert result.stdout.strip() == ""
+
+
+def test_ensure_on_path_appends_export_line(tmp_path):
+    home = tmp_path
+    rc = home / ".zshrc"
+    rc.write_text("# existing content\n")
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        'ensure_on_path',
+        env={"HOME": str(home), "SHELL": "/bin/zsh", "CODEINTEL_BIN_DIR": str(bin_path)},
+    )
+    assert result.returncode == 0
+    content = rc.read_text()
+    assert "# existing content" in content, "must not clobber existing rc content"
+    assert str(bin_path) in content
+
+
+def test_ensure_on_path_is_idempotent(tmp_path):
+    """Running twice must not duplicate the export line."""
+    home = tmp_path
+    rc = home / ".zshrc"
+    rc.write_text("")
+    bin_path = tmp_path / "bin"
+    env = {"HOME": str(home), "SHELL": "/bin/zsh", "CODEINTEL_BIN_DIR": str(bin_path)}
+    run_func('ensure_on_path', env=env)
+    run_func('ensure_on_path', env=env)
+    assert rc.read_text().count(str(bin_path)) == 1
+
+
+def test_ensure_on_path_skips_when_already_on_path(tmp_path):
+    """If the dir is already on PATH, don't touch the rc file at all."""
+    home = tmp_path
+    rc = home / ".zshrc"
+    rc.write_text("")
+    bin_path = tmp_path / "bin"
+    env = {
+        "HOME": str(home),
+        "SHELL": "/bin/zsh",
+        "CODEINTEL_BIN_DIR": str(bin_path),
+        "PATH": f"{bin_path}:/usr/bin:/bin",
+    }
+    run_func('ensure_on_path', env=env)
+    assert rc.read_text() == ""
