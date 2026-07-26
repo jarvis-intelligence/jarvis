@@ -18,10 +18,15 @@ See [`plans/0724-2316-codeintel-mcp-implementation/`](../plans/0724-2316-codeint
 ### Post-Phase-4: Swift Detection (Landed, July 25)
 
 `detect_language()` now recognizes `.swift` and routes majority-Swift repos to `scip-swift`,
-and `DerivedData`/`.build` are excluded from the extension-majority scan. The `scip-swift`
-converter itself does not exist upstream — this is an external prerequisite,
-not something `codeintel` builds. Swift repos raise `IndexingError` until that binary exists
-and is installed on `PATH`.
+and `DerivedData`/`.build` are excluded from the extension-majority scan.
+
+**Update (July 26):** [`scip-swift`](https://github.com/phuongddx/scip-swift) now exists, builds,
+and installs on `PATH`. Verified end-to-end against a real 21-file Swift repo: `codeintel index`
+completes without error, `getIndexStatus` reports `language: swift` / `indexed`, and
+`global_symbols` populates (1127 rows). However, `scip-swift`'s emitted occurrences carry no
+`Range` data, so `chunks`/`mentions` stay empty and every per-file nav tool (`documentSymbols`,
+`goToDefinition`, `findReferences`, `callHierarchy`) returns empty results on real Swift repos —
+a gap in `scip-swift` itself, not in `codeintel`'s query layer.
 
 **Acceptance criteria met:**
 - ✓ All 8 MCP tools return correct results on real TypeScript/Python repos

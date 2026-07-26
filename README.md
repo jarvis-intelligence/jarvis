@@ -65,9 +65,11 @@ Required on `PATH`:
 | SCIP → SQLite conversion | `scip` (uses `scip expt-convert`) |
 | Lexical search | `zoekt-index` · `zoekt-webserver` |
 
-\* `scip-swift` is a converter that chains Apple's `IndexStoreDB` to SCIP; no
-tagged release exists yet, so `.swift` repos raise `IndexingError` until one
-is installed on `PATH`.
+\* `scip-swift` ([phuongddx/scip-swift](https://github.com/phuongddx/scip-swift)) chains Apple's
+`IndexStoreDB` to SCIP. It builds and installs cleanly, and `codeintel index` runs it end-to-end
+without error — but its occurrences carry no source `Range` yet, so nav tools (`documentSymbols`,
+`goToDefinition`, `findReferences`, `callHierarchy`) return empty results on real Swift repos today.
+That's a gap in `scip-swift` itself, not in `codeintel`'s query layer.
 
 ## Indexing a repo
 

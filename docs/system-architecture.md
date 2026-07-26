@@ -330,10 +330,12 @@ Indexing is exclusive — only one reindex can run at a time per slug (enforced 
   - `scip-typescript` — TypeScript/JavaScript indexing
   - `scip-python` — Python indexing
   - `scip-java` — Java/Kotlin indexing
-  - `scip-swift` — Swift indexing. **Does not exist yet** — no such indexer is published
-    upstream; `.swift` repos raise `IndexingError` until one is built and installed.
-    Requires a macOS host (Xcode + iOS SDK) for any repo importing Apple-platform
-    frameworks.
+  - `scip-swift` — Swift indexing ([phuongddx/scip-swift](https://github.com/phuongddx/scip-swift)).
+    Exists, builds, and runs end-to-end via `codeintel index` without error, populating the
+    symbol table. **Known gap:** its occurrences carry no `Range` data, so `chunks`/`mentions`
+    stay empty and per-file nav (`documentSymbols`/`goToDefinition`/`findReferences`/
+    `callHierarchy`) returns empty on real repos — a `scip-swift` limitation, not codeintel's.
+    Requires a macOS host (Xcode + iOS SDK) for any repo importing Apple-platform frameworks.
 - **SCIP converter:**
   - `scip` (uses `scip expt-convert` subcommand)
 - **Search indexer & server:**

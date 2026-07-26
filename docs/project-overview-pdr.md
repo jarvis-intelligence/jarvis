@@ -27,7 +27,7 @@
 | 3 | Indexer CLI (`codeintel index`), registry, embedded Zoekt + `searchCode` | ✓ Done |
 | 4 | `blastRadius` (package dependency graph) + `codeintel watch` (auto-reindex) | ✓ Done |
 
-**Language support:** TypeScript, Python, Java, plus Swift *detection only* — `.swift` repos are recognized by `detect_language()` and routed to `scip-swift`, but no `scip-swift` binary exists upstream yet, so Swift repos raise `IndexingError` until one is built. One language per index; language detection by file-extension plurality.
+**Language support:** TypeScript, Python, Java, plus Swift — `.swift` repos are recognized by `detect_language()` and routed to [`scip-swift`](https://github.com/phuongddx/scip-swift), which now exists, builds, and indexes end-to-end without error. Nav tools return empty results on Swift repos today because `scip-swift`'s occurrences carry no `Range` data yet (a `scip-swift` gap, not codeintel's). One language per index; language detection by file-extension plurality.
 
 **8 MCP tools:** `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `blastRadius`
 
