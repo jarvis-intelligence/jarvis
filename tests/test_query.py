@@ -6,6 +6,7 @@ bare-`repo`-slug API."""
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -98,7 +99,8 @@ def test_call_hierarchy_empty_for_symbol_with_no_data(query_service: QueryServic
 
 
 def test_type_hierarchy_returns_real_supertype(query_service: QueryService):
-    supertypes, subtypes, _ = query_service.type_hierarchy(REPO, CLASS_SYMBOL)
+    supertypes, subtypes, _, available = query_service.type_hierarchy(REPO, CLASS_SYMBOL)
+    assert available is True
     assert len(supertypes) == 1
     assert supertypes[0].symbol.symbol == ANIMAL_SYMBOL
     assert supertypes[0].location.path == DOC_ANIMAL
@@ -108,6 +110,48 @@ def test_type_hierarchy_returns_real_supertype(query_service: QueryService):
 def test_type_hierarchy_empty_for_null_relationships(query_service: QueryService):
     """METHOD_SYMBOL's relationships is NULL — the real-world v0.7.0 case
     for every symbol — must be an honest empty result, never an error."""
-    supertypes, subtypes, _ = query_service.type_hierarchy(REPO, METHOD_SYMBOL)
+    supertypes, subtypes, _, _ = query_service.type_hierarchy(REPO, METHOD_SYMBOL)
     assert supertypes == []
     assert subtypes == []
+
+
+def test_relationship_data_present_false_when_all_null(tmp_path):
+    from codeintel.query import relationship_data_present
+
+    db = tmp_path / "i.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE global_symbols (
+            id INTEGER PRIMARY KEY, symbol TEXT, relationships BLOB
+        );
+        INSERT INTO global_symbols (symbol, relationships) VALUES ('a', NULL);
+        INSERT INTO global_symbols (symbol, relationships) VALUES ('b', NULL);
+        """
+    )
+    conn.commit()
+    try:
+        assert relationship_data_present(conn) is False
+    finally:
+        conn.close()
+
+
+def test_relationship_data_present_true_when_any_non_null(tmp_path):
+    from codeintel.query import relationship_data_present
+
+    db = tmp_path / "i.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE global_symbols (
+            id INTEGER PRIMARY KEY, symbol TEXT, relationships BLOB
+        );
+        INSERT INTO global_symbols (symbol, relationships) VALUES ('a', NULL);
+        INSERT INTO global_symbols (symbol, relationships) VALUES ('b', X'00');
+        """
+    )
+    conn.commit()
+    try:
+        assert relationship_data_present(conn) is True
+    finally:
+        conn.close()

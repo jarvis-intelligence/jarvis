@@ -311,6 +311,23 @@ def _type_hierarchy_subtypes(conn: sqlite3.Connection, symbol: str) -> list[Type
     return entries
 
 
+def relationship_data_present(conn: sqlite3.Connection) -> bool:
+    """True when any symbol carries relationship data.
+
+    `scip expt-convert` declares `global_symbols.relationships` in its schema
+    but never writes it -- `insertGlobalSymbols()` binds only symbol,
+    display_name, kind, documentation and enclosing_symbol (verified against
+    cmd/scip/convert.go at v0.9.0). Type hierarchy is therefore unanswerable
+    on every real index, and reporting an empty result would assert that a
+    type has no supertypes rather than that we cannot tell.
+
+    Self-healing: this flips to True with no code change if a future
+    converter starts populating the column.
+    """
+    row = conn.execute("SELECT 1 FROM global_symbols WHERE relationships IS NOT NULL LIMIT 1").fetchone()
+    return row is not None
+
+
 class QueryService:
     """Implements the 5 SCIP nav tools + getIndexStatus against index.db."""
 
@@ -395,11 +412,20 @@ class QueryService:
 
     def type_hierarchy(
         self, repo: str, symbol: str
-    ) -> tuple[list[TypeHierarchyEntry], list[TypeHierarchyEntry], FreshnessSnapshot]:
+    ) -> tuple[list[TypeHierarchyEntry], list[TypeHierarchyEntry], FreshnessSnapshot, bool]:
+        """Returns (supertypes, subtypes, freshness, available).
+
+        `available` is False when the index carries no relationship data at
+        all, which the caller must surface as "cannot answer" rather than as
+        an empty hierarchy.
+        """
         conn, metadata = get_connection(self._cache, repo)
+        available = relationship_data_present(conn)
+        if not available:
+            return [], [], _freshness_snapshot(metadata), False
         supertypes = _type_hierarchy_supertypes(conn, symbol)
         subtypes = _type_hierarchy_subtypes(conn, symbol)
-        return supertypes, subtypes, _freshness_snapshot(metadata)
+        return supertypes, subtypes, _freshness_snapshot(metadata), True
 
     def get_index_status(self, repo: str, repo_path: str | None = None) -> tuple[bool, FreshnessSnapshot]:
         """`repo_path` (optional): a local git working directory to compare

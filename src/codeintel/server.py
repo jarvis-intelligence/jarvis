@@ -111,13 +111,28 @@ def call_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
 
 @mcp.tool(name="typeHierarchy")
 def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
-    """Single-level super/subtypes for `symbol` within `repo` (empty on real
-    v0.7.0 indexes today — the converter never populates `relationships`)."""
+    """Single-level super/subtypes for `symbol` within `repo`.
+
+    Returns an explicit error when the index carries no relationship data —
+    `scip expt-convert` does not populate `global_symbols.relationships`, so
+    an empty result would wrongly imply the symbol has no supertypes."""
     try:
-        supertypes, subtypes, freshness = _service().type_hierarchy(repo, symbol)
+        supertypes, subtypes, freshness, available = _service().type_hierarchy(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return {"error": str(exc)}
+    if not available:
+        return {
+            "error": (
+                "typeHierarchy unavailable for this index: no symbol carries relationship "
+                "data. `scip expt-convert` declares global_symbols.relationships but never "
+                "writes it, so super/subtypes cannot be determined. This is an upstream "
+                "converter limitation, not a missing symbol — do not read it as "
+                "'this type has no supertypes'."
+            ),
+            "symbol": symbol,
+            **_freshness_fields(freshness),
+        }
     return {
         "symbol": symbol,
         "supertypes": [_json_safe(asdict(e)) for e in supertypes],

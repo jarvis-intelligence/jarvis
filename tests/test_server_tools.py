@@ -178,3 +178,41 @@ async def test_blast_radius_unknown_package_returns_error_payload(tmp_path: Path
     finally:
         store.close()
         monkeypatch.setattr(server, "_graph_store", None)
+
+
+@pytest.mark.anyio
+async def test_type_hierarchy_reports_unavailable_instead_of_empty(monkeypatch):
+    """Empty arrays read as "no supertypes exist" -- a false answer.
+
+    scip expt-convert never populates global_symbols.relationships on a real
+    index, so the tool cannot answer and must say so rather than imply one.
+    """
+
+    def _unavailable(self, repo, symbol):
+        _, metadata = query.get_connection(self._cache, repo)
+        return [], [], query._freshness_snapshot(metadata), False
+
+    monkeypatch.setattr(server.QueryService, "type_hierarchy", _unavailable)
+    async with create_connected_server_and_client_session(server.mcp) as client:
+        result = await client.call_tool("typeHierarchy", {"repo": REPO, "symbol": "x"})
+        payload = json.loads(result.content[0].text)
+
+    assert "error" in payload, payload
+    assert "relationships" in payload["error"].lower()
+    assert "supertypes" not in payload
+
+
+@pytest.mark.anyio
+async def test_type_hierarchy_returns_results_when_relationships_present():
+    """The synthetic fixture DOES carry a contrived non-NULL relationships
+    blob for `Greeter#`, so the available path is what this index exercises —
+    no monkeypatching needed. Guards against the unavailable branch
+    swallowing genuine results.
+    """
+    async with create_connected_server_and_client_session(server.mcp) as client:
+        result = await client.call_tool("typeHierarchy", {"repo": REPO, "symbol": "x"})
+        payload = json.loads(result.content[0].text)
+
+    assert "error" not in payload, payload
+    assert "supertypes" in payload
+    assert "subtypes" in payload
