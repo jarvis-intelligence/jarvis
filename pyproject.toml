@@ -10,8 +10,9 @@ requires-python = ">=3.12"
 dependencies = [
     "mcp[cli]>=1.2.0",
     # Runtime must stay >= the gencode version vendored in scip_pb2.py
-    # (generated against libprotoc 35.0 / grpcio-tools 7.35.1 — see that file's header).
-    "protobuf>=7.35.0,<8.0.0",
+    # (generated against libprotoc 35.1 — see that file's header). Gencode
+    # calls ValidateProtobufRuntimeVersion and refuses an older runtime.
+    "protobuf>=7.35.1,<8.0.0",
     "zstandard>=0.23.0,<1.0.0",
     "httpx>=0.27",
 ]

@@ -171,3 +171,32 @@ def test_only_scip_decoder_and_test_fixtures_import_scip_pb2():
             offenders.append(str(path))
 
     assert offenders == [], f"scip_pb2 imported outside the decoder module: {offenders}"
+
+
+def test_scip_pb2_exposes_typed_range_oneof():
+    """scip.proto gained a typed_range oneof; the old v0.7.0 gencode lacks it.
+
+    Without these fields the decoder cannot see ranges produced by any modern
+    indexer (scip-swift writes single_line_range and never the deprecated
+    repeated-int32 range), so every occurrence looks position-less.
+    """
+    from codeintel import scip_pb2
+
+    field_names = {f.name for f in scip_pb2.Occurrence.DESCRIPTOR.fields}
+    assert "single_line_range" in field_names
+    assert "multi_line_range" in field_names
+    # The deprecated field must remain readable for older indexes.
+    assert "range" in field_names
+
+    oneof_names = {o.name for o in scip_pb2.Occurrence.DESCRIPTOR.oneofs}
+    assert "typed_range" in oneof_names
+
+
+def test_single_line_range_message_shape():
+    from codeintel import scip_pb2
+
+    r = scip_pb2.SingleLineRange()
+    r.line = 4
+    r.start_character = 2
+    r.end_character = 9
+    assert (r.line, r.start_character, r.end_character) == (4, 2, 9)
