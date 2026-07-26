@@ -31,7 +31,13 @@ _LANGUAGE_INDEXERS: dict[str, tuple[str, list[str]]] = {
     ".py": ("python", ["scip-python", "index"]),
     ".java": ("java", ["scip-java", "index"]),
     ".kt": ("java", ["scip-java", "index"]),
-    ".swift": ("swift", ["scip-swift", "index"]),
+    # No "index" token, unlike the others: scip-swift gained its `index`
+    # subcommand only after v0.1.0 was released, so `scip-swift index …` fails
+    # against that binary (it parses "index" as the repo path). The bare form
+    # works on every version -- old binaries default the repo path to cwd, and
+    # newer ones dispatch to `index` as their default subcommand. Verified
+    # against both v0.1.0 and v0.1.1. Do not add "index" back.
+    ".swift": ("swift", ["scip-swift"]),
 }
 # Priority order for tie-breaking when extension counts are equal.
 _EXT_PRIORITY = [".ts", ".tsx", ".py", ".java", ".kt", ".swift"]

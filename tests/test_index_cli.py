@@ -73,6 +73,18 @@ def test_detect_language_picks_swift_for_swift_files(tmp_path: Path):
     assert cmd[0] == "scip-swift"
 
 
+def test_swift_invocation_omits_index_subcommand(tmp_path: Path):
+    """The bare form is required for cross-version compatibility.
+
+    scip-swift only gained its `index` subcommand after v0.1.0 shipped, so
+    `scip-swift index --output ...` fails against that released binary -- it
+    parses "index" as the repo path. The bare form works on every version.
+    """
+    (tmp_path / "a.swift").write_text("let x = 1\n")
+    _, cmd = detect_language(tmp_path)
+    assert cmd == ["scip-swift"], f"must stay bare for version tolerance, got {cmd}"
+
+
 def test_detect_language_tie_break_prefers_earlier_priority_over_swift(tmp_path: Path):
     (tmp_path / "a.java").write_text("class A {}\n")
     (tmp_path / "b.java").write_text("class B {}\n")

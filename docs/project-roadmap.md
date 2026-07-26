@@ -28,6 +28,15 @@ completes without error, `getIndexStatus` reports `language: swift` / `indexed`,
 `goToDefinition`, `findReferences`, `callHierarchy`) returns empty results on real Swift repos —
 a gap in `scip-swift` itself, not in `codeintel`'s query layer.
 
+**Invocation compatibility (July 26):** `scip-swift` is invoked in its *bare* form
+(`scip-swift --output <path>`, no `index` subcommand token) — unlike the other indexers, which all
+take `index`. Reason: `scip-swift`'s `index` subcommand landed *after* its `v0.1.0` release, so the
+v0.1.0 binary parses `index` as the repo path and fails with "Could not detect a build system". The
+bare form works on every version — old binaries default the repo path to the working directory,
+newer ones dispatch to `index` as their default subcommand. Verified against both v0.1.0 and
+v0.1.1. `scip-swift v0.1.1` was cut to make the released binary match committed behavior (both
+earlier builds reported `0.1.0` despite differing), and `setup.sh` pins `v0.1.1` as the floor.
+
 **Acceptance criteria met:**
 - ✓ All 8 MCP tools return correct results on real TypeScript/Python repos
 - ✓ `codeintel index` end-to-end: language detection → indexer → scip expt-convert → zoekt-index → atomic publish → registry update

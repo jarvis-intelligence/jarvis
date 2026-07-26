@@ -54,22 +54,28 @@ All 4 planned phases shipped. See
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/phuongddx/codeintel/main/setup.sh | sh
 uv sync
 ```
 
-Required on `PATH`:
+`setup.sh` installs every external binary codeintel needs into `~/.codeintel/bin`
+and adds it to your shell rc. macOS and Linux; Windows is not supported.
 
-| Purpose | Binary |
-|---------|--------|
-| SCIP indexer (pick per language) | `scip-typescript` · `scip-python` · `scip-java` · `scip-swift`* |
-| SCIP → SQLite conversion | `scip` (uses `scip expt-convert`) |
-| Lexical search | `zoekt-index` · `zoekt-webserver` |
+| Purpose | Binary | Source |
+|---------|--------|--------|
+| SCIP → SQLite conversion | `scip` | prebuilt, pinned `v0.9.0` |
+| Lexical search | `zoekt-index` · `zoekt-webserver` | cross-compiled by [our CI](.github/workflows/build-zoekt.yml) — upstream publishes no binaries |
+| TypeScript indexing | `scip-typescript` | `npm install -g` |
+| Python indexing | `scip-python` | `npm install -g` |
+| Swift indexing | `scip-swift` | prebuilt, macOS arm64 only |
+| Java/Kotlin indexing | `scip-java` | detect-only — Docker image, asks before pulling |
 
-\* `scip-swift` ([phuongddx/scip-swift](https://github.com/phuongddx/scip-swift)) chains Apple's
-`IndexStoreDB` to SCIP. It builds and installs cleanly, and `codeintel index` runs it end-to-end
-without error — but its occurrences carry no source `Range` yet, so nav tools (`documentSymbols`,
-`goToDefinition`, `findReferences`, `callHierarchy`) return empty results on real Swift repos today.
-That's a gap in `scip-swift` itself, not in `codeintel`'s query layer.
+Options: `--only <name>` to install one dependency, `--force` to reinstall,
+`--help` for usage. Re-running is safe: anything already present is skipped.
+
+Swift caveat: `scip-swift` indexes and populates the symbol table, but its
+occurrences carry no source ranges yet, so per-file nav returns empty on Swift
+repos. See [`docs/project-roadmap.md`](docs/project-roadmap.md).
 
 ## Indexing a repo
 

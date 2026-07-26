@@ -22,7 +22,10 @@ SCIP_REPO="scip-code/scip"
 ZOEKT_COMMIT_PIN="33f1f18af292"
 CODEINTEL_REPO="phuongddx/codeintel"
 
-SCIP_SWIFT_VERSION="v0.1.0"
+# v0.1.1 is the first release whose binary supports `scip-swift index …`, the
+# form index_cli.py invokes. v0.1.0 predates that subcommand and cannot be
+# driven by codeintel at all.
+SCIP_SWIFT_VERSION="v0.1.1"
 SCIP_SWIFT_REPO="phuongddx/scip-swift"
 
 # ---------------------------------------------------------------- logging ----
@@ -47,12 +50,21 @@ log_error() {
 # Returns non-zero (i.e. "no") when there is no tty, so non-interactive runs
 # never hang and never silently opt in.
 confirm() {
-	if [ ! -r /dev/tty ]; then
+	# `[ -r /dev/tty ]` is NOT sufficient: the device node can exist and test as
+	# readable while no controlling terminal is attached (CI, a piped
+	# subprocess). Writing to it then fails with a raw "Device not configured"
+	# error that looks like a broken installer. Probe it for real instead.
+	#
+	# The subshell is load-bearing. POSIX requires the shell to ABORT on a
+	# redirection error against a special built-in, and `:` is one -- so a bare
+	# `{ : >/dev/tty; }` kills the script (dash exits 2) instead of returning
+	# false. Containing it in a subshell turns that abort into an exit status.
+	if ! ( : >/dev/tty ) 2>/dev/null; then
 		log_info "no terminal available — assuming no"
 		return 1
 	fi
-	printf '%s [y/N] ' "$1" >/dev/tty
-	read -r _answer </dev/tty || return 1
+	printf '%s [y/N] ' "$1" >/dev/tty 2>/dev/null || return 1
+	read -r _answer </dev/tty 2>/dev/null || return 1
 	case "$_answer" in
 	y | Y | yes | YES) return 0 ;;
 	*) return 1 ;;
@@ -136,6 +148,10 @@ ensure_on_path() {
 		return 0
 	fi
 
+	# SC2016 is intentional here: $PATH must stay LITERAL in the rc file so it
+	# expands at shell-startup time. Expanding it now would bake today's PATH
+	# permanently into the rc.
+	# shellcheck disable=SC2016
 	printf '\n# added by codeintel setup\nexport PATH="%s:$PATH"\n' "$_dir" >>"$_rc"
 	log_info "added ${_dir} to ${_rc} — run 'exec \$SHELL' or open a new terminal"
 }
@@ -419,13 +435,117 @@ install_scip_java() {
 	return 0
 }
 
+# ------------------------------------------------------------ orchestration --
+
+ONLY=""
+FORCE=0
+# POSIX: no arrays, so the summary is a newline-delimited string.
+SUMMARY=""
+EXIT_CODE=0
+
+usage() {
+	cat <<'EOF'
+Usage: setup.sh [options]
+
+Installs codeintel's external binary dependencies into ~/.codeintel/bin.
+
+Options:
+  --only <name>   Install just one dependency. One of:
+                  scip, zoekt, scip-swift, scip-typescript,
+                  scip-python, scip-java
+  --force         Reinstall even if already present
+  --help          Show this message
+
+Environment:
+  CODEINTEL_BIN_DIR   Override the install directory
+EOF
+}
+
+parse_args() {
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--only)
+			if [ $# -lt 2 ]; then
+				log_error "--only requires a value"
+				return 1
+			fi
+			ONLY=$2
+			shift 2
+			;;
+		--force)
+			FORCE=1
+			shift
+			;;
+		--help | -h)
+			usage
+			exit 0
+			;;
+		*)
+			log_error "unknown option: $1"
+			usage >&2
+			return 1
+			;;
+		esac
+	done
+}
+
+record() {
+	SUMMARY="${SUMMARY}$1:$2
+"
+}
+
+print_summary() {
+	echo ""
+	echo "summary"
+	printf '%s' "$SUMMARY" | while IFS=: read -r _name _status; do
+		[ -n "$_name" ] || continue
+		printf '  %-16s %s\n' "$_name" "$_status"
+	done
+}
+
+# Run one installer, isolating failure so a single bad dependency never
+# aborts the whole run.
+run_one() {
+	_name=$1
+	shift
+	if "$@"; then
+		record "$_name" "ok"
+	else
+		record "$_name" "FAILED"
+		EXIT_CODE=1
+	fi
+}
+
+should_run() {
+	[ -z "$ONLY" ] || [ "$ONLY" = "$1" ]
+}
+
 # ----------------------------------------------------------------- main ------
 
 main() {
+	parse_args "$@" || exit 2
+
 	echo "codeintel setup"
-	OS=$(detect_os)
-	ARCH=$(detect_arch)
+	OS=$(detect_os) || exit 1
+	ARCH=$(detect_arch) || exit 1
 	log_info "platform: ${OS}/${ARCH}"
+	log_info "install dir: $(bin_dir)"
+	echo ""
+
+	ensure_bin_dir
+
+	# `if` form rather than `should_run X && run_one …`: unambiguous exit-status
+	# semantics under `set -e` across dash and bash-posix.
+	if should_run scip; then run_one scip install_scip "$OS" "$ARCH"; fi
+	if should_run zoekt; then run_one zoekt install_zoekt "$OS" "$ARCH"; fi
+	if should_run scip-swift; then run_one scip-swift install_scip_swift "$OS" "$ARCH"; fi
+	if should_run scip-typescript; then run_one scip-typescript install_scip_typescript; fi
+	if should_run scip-python; then run_one scip-python install_scip_python; fi
+	if should_run scip-java; then run_one scip-java install_scip_java; fi
+
+	ensure_on_path
+	print_summary
+	exit "$EXIT_CODE"
 }
 
 # Testability seam: tests source this file with CODEINTEL_SETUP_SOURCED=1 to

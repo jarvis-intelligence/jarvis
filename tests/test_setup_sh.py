@@ -157,6 +157,10 @@ def test_ensure_on_path_appends_export_line(tmp_path):
     content = rc.read_text()
     assert "# existing content" in content, "must not clobber existing rc content"
     assert str(bin_path) in content
+    # $PATH must remain LITERAL so it expands at shell startup. If it expanded
+    # at install time, the rc would freeze today's PATH forever.
+    assert 'export PATH="' in content
+    assert ':$PATH"' in content, "$PATH must not be expanded when written"
 
 
 def test_ensure_on_path_is_idempotent(tmp_path):
@@ -322,6 +326,28 @@ def test_confirm_returns_nonzero_when_no_tty_available(tmp_path):
         stdin=subprocess.DEVNULL,
     )
     assert "NO" in result.stdout
+
+
+def test_confirm_emits_no_raw_shell_errors_without_a_tty(tmp_path):
+    """`[ -r /dev/tty ]` alone is not enough.
+
+    The device node can exist and test as readable while no controlling
+    terminal is attached (CI, a piped subprocess). Writing to it then fails
+    with a raw "Device not configured" / "No such device" error, which looks
+    like a broken installer. confirm() must probe the tty for real and stay
+    quiet.
+    """
+    result = subprocess.run(
+        [POSIX_SH, "-c", f'. {SETUP_SH}\nconfirm "proceed?" && echo YES || echo NO'],
+        capture_output=True,
+        text=True,
+        env={"CODEINTEL_SETUP_SOURCED": "1", "PATH": "/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL,
+    )
+    assert "NO" in result.stdout
+    combined = result.stdout + result.stderr
+    for noise in ("/dev/tty", "Device not configured", "No such device"):
+        assert noise not in combined, f"leaked raw shell error: {combined!r}"
 
 
 def test_confirm_does_not_read_from_stdin(tmp_path):
@@ -530,10 +556,22 @@ def test_install_scip_swift_skips_on_intel_mac(tmp_path):
 
 
 def test_scip_swift_asset_name_uses_macos_not_darwin():
-    """The upstream asset is scip-swift-v0.1.0-macos-arm64.tar.gz."""
+    """The asset says "macos", not "darwin" — unlike scip's own assets."""
     result = run_func('scip_swift_asset_name')
     name = result.stdout.strip()
-    assert name == "scip-swift-v0.1.0-macos-arm64.tar.gz"
+    assert name == "scip-swift-v0.1.1-macos-arm64.tar.gz"
+
+
+def test_scip_swift_pin_is_at_least_v0_1_1():
+    """v0.1.0's binary lacks the `index` subcommand index_cli.py invokes.
+
+    Pinning back to v0.1.0 would install a scip-swift that codeintel cannot
+    drive at all, so guard the floor explicitly.
+    """
+    version = run_func('echo "$SCIP_SWIFT_VERSION"').stdout.strip()
+    assert version != "v0.1.0", "v0.1.0 cannot be invoked as `scip-swift index`"
+    parts = version.lstrip("v").split(".")
+    assert tuple(int(p) for p in parts) >= (0, 1, 1), f"too old: {version}"
 
 
 def test_install_scip_swift_skips_when_present(tmp_path):
@@ -549,3 +587,70 @@ def test_install_scip_swift_skips_when_present(tmp_path):
     assert result.returncode == 0
     combined = (result.stdout + result.stderr).lower()
     assert "already" in combined or "skip" in combined
+
+
+# ------------------------------------------------ orchestration / flags / summary ----
+
+
+def test_help_flag_exits_zero_and_prints_usage():
+    result = subprocess.run(
+        [POSIX_SH, str(SETUP_SH), "--help"],
+        capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+    )
+    assert result.returncode == 0
+    assert "usage" in result.stdout.lower()
+    assert "--only" in result.stdout
+
+
+def test_parse_args_sets_only():
+    result = run_func('parse_args --only scip; echo "ONLY=$ONLY"')
+    assert "ONLY=scip" in result.stdout
+
+
+def test_parse_args_sets_force():
+    result = run_func('parse_args --force; echo "FORCE=$FORCE"')
+    assert "FORCE=1" in result.stdout
+
+
+def test_parse_args_rejects_unknown_flag():
+    result = run_func('parse_args --bogus || echo rejected')
+    assert "rejected" in result.stdout
+
+
+def test_record_and_print_summary_roundtrip():
+    result = run_func(
+        'SUMMARY=""; record scip installed; record zoekt skipped; print_summary'
+    )
+    assert "scip" in result.stdout
+    assert "installed" in result.stdout
+    assert "zoekt" in result.stdout
+    assert "skipped" in result.stdout
+
+
+def test_only_flag_runs_single_installer(tmp_path):
+    """--only scip must not attempt npm installers."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    npm_log = tmp_path / "npm-called.txt"
+    npm_stub = fake_bin / "npm"
+    npm_stub.write_text(f'#!/bin/sh\necho called >> {npm_log}\n')
+    npm_stub.chmod(0o755)
+    # Pre-place a scip stub so no download happens.
+    scip_stub = fake_bin / "scip"
+    scip_stub.write_text("#!/bin/sh\ntrue\n")
+    scip_stub.chmod(0o755)
+
+    result = subprocess.run(
+        [POSIX_SH, str(SETUP_SH), "--only", "scip"],
+        capture_output=True, text=True,
+        env={
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "CODEINTEL_BIN_DIR": str(tmp_path / "bin"),
+            "SHELL": "/bin/zsh",
+        },
+        stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not npm_log.exists(), "--only scip must not run npm installers"
