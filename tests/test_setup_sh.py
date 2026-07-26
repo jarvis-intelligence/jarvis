@@ -309,6 +309,71 @@ def test_install_scip_skips_when_already_present(tmp_path):
     assert "already" in combined or "skip" in combined
 
 
+# --------------------------------------------- scip-java detect-only / confirm ----
+
+
+def test_confirm_returns_nonzero_when_no_tty_available(tmp_path):
+    """Non-interactive runs (piped, CI) must default to "no", never hang."""
+    result = subprocess.run(
+        [POSIX_SH, "-c", f'. {SETUP_SH}\nconfirm "proceed?" && echo YES || echo NO'],
+        capture_output=True,
+        text=True,
+        env={"CODEINTEL_SETUP_SOURCED": "1", "PATH": "/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL,
+    )
+    assert "NO" in result.stdout
+
+
+def test_confirm_does_not_read_from_stdin(tmp_path):
+    """Feeding "y" on stdin must NOT be accepted — it must come from /dev/tty.
+
+    This is the curl|sh correctness guard: stdin there is the script itself.
+    """
+    result = subprocess.run(
+        [POSIX_SH, "-c", f'. {SETUP_SH}\nconfirm "proceed?" && echo YES || echo NO'],
+        capture_output=True,
+        text=True,
+        env={"CODEINTEL_SETUP_SOURCED": "1", "PATH": "/usr/bin:/bin"},
+        input="y\n",
+    )
+    assert "NO" in result.stdout, "confirm() must ignore stdin and use /dev/tty"
+
+
+def test_install_scip_java_reports_and_returns_zero_without_docker(tmp_path):
+    empty_bin = tmp_path / "empty"
+    empty_bin.mkdir()
+    result = subprocess.run(
+        [POSIX_SH, "-c", f'. {SETUP_SH}\ninstall_scip_java'],
+        capture_output=True,
+        text=True,
+        env={"CODEINTEL_SETUP_SOURCED": "1", "PATH": f"{empty_bin}:/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "scip-java" in combined
+    assert "docker" in combined or "jvm" in combined
+
+
+def test_install_scip_java_never_pulls_without_confirmation(tmp_path):
+    """With docker present but no tty, it must NOT pull the image."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    log = tmp_path / "docker-called.txt"
+    docker_stub = fake_bin / "docker"
+    docker_stub.write_text(f'#!/bin/sh\necho "$@" >> {log}\n')
+    docker_stub.chmod(0o755)
+    result = subprocess.run(
+        [POSIX_SH, "-c", f'. {SETUP_SH}\ninstall_scip_java'],
+        capture_output=True,
+        text=True,
+        env={"CODEINTEL_SETUP_SOURCED": "1", "PATH": f"{fake_bin}:/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0
+    assert not log.exists(), "must not run docker pull without explicit confirmation"
+
+
 # --------------------------------------------------------- npm-based indexers ----
 
 

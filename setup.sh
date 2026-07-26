@@ -39,6 +39,26 @@ log_error() {
 	echo "error: $1" >&2
 }
 
+# ---------------------------------------------------------------- prompt -----
+
+# Ask a y/n question. MUST read from /dev/tty, never stdin: under
+# `curl … | sh` stdin is the piped script source, so reading stdin would
+# consume script bytes or hit EOF instead of the user's answer.
+# Returns non-zero (i.e. "no") when there is no tty, so non-interactive runs
+# never hang and never silently opt in.
+confirm() {
+	if [ ! -r /dev/tty ]; then
+		log_info "no terminal available — assuming no"
+		return 1
+	fi
+	printf '%s [y/N] ' "$1" >/dev/tty
+	read -r _answer </dev/tty || return 1
+	case "$_answer" in
+	y | Y | yes | YES) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
 # ------------------------------------------------------ platform detection ---
 
 # Echo the normalized OS name, or exit non-zero if unsupported.
@@ -354,6 +374,49 @@ install_scip_typescript() {
 
 install_scip_python() {
 	install_npm_indexer scip-python @sourcegraph/scip-python
+}
+
+SCIP_JAVA_IMAGE="ghcr.io/scip-code/scip-java:latest"
+
+# Detect-only by design. Upstream ships scip-java as a Docker image or a
+# JVM launcher — not a standalone binary — so auto-provisioning a container
+# runtime or JDK is deliberately out of scope. Always returns 0: neither a
+# missing runtime nor a declined prompt is a failure.
+install_scip_java() {
+	if [ "${FORCE:-0}" != "1" ] && have_cmd scip-java; then
+		log_info "scip-java: already installed, skipping"
+		return 0
+	fi
+
+	# Use `if`, not `have_cmd docker && _has_docker=1`. The && form happens to
+	# survive `set -e` on both dash and bash-posix, but the intent is clearer
+	# and the exit-status semantics are unambiguous this way.
+	_has_docker="no"
+	_has_jvm="no"
+	if have_cmd docker; then _has_docker="yes"; fi
+	if have_cmd java; then _has_jvm="yes"; fi
+
+	log_info "scip-java: detect-only (upstream ships a Docker image or JVM launcher, not a binary)"
+	log_info "scip-java:   docker present: ${_has_docker}"
+	log_info "scip-java:   java present:   ${_has_jvm}"
+
+	if [ "$_has_docker" != "yes" ]; then
+		log_info "scip-java: no docker — to index Java/Kotlin later, install Docker then run:"
+		log_info "scip-java:   docker pull ${SCIP_JAVA_IMAGE}"
+		return 0
+	fi
+
+	log_info "scip-java: the image is large (bundles JDK 17, 21, and 25)"
+	if confirm "scip-java: pull ${SCIP_JAVA_IMAGE} now?"; then
+		if docker pull "$SCIP_JAVA_IMAGE"; then
+			log_info "scip-java: image pulled"
+		else
+			log_warn "scip-java: docker pull failed — pull it manually when needed"
+		fi
+	else
+		log_info "scip-java: skipped — pull it later with: docker pull ${SCIP_JAVA_IMAGE}"
+	fi
+	return 0
 }
 
 # ----------------------------------------------------------------- main ------
