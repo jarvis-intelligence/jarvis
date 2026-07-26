@@ -28,6 +28,10 @@ The system SHALL invoke an external `scip-swift` binary (expected on `PATH`, fol
 - **WHEN** `index_repo()` runs against a majority-Swift repo and no `scip-swift` binary is found on `PATH`
 - **THEN** the system SHALL raise the existing `IndexingError`, following the same failure-marks-status behavior already used when any other language's indexer binary is missing or fails
 
+#### Scenario: End-to-end verified for a real Swift repo
+- **WHEN** `index_repo()` runs against a real SwiftPM fixture repo, with a `scip-swift` binary on `PATH` that supports the `index` subcommand
+- **THEN** the resulting registry entry SHALL report `status == "indexed"` and `language == "swift"`, and the published SQLite database SHALL contain at least one row in `global_symbols`, proving the full detect → build → convert → publish → query pipeline works for Swift, not just that the binary is invoked
+
 ### Requirement: SCIP nav tools available for Swift repos
 Once a Swift repo has been indexed, the system SHALL expose the same 5 SCIP navigation tools and `blastRadius` for it that already exist for TypeScript/Python/Java/Kotlin repos, with no Swift-specific code path in `query.py`, `graph.py`, or `server.py`.
 
