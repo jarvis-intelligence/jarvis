@@ -22,9 +22,28 @@ CREATE TABLE IF NOT EXISTS repos (
     language TEXT NOT NULL,
     commit_sha TEXT,
     last_indexed TEXT NOT NULL,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    scheme_override TEXT
 )
 """
+
+
+def _ensure_scheme_override_column(conn: sqlite3.Connection) -> None:
+    """Idempotent migration for databases created before this column
+    existed. `ALTER TABLE ... ADD COLUMN` on a column that already exists
+    raises `sqlite3.OperationalError` with a "duplicate column name"
+    message -- caught and ignored, since that means a previous run (or a
+    fresh `_SCHEMA` create) already added it. Any other `OperationalError`
+    (e.g. "database is locked" from a concurrent `codeintel watch`
+    reindex) is re-raised rather than silently swallowed -- otherwise a
+    lock timeout during migration would look identical to "column already
+    exists" while actually leaving the column missing."""
+    try:
+        conn.execute("ALTER TABLE repos ADD COLUMN scheme_override TEXT")
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
 
 
 @dataclass(frozen=True)
@@ -35,10 +54,11 @@ class RegisteredRepo:
     commit_sha: str | None
     last_indexed: datetime
     status: str  # "indexed" | "indexing" | "failed" | "partial"
+    scheme_override: str | None = None
 
 
 def _row_to_repo(row: tuple) -> RegisteredRepo:
-    slug, path, language, commit_sha, last_indexed, status = row
+    slug, path, language, commit_sha, last_indexed, status, scheme_override = row
     return RegisteredRepo(
         slug=slug,
         path=path,
@@ -46,6 +66,7 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
         commit_sha=commit_sha,
         last_indexed=datetime.fromisoformat(last_indexed),
         status=status,
+        scheme_override=scheme_override,
     )
 
 
@@ -60,21 +81,31 @@ class Registry:
         self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute(_SCHEMA)
         self._conn.commit()
+        _ensure_scheme_override_column(self._conn)
 
-    def upsert(self, slug: str, path: str, language: str, commit_sha: str | None, status: str) -> RegisteredRepo:
+    def upsert(
+        self,
+        slug: str,
+        path: str,
+        language: str,
+        commit_sha: str | None,
+        status: str,
+        scheme_override: str | None = None,
+    ) -> RegisteredRepo:
         last_indexed = datetime.now(UTC)
         self._conn.execute(
-            "INSERT INTO repos (slug, path, language, commit_sha, last_indexed, status) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO repos (slug, path, language, commit_sha, last_indexed, status, scheme_override) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(slug) DO UPDATE SET "
             "path=excluded.path, language=excluded.language, commit_sha=excluded.commit_sha, "
-            "last_indexed=excluded.last_indexed, status=excluded.status",
-            (slug, path, language, commit_sha, last_indexed.isoformat(), status),
+            "last_indexed=excluded.last_indexed, status=excluded.status, "
+            "scheme_override=excluded.scheme_override",
+            (slug, path, language, commit_sha, last_indexed.isoformat(), status, scheme_override),
         )
         self._conn.commit()
         return RegisteredRepo(
             slug=slug, path=path, language=language, commit_sha=commit_sha,
-            last_indexed=last_indexed, status=status,
+            last_indexed=last_indexed, status=status, scheme_override=scheme_override,
         )
 
     def mark_status(self, slug: str, status: str) -> None:
@@ -86,14 +117,16 @@ class Registry:
 
     def get(self, slug: str) -> RegisteredRepo | None:
         row = self._conn.execute(
-            "SELECT slug, path, language, commit_sha, last_indexed, status FROM repos WHERE slug = ?",
+            "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override "
+            "FROM repos WHERE slug = ?",
             (slug,),
         ).fetchone()
         return _row_to_repo(row) if row is not None else None
 
     def list(self) -> list[RegisteredRepo]:
         rows = self._conn.execute(
-            "SELECT slug, path, language, commit_sha, last_indexed, status FROM repos ORDER BY slug"
+            "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override "
+            "FROM repos ORDER BY slug"
         ).fetchall()
         return [_row_to_repo(row) for row in rows]
 

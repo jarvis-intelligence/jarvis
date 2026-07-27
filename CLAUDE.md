@@ -19,12 +19,12 @@ uv run pytest -m "not integration"   # unit only — no external binaries requir
 uv run pytest -m integration         # integration only — runs real scip-python/scip/zoekt-index
 uv run pytest tests/test_query.py::test_go_to_definition_returns_location   # single test
 
-uv run codeintel index /path/to/repo [--slug name]
+uv run codeintel index /path/to/repo [--slug name] [--scheme name]
 uv run codeintel list
 uv run codeintel status <slug>
 uv run codeintel reindex <slug>
 uv run codeintel forget <slug>
-uv run codeintel watch /path/to/repo [--debounce 5]   # foreground, not a daemon
+uv run codeintel watch /path/to/repo [--debounce 5] [--scheme name]   # foreground, not a daemon
 
 uv run codeintel-server              # MCP stdio entry point
 claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run codeintel-server
@@ -68,6 +68,14 @@ nav tool takes `repo` (the slug from `codeintel index`) plus a tool-specific `sy
 
 **Known gap:** `scip expt-convert` (SCIP v0.7.0) never populates `relationships`, so `typeHierarchy`
 returns empty results on real indexes — not a bug in codeintel's query logic.
+
+**Swift build-tool selection:** `scip-swift`'s own `BuildBackendDetector` picks `swiftpm`
+whenever `Package.swift` exists, even for repos that can't build that way (e.g. a UIKit-only
+iOS package with no macOS platform support). `index_cli.py`'s `_prefers_xcodebuild()` overrides
+this: a Swift repo with a checked-in `.xcodeproj`/`.xcworkspace` is indexed via `--build-tool
+xcodebuild` instead. When such a repo has more than one scheme, pass `--scheme <name>` on the
+first `codeintel index` — it's persisted in the registry, so `reindex`/`watch` reuse it
+automatically.
 
 ## Testing conventions
 

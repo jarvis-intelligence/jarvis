@@ -85,6 +85,66 @@ def test_swift_invocation_omits_index_subcommand(tmp_path: Path):
     assert cmd == ["scip-swift"], f"must stay bare for version tolerance, got {cmd}"
 
 
+def test_prefers_xcodebuild_false_for_bare_spm_package(tmp_path: Path):
+    from codeintel.index_cli import _prefers_xcodebuild
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    assert _prefers_xcodebuild(tmp_path) is False
+
+
+def test_prefers_xcodebuild_true_when_xcodeproj_present(tmp_path: Path):
+    from codeintel.index_cli import _prefers_xcodebuild
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "MyLib.xcodeproj").mkdir()
+    assert _prefers_xcodebuild(tmp_path) is True
+
+
+def test_prefers_xcodebuild_true_when_xcworkspace_present(tmp_path: Path):
+    from codeintel.index_cli import _prefers_xcodebuild
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "MyLib.xcworkspace").mkdir()
+    assert _prefers_xcodebuild(tmp_path) is True
+
+
+def test_swift_indexer_cmd_unchanged_without_xcodeproj(tmp_path: Path):
+    from codeintel.index_cli import _swift_indexer_cmd
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme=None) == ["scip-swift"]
+
+
+def test_swift_indexer_cmd_adds_xcodebuild_when_xcodeproj_present(tmp_path: Path):
+    from codeintel.index_cli import _swift_indexer_cmd
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "MyLib.xcodeproj").mkdir()
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme=None) == [
+        "scip-swift", "--build-tool", "xcodebuild",
+    ]
+
+
+def test_swift_indexer_cmd_adds_scheme_when_given(tmp_path: Path):
+    from codeintel.index_cli import _swift_indexer_cmd
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "MyLib.xcodeproj").mkdir()
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme="ios_theme_ui") == [
+        "scip-swift", "--build-tool", "xcodebuild", "--scheme", "ios_theme_ui",
+    ]
+
+
+def test_swift_indexer_cmd_ignores_scheme_without_xcodeproj(tmp_path: Path):
+    """A --scheme override is meaningless (and unsupported by scip-swift)
+    under the swiftpm build tool, so it must not leak into the command
+    when there's no checked-in Xcode project to justify xcodebuild."""
+    from codeintel.index_cli import _swift_indexer_cmd
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme="ios_theme_ui") == ["scip-swift"]
+
+
 def test_detect_language_tie_break_prefers_earlier_priority_over_swift(tmp_path: Path):
     (tmp_path / "a.java").write_text("class A {}\n")
     (tmp_path / "b.java").write_text("class B {}\n")
@@ -225,6 +285,55 @@ def test_index_repo_end_to_end_for_swift_repo(tmp_path: Path):
         assert count > 0
     finally:
         db.close()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing_swift, reason=f"missing required binaries: {_missing_swift}")
+def test_index_repo_preserves_scheme_override_when_not_repassed(tmp_path: Path):
+    """Regression test for the codeintel-watch bug: a second index_repo()
+    call with scheme=None (e.g. an unattended `codeintel watch` reindex)
+    must not wipe a previously stored scheme_override."""
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(SWIFT_FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    slug = index_repo(repo_dir, root=data_root, scheme="some-scheme")
+    index_repo(repo_dir, slug=slug, root=data_root, scheme=None)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.scheme_override == "some-scheme"
+    finally:
+        registry.close()
+
+
+def test_resolve_scheme_preserves_stored_override_when_none_given(tmp_path: Path):
+    from codeintel.index_cli import _resolve_scheme
+
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "swift", "abc123", "indexed", scheme_override="ios_theme_ui")
+    assert _resolve_scheme(registry, "my-repo", scheme=None) == "ios_theme_ui"
+    registry.close()
+
+
+def test_resolve_scheme_prefers_explicit_value_over_stored(tmp_path: Path):
+    from codeintel.index_cli import _resolve_scheme
+
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "swift", "abc123", "indexed", scheme_override="old")
+    assert _resolve_scheme(registry, "my-repo", scheme="new") == "new"
+    registry.close()
+
+
+def test_resolve_scheme_returns_none_for_unknown_slug(tmp_path: Path):
+    from codeintel.index_cli import _resolve_scheme
+
+    registry = Registry(tmp_path / "registry.db")
+    assert _resolve_scheme(registry, "nope", scheme=None) is None
+    registry.close()
 
 
 def test_parse_scip_version_reads_standard_output():
@@ -404,6 +513,32 @@ def test_index_has_navigation_data_false_when_only_chunks(tmp_path: Path):
         assert index_has_navigation_data(conn) is False
     finally:
         conn.close()
+
+
+def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
+    import argparse
+    import codeintel.index_cli as cli
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "swift", "abc123", "indexed", scheme_override="ios_theme_ui")
+    registry.close()
+
+    captured: dict = {}
+
+    def fake_index_repo(path, *, slug=None, root=None, scheme=None):
+        captured["path"] = path
+        captured["slug"] = slug
+        captured["scheme"] = scheme
+        return slug
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    rc = cli._cmd_reindex(argparse.Namespace(slug="my-repo"))
+    assert rc == 0
+    assert captured["scheme"] == "ios_theme_ui"
+    assert str(captured["path"]) == "/repos/my-repo"
 
 
 def test_forget_removes_the_zoekt_shard(tmp_path: Path, monkeypatch, capsys):

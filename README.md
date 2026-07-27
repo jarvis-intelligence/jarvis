@@ -83,6 +83,7 @@ cannot read scip.proto's `typed_range` oneof, which is the only range encoding
 ```bash
 codeintel index /path/to/your/repo            # slug defaults to the directory name
 codeintel index /path/to/your/repo --slug foo # or pick one explicitly
+codeintel index /path/to/your/repo --scheme MyScheme # Swift repo with an ambiguous Xcode scheme
 codeintel list
 codeintel status foo
 codeintel reindex foo
@@ -125,6 +126,7 @@ registry update.
 ```bash
 codeintel watch /path/to/your/repo             # debounce defaults to 5s
 codeintel watch /path/to/your/repo --debounce 3
+codeintel watch /path/to/your/repo --scheme MyScheme
 ```
 
 Runs in the foreground (not a daemon) using `watchdog` — install it with

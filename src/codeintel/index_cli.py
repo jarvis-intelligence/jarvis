@@ -87,6 +87,30 @@ def detect_language(repo_path: Path) -> tuple[str, list[str]]:
     return _LANGUAGE_INDEXERS[best_ext]
 
 
+def _prefers_xcodebuild(repo_path: Path) -> bool:
+    """True when `repo_path` has a checked-in `.xcodeproj`/`.xcworkspace`
+    alongside `Package.swift`. `scip-swift`'s own `BuildBackendDetector`
+    picks `swiftpm` whenever `Package.swift` exists, even when that can't
+    build — e.g. a UIKit-only iOS package with no macOS platform support,
+    where plain `swift build` fails with "no such module 'UIKit'" on the
+    macOS host destination it defaults to."""
+    return any(repo_path.glob("*.xcodeproj")) or any(repo_path.glob("*.xcworkspace"))
+
+
+def _swift_indexer_cmd(base_cmd: list[str], repo_path: Path, scheme: str | None) -> list[str]:
+    """Extend `base_cmd` (`["scip-swift"]`) with `--build-tool xcodebuild`
+    (and `--scheme`, if given) when `repo_path` has a checked-in Xcode
+    project — see `_prefers_xcodebuild`. Non-Swift callers never reach
+    this function; Swift repos without a checked-in Xcode project get
+    `base_cmd` back unchanged, identical to today's behavior."""
+    if not _prefers_xcodebuild(repo_path):
+        return base_cmd
+    cmd = [*base_cmd, "--build-tool", "xcodebuild"]
+    if scheme:
+        cmd += ["--scheme", scheme]
+    return cmd
+
+
 def _git_head(repo_path: Path) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
@@ -182,7 +206,20 @@ def _write_zoekt_meta(scratch: Path, slug: str) -> Path:
     return meta_path
 
 
-def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = None) -> str:
+def _resolve_scheme(registry: Registry, slug: str, scheme: str | None) -> str | None:
+    """`scheme=None` means "leave the persisted override alone" (e.g. a
+    `codeintel watch` reindex, which never repeats `--scheme`) rather than
+    "clear it" -- looks up the existing registry row and falls back to its
+    `scheme_override` when the caller passed nothing explicit."""
+    if scheme is not None:
+        return scheme
+    existing = registry.get(slug)
+    return existing.scheme_override if existing is not None else None
+
+
+def index_repo(
+    repo_path: Path, *, slug: str | None = None, root: Path | None = None, scheme: str | None = None
+) -> str:
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
     on success, `failed` (with the exception's message) on any step's
@@ -203,7 +240,12 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
     check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
-    registry.upsert(slug, str(repo_path), language, None, "indexing")
+    scheme = _resolve_scheme(registry, slug, scheme)
+
+    if language == "swift":
+        indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
+
+    registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme)
 
     try:
         with tempfile.TemporaryDirectory(prefix="codeintel-index-") as scratch:
@@ -250,7 +292,7 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
             _publish_atomically(target_dir, versioned_name, sha)
 
         final_status = "indexed" if has_nav else PARTIAL_STATUS
-        registry.upsert(slug, str(repo_path), language, sha, final_status)
+        registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme)
         if not has_nav:
             print(
                 f"warning: {slug} published with symbols but no navigable positions "
@@ -269,7 +311,7 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
 
 def _cmd_index(args: argparse.Namespace) -> int:
     try:
-        slug = index_repo(Path(args.path), slug=args.slug)
+        slug = index_repo(Path(args.path), slug=args.slug, scheme=getattr(args, "scheme", None))
     except (UnsupportedLanguageError, IndexingError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -320,7 +362,7 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     if repo is None:
         print(f"error: no such repo: {slug}", file=sys.stderr)
         return 1
-    return _cmd_index(argparse.Namespace(path=repo.path, slug=repo.slug))
+    return _cmd_index(argparse.Namespace(path=repo.path, slug=repo.slug, scheme=repo.scheme_override))
 
 
 def _remove_zoekt_shards(slug: str, root: Path | None = None) -> list[Path]:
@@ -392,7 +434,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     def _reindex() -> None:
         print(f"[watch] change detected, reindexing {slug} ...")
         try:
-            index_repo(repo_path, slug=slug)
+            index_repo(repo_path, slug=slug, scheme=args.scheme)
             print(f"[watch] {slug} reindexed")
         except Exception as exc:
             # Broad on purpose: index_repo() can raise before its own
@@ -442,6 +484,9 @@ def build_parser() -> argparse.ArgumentParser:
     index_parser = subparsers.add_parser("index", help="index a repo")
     index_parser.add_argument("path", help="path to the repo to index")
     index_parser.add_argument("--slug", help="override the auto-derived slug")
+    index_parser.add_argument(
+        "--scheme", help="Xcode scheme to build (Swift repos using xcodebuild with more than one scheme)"
+    )
     index_parser.set_defaults(func=_cmd_index)
 
     list_parser = subparsers.add_parser("list", help="list indexed repos")
@@ -462,6 +507,9 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser = subparsers.add_parser("watch", help="watch a repo and debounce-reindex on change")
     watch_parser.add_argument("path", help="path to the repo to watch")
     watch_parser.add_argument("--slug", help="override the auto-derived slug")
+    watch_parser.add_argument(
+        "--scheme", help="Xcode scheme to build (Swift repos using xcodebuild with more than one scheme)"
+    )
     watch_parser.add_argument("--debounce", type=float, default=5.0, help="quiet-period seconds (default: 5.0)")
     watch_parser.set_defaults(func=_cmd_watch)
 
