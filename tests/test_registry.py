@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from codeintel.registry import Registry, _ensure_scheme_override_column
 
@@ -118,7 +118,6 @@ def test_ensure_scheme_override_column_swallows_duplicate_column_error():
     """Verify that _ensure_scheme_override_column swallows only
     "duplicate column name" errors, leaving the migration idempotent."""
     mock_conn = Mock(spec=sqlite3.Connection)
-    dup_error = sqlite3.OperationalError("UNIQUE constraint failed: repos.slug")
     # SQLite's actual error message for duplicate column
     dup_column_error = sqlite3.OperationalError("duplicate column name: scheme_override")
     mock_conn.execute.side_effect = dup_column_error

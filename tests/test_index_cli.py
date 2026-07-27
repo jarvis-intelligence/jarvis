@@ -287,6 +287,55 @@ def test_index_repo_end_to_end_for_swift_repo(tmp_path: Path):
         db.close()
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(_missing_swift, reason=f"missing required binaries: {_missing_swift}")
+def test_index_repo_preserves_scheme_override_when_not_repassed(tmp_path: Path):
+    """Regression test for the codeintel-watch bug: a second index_repo()
+    call with scheme=None (e.g. an unattended `codeintel watch` reindex)
+    must not wipe a previously stored scheme_override."""
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(SWIFT_FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    slug = index_repo(repo_dir, root=data_root, scheme="some-scheme")
+    index_repo(repo_dir, slug=slug, root=data_root, scheme=None)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.scheme_override == "some-scheme"
+    finally:
+        registry.close()
+
+
+def test_resolve_scheme_preserves_stored_override_when_none_given(tmp_path: Path):
+    from codeintel.index_cli import _resolve_scheme
+
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "swift", "abc123", "indexed", scheme_override="ios_theme_ui")
+    assert _resolve_scheme(registry, "my-repo", scheme=None) == "ios_theme_ui"
+    registry.close()
+
+
+def test_resolve_scheme_prefers_explicit_value_over_stored(tmp_path: Path):
+    from codeintel.index_cli import _resolve_scheme
+
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "swift", "abc123", "indexed", scheme_override="old")
+    assert _resolve_scheme(registry, "my-repo", scheme="new") == "new"
+    registry.close()
+
+
+def test_resolve_scheme_returns_none_for_unknown_slug(tmp_path: Path):
+    from codeintel.index_cli import _resolve_scheme
+
+    registry = Registry(tmp_path / "registry.db")
+    assert _resolve_scheme(registry, "nope", scheme=None) is None
+    registry.close()
+
+
 def test_parse_scip_version_reads_standard_output():
     from codeintel.index_cli import parse_scip_version
 

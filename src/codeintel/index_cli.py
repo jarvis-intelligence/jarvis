@@ -206,6 +206,17 @@ def _write_zoekt_meta(scratch: Path, slug: str) -> Path:
     return meta_path
 
 
+def _resolve_scheme(registry: Registry, slug: str, scheme: str | None) -> str | None:
+    """`scheme=None` means "leave the persisted override alone" (e.g. a
+    `codeintel watch` reindex, which never repeats `--scheme`) rather than
+    "clear it" -- looks up the existing registry row and falls back to its
+    `scheme_override` when the caller passed nothing explicit."""
+    if scheme is not None:
+        return scheme
+    existing = registry.get(slug)
+    return existing.scheme_override if existing is not None else None
+
+
 def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None, scheme: str | None = None
 ) -> str:
@@ -225,12 +236,15 @@ def index_repo(
     repo_path = repo_path.resolve()
     slug = config.repo_slug(slug or repo_path.name)
     language, indexer_cmd = detect_language(repo_path)
-    if language == "swift":
-        indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
     sha = _git_head(repo_path)
     check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
+    scheme = _resolve_scheme(registry, slug, scheme)
+
+    if language == "swift":
+        indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
+
     registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme)
 
     try:
