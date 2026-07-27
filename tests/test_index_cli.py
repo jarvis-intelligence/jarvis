@@ -85,6 +85,29 @@ def test_swift_invocation_omits_index_subcommand(tmp_path: Path):
     assert cmd == ["scip-swift"], f"must stay bare for version tolerance, got {cmd}"
 
 
+def test_prefers_xcodebuild_false_for_bare_spm_package(tmp_path: Path):
+    from codeintel.index_cli import _prefers_xcodebuild
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    assert _prefers_xcodebuild(tmp_path) is False
+
+
+def test_prefers_xcodebuild_true_when_xcodeproj_present(tmp_path: Path):
+    from codeintel.index_cli import _prefers_xcodebuild
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "MyLib.xcodeproj").mkdir()
+    assert _prefers_xcodebuild(tmp_path) is True
+
+
+def test_prefers_xcodebuild_true_when_xcworkspace_present(tmp_path: Path):
+    from codeintel.index_cli import _prefers_xcodebuild
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "MyLib.xcworkspace").mkdir()
+    assert _prefers_xcodebuild(tmp_path) is True
+
+
 def test_detect_language_tie_break_prefers_earlier_priority_over_swift(tmp_path: Path):
     (tmp_path / "a.java").write_text("class A {}\n")
     (tmp_path / "b.java").write_text("class B {}\n")

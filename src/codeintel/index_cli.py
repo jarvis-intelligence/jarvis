@@ -87,6 +87,16 @@ def detect_language(repo_path: Path) -> tuple[str, list[str]]:
     return _LANGUAGE_INDEXERS[best_ext]
 
 
+def _prefers_xcodebuild(repo_path: Path) -> bool:
+    """True when `repo_path` has a checked-in `.xcodeproj`/`.xcworkspace`
+    alongside `Package.swift`. `scip-swift`'s own `BuildBackendDetector`
+    picks `swiftpm` whenever `Package.swift` exists, even when that can't
+    build — e.g. a UIKit-only iOS package with no macOS platform support,
+    where plain `swift build` fails with "no such module 'UIKit'" on the
+    macOS host destination it defaults to."""
+    return any(repo_path.glob("*.xcodeproj")) or any(repo_path.glob("*.xcworkspace"))
+
+
 def _git_head(repo_path: Path) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
