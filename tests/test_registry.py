@@ -63,3 +63,32 @@ def test_registry_persists_across_reopen(tmp_path: Path):
     reopened = Registry(db_path)
     assert reopened.get("my-repo").commit_sha == "abc123"
     reopened.close()
+
+
+def test_upsert_persists_scheme_override(tmp_path: Path):
+    reg = Registry(tmp_path / "registry.db")
+    reg.upsert("my-repo", "/repos/my-repo", "swift", "abc123", "indexed", scheme_override="ios_theme_ui")
+    repo = reg.get("my-repo")
+    assert repo is not None
+    assert repo.scheme_override == "ios_theme_ui"
+    reg.close()
+
+
+def test_upsert_defaults_scheme_override_to_none(tmp_path: Path):
+    reg = Registry(tmp_path / "registry.db")
+    reg.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed")
+    assert reg.get("my-repo").scheme_override is None
+    reg.close()
+
+
+def test_scheme_override_survives_reopen_of_pre_existing_db(tmp_path: Path):
+    """A registry.db written before this column existed must still open
+    cleanly — the guarded ALTER TABLE has to be idempotent and safe against
+    a database that predates the column."""
+    db_path = tmp_path / "registry.db"
+    Registry(db_path).upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed")
+    reopened = Registry(db_path)
+    assert reopened.get("my-repo").scheme_override is None
+    reopened.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed", scheme_override="foo")
+    assert reopened.get("my-repo").scheme_override == "foo"
+    reopened.close()
