@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
+from unittest.mock import Mock, patch
 
-from codeintel.registry import Registry
+from codeintel.registry import Registry, _ensure_scheme_override_column
 
 
 def test_upsert_then_get_roundtrips(tmp_path: Path):
@@ -92,3 +94,35 @@ def test_scheme_override_survives_reopen_of_pre_existing_db(tmp_path: Path):
     reopened.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed", scheme_override="foo")
     assert reopened.get("my-repo").scheme_override == "foo"
     reopened.close()
+
+
+def test_ensure_scheme_override_column_re_raises_non_duplicate_errors():
+    """Verify that _ensure_scheme_override_column discriminates on error message.
+    It should only swallow "duplicate column name" errors (idempotent), but
+    re-raise other OperationalErrors like "database is locked" so they don't
+    silently hide as "column already exists"."""
+    # Mock connection that raises "database is locked" for ALTER TABLE
+    mock_conn = Mock(spec=sqlite3.Connection)
+    locked_error = sqlite3.OperationalError("database is locked")
+    mock_conn.execute.side_effect = locked_error
+
+    # Verify the error is re-raised, not swallowed
+    try:
+        _ensure_scheme_override_column(mock_conn)
+        assert False, "Expected OperationalError to be re-raised"
+    except sqlite3.OperationalError as exc:
+        assert str(exc) == "database is locked"
+
+
+def test_ensure_scheme_override_column_swallows_duplicate_column_error():
+    """Verify that _ensure_scheme_override_column swallows only
+    "duplicate column name" errors, leaving the migration idempotent."""
+    mock_conn = Mock(spec=sqlite3.Connection)
+    dup_error = sqlite3.OperationalError("UNIQUE constraint failed: repos.slug")
+    # SQLite's actual error message for duplicate column
+    dup_column_error = sqlite3.OperationalError("duplicate column name: scheme_override")
+    mock_conn.execute.side_effect = dup_column_error
+
+    # Should not raise — error is swallowed
+    _ensure_scheme_override_column(mock_conn)
+    # If we reach here, the test passed (no exception was raised)

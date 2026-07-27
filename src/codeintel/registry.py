@@ -31,13 +31,19 @@ CREATE TABLE IF NOT EXISTS repos (
 def _ensure_scheme_override_column(conn: sqlite3.Connection) -> None:
     """Idempotent migration for databases created before this column
     existed. `ALTER TABLE ... ADD COLUMN` on a column that already exists
-    raises `sqlite3.OperationalError` — caught and ignored, since that
-    means a previous run (or a fresh `_SCHEMA` create) already added it."""
+    raises `sqlite3.OperationalError` with a "duplicate column name"
+    message -- caught and ignored, since that means a previous run (or a
+    fresh `_SCHEMA` create) already added it. Any other `OperationalError`
+    (e.g. "database is locked" from a concurrent `codeintel watch`
+    reindex) is re-raised rather than silently swallowed -- otherwise a
+    lock timeout during migration would look identical to "column already
+    exists" while actually leaving the column missing."""
     try:
         conn.execute("ALTER TABLE repos ADD COLUMN scheme_override TEXT")
         conn.commit()
-    except sqlite3.OperationalError:
-        pass
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
 
 
 @dataclass(frozen=True)
