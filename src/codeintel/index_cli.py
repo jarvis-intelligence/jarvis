@@ -97,6 +97,20 @@ def _prefers_xcodebuild(repo_path: Path) -> bool:
     return any(repo_path.glob("*.xcodeproj")) or any(repo_path.glob("*.xcworkspace"))
 
 
+def _swift_indexer_cmd(base_cmd: list[str], repo_path: Path, scheme: str | None) -> list[str]:
+    """Extend `base_cmd` (`["scip-swift"]`) with `--build-tool xcodebuild`
+    (and `--scheme`, if given) when `repo_path` has a checked-in Xcode
+    project — see `_prefers_xcodebuild`. Non-Swift callers never reach
+    this function; Swift repos without a checked-in Xcode project get
+    `base_cmd` back unchanged, identical to today's behavior."""
+    if not _prefers_xcodebuild(repo_path):
+        return base_cmd
+    cmd = [*base_cmd, "--build-tool", "xcodebuild"]
+    if scheme:
+        cmd += ["--scheme", scheme]
+    return cmd
+
+
 def _git_head(repo_path: Path) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
@@ -192,7 +206,9 @@ def _write_zoekt_meta(scratch: Path, slug: str) -> Path:
     return meta_path
 
 
-def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = None) -> str:
+def index_repo(
+    repo_path: Path, *, slug: str | None = None, root: Path | None = None, scheme: str | None = None
+) -> str:
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
     on success, `failed` (with the exception's message) on any step's
@@ -209,11 +225,13 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
     repo_path = repo_path.resolve()
     slug = config.repo_slug(slug or repo_path.name)
     language, indexer_cmd = detect_language(repo_path)
+    if language == "swift":
+        indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
     sha = _git_head(repo_path)
     check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
-    registry.upsert(slug, str(repo_path), language, None, "indexing")
+    registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme)
 
     try:
         with tempfile.TemporaryDirectory(prefix="codeintel-index-") as scratch:
@@ -260,7 +278,7 @@ def index_repo(repo_path: Path, *, slug: str | None = None, root: Path | None = 
             _publish_atomically(target_dir, versioned_name, sha)
 
         final_status = "indexed" if has_nav else PARTIAL_STATUS
-        registry.upsert(slug, str(repo_path), language, sha, final_status)
+        registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme)
         if not has_nav:
             print(
                 f"warning: {slug} published with symbols but no navigable positions "

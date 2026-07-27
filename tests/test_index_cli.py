@@ -108,6 +108,43 @@ def test_prefers_xcodebuild_true_when_xcworkspace_present(tmp_path: Path):
     assert _prefers_xcodebuild(tmp_path) is True
 
 
+def test_swift_indexer_cmd_unchanged_without_xcodeproj(tmp_path: Path):
+    from codeintel.index_cli import _swift_indexer_cmd
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme=None) == ["scip-swift"]
+
+
+def test_swift_indexer_cmd_adds_xcodebuild_when_xcodeproj_present(tmp_path: Path):
+    from codeintel.index_cli import _swift_indexer_cmd
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "MyLib.xcodeproj").mkdir()
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme=None) == [
+        "scip-swift", "--build-tool", "xcodebuild",
+    ]
+
+
+def test_swift_indexer_cmd_adds_scheme_when_given(tmp_path: Path):
+    from codeintel.index_cli import _swift_indexer_cmd
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "MyLib.xcodeproj").mkdir()
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme="ios_theme_ui") == [
+        "scip-swift", "--build-tool", "xcodebuild", "--scheme", "ios_theme_ui",
+    ]
+
+
+def test_swift_indexer_cmd_ignores_scheme_without_xcodeproj(tmp_path: Path):
+    """A --scheme override is meaningless (and unsupported by scip-swift)
+    under the swiftpm build tool, so it must not leak into the command
+    when there's no checked-in Xcode project to justify xcodebuild."""
+    from codeintel.index_cli import _swift_indexer_cmd
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme="ios_theme_ui") == ["scip-swift"]
+
+
 def test_detect_language_tie_break_prefers_earlier_priority_over_swift(tmp_path: Path):
     (tmp_path / "a.java").write_text("class A {}\n")
     (tmp_path / "b.java").write_text("class B {}\n")
