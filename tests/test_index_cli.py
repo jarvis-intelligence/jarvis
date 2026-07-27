@@ -466,6 +466,32 @@ def test_index_has_navigation_data_false_when_only_chunks(tmp_path: Path):
         conn.close()
 
 
+def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
+    import argparse
+    import codeintel.index_cli as cli
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "swift", "abc123", "indexed", scheme_override="ios_theme_ui")
+    registry.close()
+
+    captured: dict = {}
+
+    def fake_index_repo(path, *, slug=None, root=None, scheme=None):
+        captured["path"] = path
+        captured["slug"] = slug
+        captured["scheme"] = scheme
+        return slug
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    rc = cli._cmd_reindex(argparse.Namespace(slug="my-repo"))
+    assert rc == 0
+    assert captured["scheme"] == "ios_theme_ui"
+    assert str(captured["path"]) == "/repos/my-repo"
+
+
 def test_forget_removes_the_zoekt_shard(tmp_path: Path, monkeypatch, capsys):
     """Regression: forgotten repos stayed searchable."""
     import argparse

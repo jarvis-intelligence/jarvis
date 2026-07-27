@@ -297,7 +297,7 @@ def index_repo(
 
 def _cmd_index(args: argparse.Namespace) -> int:
     try:
-        slug = index_repo(Path(args.path), slug=args.slug)
+        slug = index_repo(Path(args.path), slug=args.slug, scheme=getattr(args, "scheme", None))
     except (UnsupportedLanguageError, IndexingError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -348,7 +348,7 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     if repo is None:
         print(f"error: no such repo: {slug}", file=sys.stderr)
         return 1
-    return _cmd_index(argparse.Namespace(path=repo.path, slug=repo.slug))
+    return _cmd_index(argparse.Namespace(path=repo.path, slug=repo.slug, scheme=repo.scheme_override))
 
 
 def _remove_zoekt_shards(slug: str, root: Path | None = None) -> list[Path]:
@@ -420,7 +420,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     def _reindex() -> None:
         print(f"[watch] change detected, reindexing {slug} ...")
         try:
-            index_repo(repo_path, slug=slug)
+            index_repo(repo_path, slug=slug, scheme=args.scheme)
             print(f"[watch] {slug} reindexed")
         except Exception as exc:
             # Broad on purpose: index_repo() can raise before its own
@@ -470,6 +470,9 @@ def build_parser() -> argparse.ArgumentParser:
     index_parser = subparsers.add_parser("index", help="index a repo")
     index_parser.add_argument("path", help="path to the repo to index")
     index_parser.add_argument("--slug", help="override the auto-derived slug")
+    index_parser.add_argument(
+        "--scheme", help="Xcode scheme to build (Swift repos using xcodebuild with more than one scheme)"
+    )
     index_parser.set_defaults(func=_cmd_index)
 
     list_parser = subparsers.add_parser("list", help="list indexed repos")
@@ -490,6 +493,9 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser = subparsers.add_parser("watch", help="watch a repo and debounce-reindex on change")
     watch_parser.add_argument("path", help="path to the repo to watch")
     watch_parser.add_argument("--slug", help="override the auto-derived slug")
+    watch_parser.add_argument(
+        "--scheme", help="Xcode scheme to build (Swift repos using xcodebuild with more than one scheme)"
+    )
     watch_parser.add_argument("--debounce", type=float, default=5.0, help="quiet-period seconds (default: 5.0)")
     watch_parser.set_defaults(func=_cmd_watch)
 
