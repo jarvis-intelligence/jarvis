@@ -75,7 +75,20 @@ newer `scip`.
 - ✓ All 8 MCP tools return correct results on real TypeScript/Python repos
 - ✓ `codeintel index` end-to-end: language detection → indexer → scip expt-convert → zoekt-index → atomic publish → registry update
 - ✓ `getIndexStatus` correctly flags stale after new commits; reindex has zero query downtime
-- ✓ Test suite green: `uv run pytest` passes, 11 test modules (16 files total under `tests/` with fixtures), integration tests use real binaries
+- ✓ Test suite green: `uv run pytest` passes, 12 test modules (17 files total under `tests/` with fixtures), integration tests use real binaries
+
+### Post-Phase-4: Swift xcodebuild Build-Tool Override (Landed, July 27, PR #1)
+
+Swift repos with a checked-in `.xcodeproj` or `.xcworkspace` (but no macOS-compatible Package.swift) are now indexed via `scip-swift --build-tool xcodebuild` instead of the default SwiftPM backend. Rationale: `scip-swift`'s `BuildBackendDetector` picks SwiftPM whenever `Package.swift` exists, even for UIKit-only iOS packages with no macOS platform support, where plain `swift build` fails with "no such module 'UIKit'".
+
+New features:
+- `_prefers_xcodebuild(repo_path)` — detects presence of `.xcodeproj`/`.xcworkspace`
+- `_swift_indexer_cmd(base_cmd, repo_path, scheme)` — appends `--build-tool xcodebuild` and optional `--scheme`
+- `--scheme` CLI flag on both `codeintel index` and `codeintel watch` — specify Xcode scheme for repos with multiple schemes
+- `scheme_override` column in registry.db — persists the chosen scheme across `reindex` and `watch` runs; `_resolve_scheme()` manages the None-preserves / explicit-overwrites semantics
+- `_ensure_scheme_override_column()` idempotent migration — adds the new column to existing databases
+
+Verified: End-to-end indexing works on real Swift repos with Xcode projects; all 8 MCP nav tools return correct results.
 
 ---
 

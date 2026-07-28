@@ -182,8 +182,8 @@ Every module has a docstring explaining its purpose and key exports. Example:
 Decode zstd+protobuf `scip.Document` occurrences and `global_symbols.relationships`.
 Also parses symbol packages and range→position conversions.
 
-Known gap: SCIP v0.7.0 converter never populates `relationships`,
-so `typeHierarchy` is empty on real indexes.
+Known gap: SCIP v0.9.0 converter never populates `relationships`,
+so `typeHierarchy` is empty on real indexes (upstream issue scip-code/scip#464).
 """
 ```
 
@@ -270,12 +270,12 @@ uv run pytest -m integration     # real binaries only
 
 All commands are under `codeintel`:
 ```bash
-codeintel index <path> [--slug name]
+codeintel index <path> [--slug name] [--scheme name]
 codeintel list
 codeintel status <slug>
 codeintel reindex <slug>
 codeintel forget <slug>
-codeintel watch <path> [--debounce 5]
+codeintel watch <path> [--slug name] [--scheme name] [--debounce 5]
 ```
 
 ### Error Handling
@@ -391,7 +391,7 @@ Full type hints on all public functions; private/internal functions may omit hin
 
 ### SCIP Version Pinning
 
-SCIP proto is pinned to **v0.7.0** in `scip_pb2.py` (generated from sourcegraph/scip tag v0.7.0).
+SCIP proto is pinned to **v0.9.0** in `scip_pb2.py` (regenerated from v0.7.0 because v0.7.0 lacked the `typed_range` oneof that `scip-swift` requires).
 
 **Convention:** Document SCIP version in README and code. Any future version bump should be tracked in a plan, not a surprise refactor.
 

@@ -31,9 +31,9 @@ codeintel/
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
 | `index_reader.py` | 160 | Vendored filestore reader from SCIP source; `IndexConnectionCache` — thread-safe, size-bounded cache of read-only immutable SQLite connections keyed by `(project, repo, branch, pointer_content)`, NFS-safe pointer invalidation | `IndexConnectionCache`, current pointer file handling |
-| `scip_pb2.py` | 111 | Generated protobuf from scip.proto v0.9.0 — regenerated from v0.7.0 because v0.7.0 lacked the `typed_range` oneof that `scip-swift` requires (do not edit, vendored codegen) | scip.Document, scip.SymbolInformation, scip.Occurrence, scip.Relationship |
-| `scip_decoder.py` | 279 | SCIP blob decoder (zstd+protobuf); isolation seam for protobuf dependency | `scip_range_to_positions()`, `kind_name()`, `parse_symbol_package()`, decode SCIP occurrences + relationships |
-| `query.py` | 436 | QueryService: 5 SCIP nav ops + `getIndexStatus` via raw SQL against `scip expt-convert` schema | `QueryService`, `FreshnessSnapshot`, nav result builders |
+| `scip_pb2.py` | 119 | Generated protobuf from scip.proto v0.9.0 — regenerated from v0.7.0 because v0.7.0 lacked the `typed_range` oneof that `scip-swift` requires (do not edit, vendored codegen) | scip.Document, scip.SymbolInformation, scip.Occurrence, scip.Relationship |
+| `scip_decoder.py` | 326 | SCIP blob decoder (zstd+protobuf); isolation seam for protobuf dependency | `scip_range_to_positions()`, `kind_name()`, `parse_symbol_package()`, decode SCIP occurrences + relationships |
+| `query.py` | 462 | QueryService: 5 SCIP nav ops + `getIndexStatus` via raw SQL against `scip expt-convert` schema | `QueryService`, `FreshnessSnapshot`, nav result builders |
 | `search.py` | 183 | `searchCode` backend via real httpx client to zoekt-webserver; `ZoektLifecycle` lazy-spawns `zoekt-webserver -rpc`, pidfile-tracked | `searchCode()`, `ZoektLifecycle` |
 
 ### Graph & Registry
@@ -41,14 +41,14 @@ codeintel/
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
 | `graph.py` | 363 | Package dependency graph: sqlite3 CRUD on `packages`/`edges` tables in registry.db, `populate_graph_for_repo()` (rebuild-not-accumulate), `blast_radius()` 2-hop BFS | `GraphStore`, `extract_package_names()`, `populate_graph_for_repo()`, `blast_radius()` |
-| `registry.py` | 106 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed/partial) | `Registry`, repo table operations |
+| `registry.py` | 139 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed/partial), plus `scheme_override` column for persisting Xcode scheme across reindex runs | `Registry`, repo table operations, `_ensure_scheme_override_column()` idempotent migration |
 
 ### Server & CLI
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
-| `server.py` | 191 | MCP stdio server entry (`FastMCP("codeintel")`), registers 8 tools with thin wrappers around QueryService/ZoektLifecycle/GraphStore, uniform `{"error": ...}` error payload | MCP tool handlers: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `blastRadius` |
-| `index_cli.py` | 356 | The `codeintel` CLI: `index_repo()` pipeline (language detection → language indexer → scip expt-convert → populate graph → zoekt-index → atomic pointer swap → registry update), `_cmd_watch` wires Debouncer to watchdog.Observer | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` |
+| `server.py` | 206 | MCP stdio server entry (`FastMCP("codeintel")`), registers 8 tools with thin wrappers around QueryService/ZoektLifecycle/GraphStore, uniform `{"error": ...}` error payload | MCP tool handlers: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `blastRadius` |
+| `index_cli.py` | 526 | The `codeintel` CLI: `index_repo()` pipeline (language detection → language indexer → scip expt-convert → populate graph → zoekt-index → atomic pointer swap → registry update), with xcodebuild build-tool selection for Swift repos with checked-in Xcode projects (`_prefers_xcodebuild()`, `_swift_indexer_cmd()`) and Xcode scheme persistence via registry (`_resolve_scheme()`); `_cmd_watch` wires Debouncer to watchdog.Observer | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` (with `--scheme` flag support on index/watch) |
 | `watch.py` | 55 | `Debouncer` (pure, thread-free, injectable clock) + `should_ignore_path` (.git/node_modules/.venv/__pycache__/dist/build) | `Debouncer`, `should_ignore_path()` |
 
 ### Root-Level Files
@@ -82,6 +82,7 @@ codeintel/
 | Fixture | Purpose |
 |---------|---------|
 | `mini_py_repo/greeter.py` | Minimal Python file for integration tests |
+| `mini_swift_repo/` | Minimal Swift repo (Package.swift + Sources/MiniSwiftRepo/Greeter.swift) for xcodebuild detection tests |
 | `scip_encoder.py` | Real zstd+protobuf SCIP blob builders (synthetic index) |
 | `synthetic_index.py` | Hand-copied real SQLite schema fixture (documents/chunks/global_symbols, etc.) |
 
@@ -162,7 +163,7 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 
 ## Size Profile
 
-- **Total LOC (src):** 2,253 LOC (excluding generated scip_pb2.py); 2,364 LOC including it
-- **Total LOC (tests):** 1,868 LOC (across 16 test files; excluding fixtures)
-- **Largest module:** `query.py` (436 LOC)
+- **Total LOC (src):** 2,544 LOC (excluding generated scip_pb2.py); 2,663 LOC including it
+- **Total LOC (tests):** 1,868 LOC (across 17 test files; excluding fixtures)
+- **Largest module:** `index_cli.py` (526 LOC)
 - **Smallest module:** `__init__.py` (2 LOC)

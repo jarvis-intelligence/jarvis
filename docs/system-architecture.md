@@ -68,6 +68,7 @@ Diagram shows the full indexing lifecycle from file changes → published index:
 2. **Run Language Indexer**
    - Execute `scip-typescript`, `scip-python`, `scip-java`, or `scip-swift` on repo root
    - Output: raw SCIP document (protobuf, optionally zstd-compressed)
+   - **Swift build-tool selection:** For Swift repos with a checked-in `.xcodeproj` or `.xcworkspace` (but no `Package.swift`-only setup), use `scip-swift --build-tool xcodebuild` instead of the default SwiftPM backend. Rationale: `scip-swift`'s own `BuildBackendDetector` picks SwiftPM whenever `Package.swift` exists, even for UIKit-only iOS packages with no macOS platform support, where plain `swift build` fails. This override forces xcodebuild for such repos. When a scheme is specified (via `--scheme` flag or persisted in registry), append it to the indexer command.
 
 3. **SCIP Conversion**
    - Run `scip expt-convert` to convert SCIP document → SQLite
@@ -376,7 +377,7 @@ Indexing is exclusive — only one reindex can run at a time per slug (enforced 
 
 These are real behaviors of SCIP/Zoekt, not codeintel bugs:
 
-- **typeHierarchy returns empty:** SCIP v0.7.0 converter never populates `global_symbols.relationships`. Upstream issue in scip.proto or expt-convert tooling.
+- **typeHierarchy returns empty:** SCIP v0.9.0 converter never populates `global_symbols.relationships`. Upstream issue: [scip-code/scip#464](https://github.com/scip-code/scip/issues/464), fixed by [PR #465](https://github.com/scip-code/scip/pull/465).
 - **displayName / kind often null:** Same cause as above.
 - **Zoekt repo filter matches directory name:** The basename of the directory you indexed, which can diverge from codeintel's `--slug` if passed. Unscoped searches are more reliable.
 - **Package graph freshness always "unknown":** Graph has no per-node timestamp; only repo-level freshness (commit SHA) is tracked.

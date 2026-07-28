@@ -27,7 +27,7 @@
 | 3 | Indexer CLI (`codeintel index`), registry, embedded Zoekt + `searchCode` | ✓ Done |
 | 4 | `blastRadius` (package dependency graph) + `codeintel watch` (auto-reindex) | ✓ Done |
 
-**Language support:** TypeScript, Python, Java, plus Swift — `.swift` repos are recognized by `detect_language()` and routed to [`scip-swift`](https://github.com/phuongddx/scip-swift), which now exists, builds, and indexes end-to-end without error. Nav tools return empty results on Swift repos today because `scip-swift`'s occurrences carry no `Range` data yet (a `scip-swift` gap, not codeintel's). One language per index; language detection by file-extension plurality.
+**Language support:** TypeScript, Python, Java, plus Swift — `.swift` repos are recognized by `detect_language()` and routed to [`scip-swift`](https://github.com/phuongddx/scip-swift), which builds and indexes end-to-end. All 8 nav tools return correct results on real Swift repos: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy` all work. Requires a macOS host (Xcode + iOS SDK) for repos importing Apple-platform frameworks. One language per index; language detection by file-extension plurality.
 
 **8 MCP tools:** `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `blastRadius`
 
@@ -59,7 +59,7 @@ Core runtime:
 - `watchdog` (optional, `--extra watch`) — file monitor for `codeintel watch`
 
 External binaries (must be on `PATH`):
-- Language indexers: `scip-typescript`, `scip-python`, `scip-java` (pick per language); `scip-swift` is wired into detection but does not exist upstream yet
+- Language indexers: `scip-typescript`, `scip-python`, `scip-java` (pick per language); `scip-swift` ([phuongddx/scip-swift](https://github.com/phuongddx/scip-swift))
 - SCIP converter: `scip` (uses `scip expt-convert`)
 - Search indexers: `zoekt-index`, `zoekt-webserver`
 
@@ -73,7 +73,7 @@ External binaries (must be on `PATH`):
 ## Database Schema
 
 **Indexing:**
-- `registry.db` — repos table (slug/path/language/commit_sha/last_indexed/status); packages/edges tables (dependency graph)
+- `registry.db` — repos table (slug/path/language/commit_sha/last_indexed/status/scheme_override); packages/edges tables (dependency graph)
 - Per-repo: `index-<sha>.db` (from `scip expt-convert`) — documents/chunks/global_symbols/mentions/defn_enclosing_ranges
 - Zoekt shards: `.zoekt/` directory (spawned lazily)
 
@@ -84,12 +84,12 @@ External binaries (must be on `PATH`):
 - From Claude Code (user-scope MCP), on real TypeScript and Python repos: all 8 tools return correct results; nav results hand-verified on known symbols ✓
 - `codeintel index <repo>` end-to-end: detect language → run language indexer → `scip expt-convert` → zoekt-index → atomic pointer swap → registry update ✓
 - `getIndexStatus` correctly flags stale after new commits; reindex has zero query downtime ✓
-- Test suite: all phases gate on `uv run pytest` green (11 test modules, 1-1 map to src modules except `__init__.py`/`models.py`, plus fixtures with real SCIP/Zoekt blobs — 16 files total under `tests/`) ✓
+- Test suite: all phases gate on `uv run pytest` green (12 test modules, 1-1 map to src modules except `__init__.py`/`models.py`, plus fixtures with real SCIP/Zoekt blobs — 17 files total under `tests/`) ✓
 
 ## Non-Goals / Known Limitations
 
 **Upstream (not bugs):**
-- `typeHierarchy` returns empty (SCIP v0.7.0 converter never populates `global_symbols.relationships`)
+- `typeHierarchy` returns empty (`scip expt-convert` v0.9.0 never populates `global_symbols.relationships` — upstream issue [scip-code/scip#464](https://github.com/scip-code/scip/issues/464), fixed by [PR #465](https://github.com/scip-code/scip/pull/465))
 - `displayName` / `kind` often null for the same reason
 - Zoekt `repo` filter matches directory basename, not codeintel slug — may diverge if `--slug` was passed
 
@@ -101,6 +101,6 @@ External binaries (must be on `PATH`):
 
 ## Standards & Compliance
 
-- **SCIP protocol:** `scip_pb2.py` is generated from `scip.proto` at sourcegraph/scip **v0.7.0**
+- **SCIP protocol:** `scip_pb2.py` is generated from `scip.proto` at sourcegraph/scip **v0.9.0** (regenerated from v0.7.0 because v0.7.0 lacked the `typed_range` oneof that `scip-swift` requires)
 - **SQLite schema:** Output of `scip expt-convert` (not a published spec, treated as a moving target across releases)
 - **Code standards:** Dataclasses over Pydantic, stdlib sqlite3 (no ORMs), broad exception-handling in MCP server (uniform error payload), atomic pointer-swap for publish safety
