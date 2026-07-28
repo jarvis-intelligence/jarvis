@@ -514,7 +514,7 @@ getIndexStatus-first freshness flow; 8-tool detail in references/."
 - Create: `.claude/skills/codeintel-issues/SKILL.md`
 
 **Interfaces:**
-- Consumes: `gh` CLI (assumes installed + authed), codeintel's CLI (`codeintel status`, `uv run codeintel --version`), the known-limitations list (embedded).
+- Consumes: `gh` CLI (assumes installed + authed), codeintel's CLI (`codeintel status`), the package version via `importlib.metadata`, the known-limitations list (embedded).
 - Produces: a skill that triggers on codeintel-bug/feature intents. Always confirms with the user before `gh issue create`.
 
 - [ ] **Step 1: Write the SKILL.md**
@@ -541,7 +541,7 @@ Before drafting, collect:
 - Repo + slug, and `uv run codeintel status <slug>` output.
 - The tool name + arguments if it was an MCP call (e.g. `findReferences(repo="foo", symbol="bar")`).
 - The full error payload — every codeintel tool returns `{"error": "..."}`, copy it verbatim.
-- codeintel version: `uv run codeintel --version`.
+- codeintel version: `uv run python -c "import importlib.metadata; print(importlib.metadata.version('codeintel'))"` (codeintel has no `--version` flag; this reads it from package metadata).
 - OS/arch (`uname -s`, `uname -m`).
 
 ## 2. Classify — and check known limitations
