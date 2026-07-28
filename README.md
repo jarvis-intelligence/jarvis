@@ -200,6 +200,20 @@ These are real behaviors of `scip expt-convert` (as of v0.9.0), not codeintel bu
   an older codeintel still carry their old directory-derived name until you
   `codeintel reindex <slug>`.
 
+## Skills
+
+Three agent skills in `.claude/skills/` help onboard and use codeintel:
+
+- `codeintel-setup` — install, register, index, verify.
+- `codeintel-use` — prefer codeintel for structural queries (find references, go-to-definition, hierarchy).
+- `codeintel-issues` — file codeintel bugs/features via `gh`.
+
+To load them in a ZCode agent, link them once:
+
+```bash
+uv run python scripts/link_skills.py
+```
+
 ## Documentation
 
 For more details, see:
