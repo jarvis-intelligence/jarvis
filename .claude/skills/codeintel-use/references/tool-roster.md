@@ -5,23 +5,23 @@ The 8 MCP tools registered by `codeintel-server`. All take `repo` (the slug from
 ## Tool detail
 
 ### documentSymbols(repo, path) → dict
-Every top-level symbol defined in `path` within `repo`, each with its range.
+Every top-level symbol defined in `path` within `repo`, each with its range. **The returned `symbol` field is the exact string to pass to the other nav tools** — always read it from here first rather than guessing.
 Returns: `{"path": ..., "symbols": [{...}], "freshness": {...}}`.
 
 ### goToDefinition(repo, symbol) → dict
-Resolve `symbol`'s definition location(s) within `repo`.
+Resolve `symbol`'s definition location(s) within `repo`. `symbol` must be the **fully-qualified SCIP string** (e.g. `` scip-python python codeintel 0.1.0 `codeintel.index_cli`/index_repo() ``); a bare name returns empty. Get the string from `documentSymbols`.
 Returns: `{"symbol": ..., "definitions": [{...}], "freshness": {...}}`.
 
 ### findReferences(repo, symbol) → dict
-Every occurrence of `symbol` within `repo`, definition sites included.
+Every occurrence of `symbol` within `repo`, definition sites included. Same fully-qualified-`symbol` requirement as `goToDefinition`.
 Returns: `{"symbol": ..., "references": [{...}], "freshness": {...}}`.
 
 ### callHierarchy(repo, symbol) → dict
-Single-level incoming + outgoing call hierarchy for `symbol`.
+Single-level incoming + outgoing call hierarchy for `symbol`. Same fully-qualified-`symbol` requirement.
 Returns: `{"symbol": ..., "incomingCalls": [...], "outgoingCalls": [...], "freshness": {...}}`.
 
 ### typeHierarchy(repo, symbol) → dict
-Single-level super/subtypes for `symbol`. **Returns an `error` on real indexes** — upstream `scip expt-convert` never populates `relationships`. Treat the error as "unavailable", not as "no supertypes".
+Single-level super/subtypes for `symbol`. Same fully-qualified-`symbol` requirement. **Returns an `error` on real indexes** — upstream `scip expt-convert` never populates `relationships`. Treat the error as "unavailable", not as "no supertypes".
 
 ### getIndexStatus(repo, repo_path=None) → dict
 Whether `repo` has a published index, plus freshness. Pass `repo_path` (the repo's local git dir) to compare the published commit against `git rev-parse HEAD`.

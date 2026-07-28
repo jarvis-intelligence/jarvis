@@ -23,6 +23,24 @@ For any **structural** code question, prefer the codeintel tool over grep. `repo
 | Cross-repo dependents of a package? | `blastRadius(repo, pkg)` | — |
 | Lexical text search? | grep **or** `searchCode(query, repo?)` | — |
 
+## Symbol format (critical)
+
+`goToDefinition`, `findReferences`, `callHierarchy`, and `typeHierarchy` match **exactly** against the fully-qualified SCIP symbol string stored in the index — a bare name like `"index_repo"` returns **empty results**, not a match. The string has a language-specific shape:
+
+- **Python (scip-python):** `` scip-python python <pkg> <ver> `<module>`/<name><suffix> ``
+  e.g. `` scip-python python codeintel 0.1.0 `codeintel.index_cli`/index_repo() ``
+  suffix: `()` = function/method, `#` = class, `.` = module variable, `:` = `__init__`.
+- **TypeScript (scip-typescript):** npm-style, e.g. `@scope/pkg/src/file.ts/functionName`.
+- **Swift (scip-swift):** swift-module-style, e.g. `MyModule/ClassName/functionName()`.
+
+You do not need to guess the string. **Always discover it first** with `documentSymbols`:
+
+1. Call `documentSymbols(repo, path)` on the file where the symbol lives (or is used).
+2. Each returned entry's `symbol` field is the exact string to pass to `goToDefinition` / `findReferences` / `callHierarchy`.
+3. Pass that string verbatim.
+
+Example: to find callers of `index_repo`, first `documentSymbols(repo, "src/codeintel/index_cli.py")`, read the entry whose `symbol` ends in `/index_repo().`, then pass that full string to `callHierarchy`.
+
 Full signatures and return shapes: `grep -nA20 "## Tool detail" references/tool-roster.md` (loaded on demand).
 
 ## The prefer-codeintel rule
@@ -39,6 +57,7 @@ Before any structural tool call, check freshness:
 ## Gotchas
 
 - **`typeHierarchy` errors on real indexes.** Upstream `scip expt-convert` never populates `relationships`, so the tool returns an explicit error (not a bug, not "no supertypes"). Do not file this as a bug; it's a known upstream gap.
+- **Bare symbol names return empty results, not errors.** `goToDefinition(repo, "index_repo")` returns `{"definitions": []}` silently. The match is exact against the fully-qualified SCIP string — see "Symbol format" above. If a nav tool returns empty and the symbol definitely exists, you passed the wrong form: run `documentSymbols` first and use the returned `symbol` string verbatim.
 - **`blastRadius` only sees already-indexed repos.** Index the dependency first, or re-run `codeintel index`/`reindex` after indexing it, for an edge to appear.
 - **One language per repo.** No multi-language merge — a polyglot repo indexes only its plurality language.
 - **Every tool returns `{"error": "..."}` on failure, never raises.** Check for an `error` key before reading results.
