@@ -351,7 +351,7 @@ f=.claude/skills/codeintel-setup/SKILL.md
 desc=$(awk '/^description:/{sub(/^description: /,""); print; exit}' "$f")
 echo "${#desc} chars (must be ≤200)"
 # body < 300 lines (lines after the closing --- of frontmatter)
-tail -n +4 "$f" | awk 'c>=2{print} /^---$/{c++}' | wc -l | awk '{print $1" body lines (must be <300)"}'
+awk 'BEGIN{n=0} /^---$/{n++; next} n>=2{c++} END{print c" body lines (must be <300)"}' "$f"
 ```
 
 Expected: description ≤200 chars; body <300 lines.
@@ -487,7 +487,7 @@ ref=.claude/skills/codeintel-use/references/tool-roster.md
 for f in "$main" "$ref"; do
   # main has frontmatter: count lines after the closing ---. ref has no frontmatter: count all lines.
   if [ "$f" = "$main" ]; then
-    lines=$(tail -n +4 "$f" | awk 'c>=2{print} /^---$/{c++}' | wc -l | awk '{print $1}')
+    lines=$(awk 'BEGIN{n=0} /^---$/{n++; next} n>=2{c++} END{print c}' "$f")
   else
     lines=$(wc -l < "$ref" | awk '{print $1}')
   fi
@@ -608,7 +608,7 @@ Paste the returned issue URL back to the user. If the bug is blocking work, sugg
 f=.claude/skills/codeintel-issues/SKILL.md
 desc=$(awk '/^description:/{sub(/^description: /,""); print; exit}' "$f")
 echo "description: ${#desc} chars (must be ≤200)"
-tail -n +4 "$f" | awk 'c>=2{print} /^---$/{c++}' | wc -l | awk '{print $1" body lines (must be <300)"}'
+awk 'BEGIN{n=0} /^---$/{n++; next} n>=2{c++} END{print c" body lines (must be <300)"}' "$f"
 ```
 
 Expected: description ≤200 chars; body <300 lines.
