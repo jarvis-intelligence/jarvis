@@ -40,6 +40,13 @@ def link_skills(repo_root: Path, target_dir: Path) -> list[str]:
         # Skip an existing, valid symlink.
         if link.is_symlink() and link.exists():
             continue
+        # Refuse to clobber a real (non-symlink) directory: unlink() raises
+        # IsADirectoryError on it, and silently rmtree-ing a user's hand-made
+        # dir would be destructive. Skip with a warning instead.
+        if not link.is_symlink() and link.is_dir():
+            print(f"warning: {link} is a real directory, skipping (remove it manually to link)",
+                  file=sys.stderr)
+            continue
         # Replace a broken symlink (or stale file) so re-runs self-heal.
         if link.is_symlink() or link.exists():
             link.unlink()

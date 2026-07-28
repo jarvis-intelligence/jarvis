@@ -73,3 +73,23 @@ def test_replaces_broken_symlink(tmp_path):
     link = target / "codeintel-setup"
     assert link.is_symlink()
     assert (link / "SKILL.md").exists()  # now resolves
+
+
+def test_skips_real_directory_at_target(tmp_path, capsys):
+    """A real (non-symlink) dir at the target is skipped, not clobbered."""
+    link_skills = _load_link_skills()
+    repo_root = tmp_path / "repo"
+    target = tmp_path / "target"
+    _make_skill(repo_root, "codeintel-setup")
+    # pre-create a real directory at the target name
+    target.mkdir()
+    real_dir = target / "codeintel-setup"
+    real_dir.mkdir()
+    (real_dir / "mine.txt").write_text("user content")
+
+    created = link_skills.link_skills(repo_root, target)
+
+    assert created == []  # nothing linked
+    assert real_dir.is_dir() and not real_dir.is_symlink()  # left intact
+    assert (real_dir / "mine.txt").exists()  # user content preserved
+    assert "real directory" in capsys.readouterr().err  # warned
