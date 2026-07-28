@@ -350,8 +350,8 @@ f=.claude/skills/codeintel-setup/SKILL.md
 # description ≤ 200 chars
 desc=$(awk '/^description:/{sub(/^description: /,""); print; exit}' "$f")
 echo "${#desc} chars (must be ≤200)"
-# body < 300 lines (the markdown between the closing --- and EOF)
-awk 'f{c++} /^---$/{f=!f} END{print c-1" body lines (must be <300)"}' "$f"
+# body < 300 lines (lines after the closing --- of frontmatter)
+tail -n +4 "$f" | awk 'c>=2{print} /^---$/{c++}' | wc -l | awk '{print $1" body lines (must be <300)"}'
 ```
 
 Expected: description ≤200 chars; body <300 lines.
@@ -485,9 +485,12 @@ Every nav tool returns a `freshness` object describing the published index (`ind
 main=.claude/skills/codeintel-use/SKILL.md
 ref=.claude/skills/codeintel-use/references/tool-roster.md
 for f in "$main" "$ref"; do
-  lines=$(awk 'f{c++} /^---$/{f=!f} END{print (c?c-1:0)}' "$f")
-  # for the reference (no frontmatter) count all lines
-  [ "$f" = "$ref" ] && lines=$(wc -l < "$ref")
+  # main has frontmatter: count lines after the closing ---. ref has no frontmatter: count all lines.
+  if [ "$f" = "$main" ]; then
+    lines=$(tail -n +4 "$f" | awk 'c>=2{print} /^---$/{c++}' | wc -l | awk '{print $1}')
+  else
+    lines=$(wc -l < "$ref" | awk '{print $1}')
+  fi
   echo "$f: $lines lines (must be <300)"
 done
 desc=$(awk '/^description:/{sub(/^description: /,""); print; exit}' "$main")
@@ -605,7 +608,7 @@ Paste the returned issue URL back to the user. If the bug is blocking work, sugg
 f=.claude/skills/codeintel-issues/SKILL.md
 desc=$(awk '/^description:/{sub(/^description: /,""); print; exit}' "$f")
 echo "description: ${#desc} chars (must be ≤200)"
-awk 'f{c++} /^---$/{f=!f} END{print (c?c-1:0)" body lines (must be <300)"}' "$f"
+tail -n +4 "$f" | awk 'c>=2{print} /^---$/{c++}' | wc -l | awk '{print $1" body lines (must be <300)"}'
 ```
 
 Expected: description ≤200 chars; body <300 lines.
