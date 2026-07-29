@@ -155,7 +155,7 @@ claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run c
 ## MCP tools
 
 `documentSymbols` · `goToDefinition` · `findReferences` · `callHierarchy` ·
-`typeHierarchy` · `getIndexStatus` · `searchCode` · `blastRadius`
+`typeHierarchy` · `getIndexStatus` · `searchCode` · `blastRadius` · `semanticSearch`
 
 Every nav tool takes `repo` (the slug from `codeintel index`) plus a
 tool-specific `symbol` or `path`. All tools report failure the same way — a
@@ -181,6 +181,13 @@ tool-specific `symbol` or `path`. All tools report failure the same way — a
   before recomputing them, so a removed dependency's edge disappears too —
   the graph always reflects each repo's *last* index run, not an
   accumulation of every run it's ever had.
+- **`semanticSearch`** takes `repo` plus a natural-language `query`. Requires the
+  optional `semantic` extra — install it with `uv sync --extra semantic`. Results
+  fuse a LanceDB vector search over tree-sitter-chunked code with `searchCode`'s
+  Zoekt hits via reciprocal rank fusion. Raises a clear error if the repo has
+  never been indexed with the extra installed (`codeintel reindex <slug>` after
+  installing it builds the missing table); indexing itself is non-fatal — a
+  failure there never blocks the rest of `codeintel index`.
 
 ### Known upstream limitations
 

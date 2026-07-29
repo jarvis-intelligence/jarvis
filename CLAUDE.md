@@ -13,6 +13,7 @@ as MCP tools over stdio — no HTTP server, no auth, no network.
 ```bash
 uv sync                              # install deps
 uv sync --extra watch                # + watchdog, needed for `codeintel watch`
+uv sync --extra semantic             # + lancedb/sentence-transformers/tree-sitter, needed for semanticSearch
 
 uv run pytest                        # all tests
 uv run pytest -m "not integration"   # unit only — no external binaries required
@@ -48,6 +49,12 @@ Three engines sit behind the MCP server, each backed by its own storage:
 - **Graph** (`graph.py` + `registry.py`) — package dependency graph (`packages`/`edges` in
   `registry.db`) driving `blastRadius` (2-hop BFS). `populate_graph_for_repo()` clears a repo's
   outgoing edges before recomputing — rebuild-not-accumulate, so retracted dependencies don't linger.
+- **Semantic** (`chunker.py` + `embeddings.py` + `semantic.py`) — tree-sitter chunking →
+  sentence-transformers embeddings → a per-repo LanceDB table under `~/.codeintel/lancedb/`.
+  `semanticSearch` fuses vector hits with Zoekt hits via reciprocal rank fusion. Gated behind the
+  optional `semantic` extra; the indexing stage is non-fatal in `codeintel index` (a failure there
+  never blocks the SCIP/Zoekt publish). A LanceDB table only ever holds vectors from one
+  model+revision — the model-identity rule.
 
 **Index pipeline** (`index_cli.py`, `index_repo()`): detect language by file-extension plurality
 (ties broken by fixed priority `.ts→.tsx→.py→.java→.kt→.swift`; one language per repo, no

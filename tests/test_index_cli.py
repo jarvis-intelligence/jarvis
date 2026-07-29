@@ -625,3 +625,32 @@ def test_forget_removes_lance_table_dir(tmp_path: Path, monkeypatch):
 
     assert _cmd_forget(argparse.Namespace(slug="gone")) == 0
     assert not lance_dir.exists()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_index_repo_builds_semantic_index_and_searches(tmp_path: Path, monkeypatch):
+    """Full pipeline: chunk -> embed -> LanceDB -> hybrid search, exercised
+    with a small real model (not the default) so the test stays minutes-not-
+    hours on first download; the pipeline under test is identical either way.
+    """
+    pytest.importorskip("lancedb")
+    pytest.importorskip("tree_sitter_language_pack")
+    pytest.importorskip("sentence_transformers")
+
+    monkeypatch.setenv("CODEINTEL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    import codeintel.embeddings as embeddings_module
+    monkeypatch.setattr(embeddings_module, "_default", None)  # reset singleton
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+
+    data_root = tmp_path / "data"
+    slug = index_repo(repo_dir, slug="semfix", root=data_root)
+
+    from codeintel.semantic import semantic_search
+    result = semantic_search(slug, "function definition", root=data_root)
+    assert result["total"] >= 1
+    assert all("filePath" in r for r in result["results"])
