@@ -35,6 +35,9 @@ _DEF_NODE_TYPES: dict[str, set[str]] = {
 }
 _CLASS_NODE_TYPES = {"class_definition", "class_declaration",
                      "interface_declaration", "protocol_declaration"}
+# Kotlin's grammar attaches no "name" field to class_declaration/function_declaration
+# (verified by direct parse); the identifier is a plain positional child instead.
+_IDENTIFIER_NODE_TYPES = {"type_identifier", "simple_identifier"}
 _IMPORT_NODE_TYPES: dict[str, set[str]] = {
     "python": {"import_statement", "import_from_statement"},
     "typescript": {"import_statement"},
@@ -92,8 +95,15 @@ def _node_name(node) -> str | None:
     if named is not None:
         return named.text.decode("utf-8", errors="replace")
     for child in node.children:  # e.g. decorated_definition wraps the real def
-        if child.type in _CLASS_NODE_TYPES or "function" in child.type or "method" in child.type:
+        # Suffix check avoids false positives like "function_value_parameters" /
+        # "function_body", which also contain the substring "function".
+        if child.type.endswith(("_definition", "_declaration")) and (
+            child.type in _CLASS_NODE_TYPES or "function" in child.type or "method" in child.type
+        ):
             return _node_name(child)
+    for child in node.children:  # grammars with no "name" field (e.g. kotlin)
+        if child.type in _IDENTIFIER_NODE_TYPES:
+            return child.text.decode("utf-8", errors="replace")
     return None
 
 
@@ -159,6 +169,25 @@ def _merge_small(chunks: list[Chunk]) -> list[Chunk]:
     return merged
 
 
+def _collect_imports(root, source: str, language: str) -> list[str]:
+    """One string per import statement, so MAX_IMPORT_LINES caps meaningfully.
+
+    Most grammars give each import its own top-level node. Kotlin instead
+    wraps every import in a single top-level `import_list` container node
+    (verified by direct parse), so that container is expanded into its
+    `import_header` children instead of being kept as one opaque blob."""
+    imports: list[str] = []
+    for node in root.children:
+        if node.type not in _IMPORT_NODE_TYPES.get(language, set()):
+            continue
+        if node.type == "import_list":
+            imports.extend(source[c.start_byte:c.end_byte]
+                            for c in node.children if c.type == "import_header")
+        else:
+            imports.append(source[node.start_byte:node.end_byte])
+    return imports
+
+
 def chunk_file(rel_path: str, source: str, file_hash: str, language: str) -> list[Chunk]:
     try:
         from tree_sitter_language_pack import get_parser
@@ -167,8 +196,7 @@ def chunk_file(rel_path: str, source: str, file_hash: str, language: str) -> lis
         return _fixed_windows(rel_path, language, file_hash, source)
 
     root = tree.root_node
-    imports = [source[n.start_byte:n.end_byte]
-               for n in root.children if n.type in _IMPORT_NODE_TYPES.get(language, set())]
+    imports = _collect_imports(root, source, language)
     defs = [n for n in root.children if n.type in _DEF_NODE_TYPES.get(language, set())]
     if not defs:
         return _fixed_windows(rel_path, language, file_hash, source)

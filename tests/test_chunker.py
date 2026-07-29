@@ -76,3 +76,42 @@ def test_content_hash_is_stable_sha256():
     import hashlib
     c = chunks[0]
     assert c.content_hash == hashlib.sha256(c.content.encode()).hexdigest()
+
+
+# Kotlin's grammar attaches no "name" field to class_declaration/function_declaration
+# nodes (unlike python/typescript/java/swift), so _node_name needs a Kotlin-specific
+# fallback. Padded the same way as PY_TWO_FUNCS so the two defs don't merge.
+KT_FUNC_AND_CLASS = f'''import kotlin.text.Regex
+
+fun standalone(): Int {{
+    // {"p" * 1100}
+    return 1
+}}
+
+class Foo {{
+    fun bar(): Int {{
+        return 1
+    }}
+}}
+'''
+
+
+def test_kotlin_function_and_class_symbol_names_resolve():
+    chunks = chunk_file("k.kt", KT_FUNC_AND_CLASS, "fh", "kotlin")
+    names = [c.symbol_name for c in chunks]
+    assert "standalone" in names
+    assert "Foo" in names
+    assert None not in names
+
+
+def test_kotlin_oversized_class_splits_into_methods_with_symbol_names():
+    body = "\n".join(
+        f"    fun method_{i}(): Int {{\n        return {i}  // " + "pad " * 120 + "\n    }"
+        for i in range(8)
+    )
+    source = f"import kotlin.text.Regex\n\nclass Big {{\n{body}\n}}\n"
+    chunks = chunk_file("big.kt", source, "fh", "kotlin")
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.content.startswith("import kotlin.text.Regex\nclass Big")
+        assert chunk.symbol_name.startswith("method_")
