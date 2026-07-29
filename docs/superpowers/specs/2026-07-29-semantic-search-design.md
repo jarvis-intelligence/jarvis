@@ -84,6 +84,9 @@ class Chunk:
   Storage & Search).
 - Batch size 32. Before embedding, chunks are grouped by `content_hash` and only
   unique hashes are embedded.
+- Vectors are L2-normalized at encode time (`normalize_embeddings=True`), the
+  standard hubness mitigation; paired with cosine distance at query time (see
+  Storage & Search), ranking is well-defined and metric-consistent.
 - Missing `semantic` extra raises:
   `"semantic search requires the 'semantic' extra: uv sync --extra semantic"`.
 - Env vars: `CODEINTEL_EMBEDDING_MODEL` (default `nomic-ai/nomic-embed-code`),
@@ -123,7 +126,9 @@ carry-over is driven by walking the current file tree — rebuild-not-accumulate
 matching `populate_graph_for_repo()`.
 
 **Query path (`semanticSearch` tool):** embed query with the table's model →
-LanceDB top-30 → Zoekt top-30 via existing `search_zoekt()` → RRF merge:
+LanceDB top-30 using **cosine distance** (never LanceDB's default L2 — vectors
+are L2-normalized at encode time, so cosine ranking is exact) → Zoekt top-30
+via existing `search_zoekt()` → RRF merge:
 
 ```python
 def reciprocal_rank_fusion(vector_hits, zoekt_hits, k: int = 60) -> list[FusedHit]:

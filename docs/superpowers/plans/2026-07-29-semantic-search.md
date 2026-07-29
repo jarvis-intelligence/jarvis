@@ -405,9 +405,11 @@ class _FakeST:
     def __init__(self, model_name, revision=None, trust_remote_code=False):
         self.model_name, self.revision = model_name, revision
         self.calls: list[list[str]] = []
+        self.normalize_flags: list[bool] = []
 
-    def encode(self, batch):
+    def encode(self, batch, normalize_embeddings=False):
         self.calls.append(list(batch))
+        self.normalize_flags.append(normalize_embeddings)
         return [[float(len(t)), 1.0] for t in batch]
 
 
@@ -437,6 +439,7 @@ def test_lazy_load_and_batching(monkeypatch):
     vectors = model.embed_texts(["a", "bb", "ccc"])
     assert vectors == [[1.0, 1.0], [2.0, 1.0], [3.0, 1.0]]
     assert holder["model"].calls == [["a", "bb"], ["ccc"]]  # batch_size respected
+    assert holder["model"].normalize_flags == [True, True]  # L2-normalized vectors
 
 
 def test_embed_query_applies_prefix(monkeypatch):
@@ -523,7 +526,9 @@ class EmbeddingModel:
         model = self._load()
         vectors: list[list[float]] = []
         for i in range(0, len(texts), self.batch_size):
-            for vec in model.encode(texts[i:i + self.batch_size]):
+            # normalize_embeddings: L2-normalize so cosine ranking at query
+            # time is exact (standard hubness mitigation).
+            for vec in model.encode(texts[i:i + self.batch_size], normalize_embeddings=True):
                 vectors.append(list(vec) if not hasattr(vec, "tolist") else vec.tolist())
         return vectors
 
@@ -862,7 +867,9 @@ class SemanticStore:
         table = self._open(slug)
         if table is None:
             return []
-        return table.search(vector).limit(limit).to_list()
+        # Cosine, never LanceDB's default L2 — vectors are normalized at
+        # encode time, so cosine ranking is exact.
+        return table.search(vector).metric("cosine").limit(limit).to_list()
 
     def drop(self, slug: str) -> None:
         db = self._connect()
