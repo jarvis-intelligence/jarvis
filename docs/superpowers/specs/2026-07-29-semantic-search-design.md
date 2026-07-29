@@ -15,7 +15,7 @@ synthesis — the MCP client (Claude) does its own synthesis.
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Embeddings | Self-hosted `nomic-ai/nomic-embed-code` via `sentence-transformers` | Fully offline, matches local-first ethos; no API key or per-token cost |
+| Embeddings | Self-hosted `BAAI/bge-m3` via `sentence-transformers` | Fully offline, matches local-first ethos; no API key or per-token cost; multilingual (100+ languages) and strong on code, so a later switch to non-English queries or mixed code+doc embedding needs no re-architecture, only a re-embed |
 | Vector storage | LanceDB, embedded, one table per repo | No server process; per-repo isolation mirrors `index-<sha>.db` pattern |
 | Chunking | tree-sitter, AST-aware at function/class boundaries | Verified best practice (~40-50% recall gain over fixed windows) |
 | Pipeline | Third stage inside existing `codeintel index` | One command, one registry status; no separate embed step |
@@ -75,7 +75,9 @@ class Chunk:
 
 ## Embeddings (`embeddings.py`)
 
-- Model: `nomic-ai/nomic-embed-code` (768-dim), loaded via `sentence-transformers`.
+- Model: `BAAI/bge-m3` (1024-dim, MIT license), loaded via `sentence-transformers`.
+  No query-side instruction prefix is needed — bge-m3 dropped that requirement
+  present in earlier BGE versions, so `embed_query()` encodes the raw query text.
 - Lazy singleton — loaded on first use, never at MCP server startup (same pattern
   as `ZoektLifecycle`).
 - Pinned by HuggingFace revision hash. Model identity (`model_name` +
@@ -89,7 +91,7 @@ class Chunk:
   Storage & Search), ranking is well-defined and metric-consistent.
 - Missing `semantic` extra raises:
   `"semantic search requires the 'semantic' extra: uv sync --extra semantic"`.
-- Env vars: `CODEINTEL_EMBEDDING_MODEL` (default `nomic-ai/nomic-embed-code`),
+- Env vars: `CODEINTEL_EMBEDDING_MODEL` (default `BAAI/bge-m3`),
   `CODEINTEL_EMBEDDING_BATCH_SIZE` (default 32).
 
 ## Storage & Search (`semantic.py`)
@@ -100,7 +102,7 @@ Zoekt shards.
 
 **Table columns:** `chunk_id` (UUID pk), `content_hash`, `file_hash`,
 `file_path`, `start_line`, `end_line`, `symbol_name`, `language`, `content`,
-`vector` (768-dim), `model_name`, `model_revision`. Table-level metadata records
+`vector` (1024-dim), `model_name`, `model_revision`. Table-level metadata records
 the authoritative `model_name` + `model_revision` for the whole table. LanceDB's
 default IVF_PQ ANN index applies; no manual tuning.
 

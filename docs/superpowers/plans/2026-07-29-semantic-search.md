@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `semanticSearch` MCP tool backed by tree-sitter chunking, self-hosted embeddings (Nomic Embed Code), LanceDB vector storage, and RRF fusion with the existing Zoekt lexical search.
+**Goal:** Add a `semanticSearch` MCP tool backed by tree-sitter chunking, self-hosted embeddings (bge-m3), LanceDB vector storage, and RRF fusion with the existing Zoekt lexical search.
 
 **Architecture:** Three new modules (`chunker.py`, `embeddings.py`, `semantic.py`) behind an optional `semantic` extra; a new non-fatal stage in `index_repo()` before the atomic pointer flip; one new MCP tool in `server.py`. A LanceDB table (one per repo, under `~/.codeintel/lancedb/`) only ever holds vectors from one model at one revision.
 
@@ -15,7 +15,7 @@
 - Python `>=3.12`; modern type hints (`str | None`, `list[T]`); frozen dataclasses for result types; direct `sqlite3`, parameterized queries.
 - New deps ONLY under `[project.optional-dependencies] semantic`: `lancedb>=0.20`, `sentence-transformers>=3.0`, `tree-sitter>=0.25`, `tree-sitter-language-pack>=0.1`. Base install behavior must not change.
 - Heavy imports (`tree_sitter_language_pack`, `sentence_transformers`, `lancedb`) are deferred inside functions — importing `codeintel.semantic`/`chunker`/`embeddings` must succeed without the extra installed.
-- Env vars prefixed `CODEINTEL_`: `CODEINTEL_EMBEDDING_MODEL` (default `nomic-ai/nomic-embed-code`), `CODEINTEL_EMBEDDING_BATCH_SIZE` (default 32).
+- Env vars prefixed `CODEINTEL_`: `CODEINTEL_EMBEDDING_MODEL` (default `BAAI/bge-m3`), `CODEINTEL_EMBEDDING_BATCH_SIZE` (default 32).
 - Unit tests must pass without the extra installed: test modules that need it start with `pytest.importorskip(...)`.
 - Every MCP tool returns `{"error": "..."}` on failure, never raises.
 - Commits: conventional format, no AI references. Run `uv run pytest -m "not integration"` before each commit.
@@ -385,7 +385,7 @@ def chunk_file(rel_path: str, source: str, file_hash: str, language: str) -> lis
   - `SemanticExtraMissingError(Exception)` with message `"semantic search requires the 'semantic' extra: uv sync --extra semantic"`.
   - `EmbeddingModel(model_name: str | None = None, revision: str | None = None, batch_size: int | None = None)` with `.identity() -> tuple[str, str]`, `.embed_texts(texts: list[str]) -> list[list[float]]`, `.embed_query(query: str) -> list[float]`.
   - `default_model() -> EmbeddingModel` (module singleton).
-  - Constants: `DEFAULT_MODEL`, `DEFAULT_REVISION`, `QUERY_PREFIX`, `DEFAULT_BATCH_SIZE = 32`.
+  - Constants: `DEFAULT_MODEL`, `DEFAULT_REVISION`, `DEFAULT_BATCH_SIZE = 32`.
 
 - [ ] **Step 1: Write failing tests** (`tests/test_embeddings.py`)
 
@@ -442,11 +442,13 @@ def test_lazy_load_and_batching(monkeypatch):
     assert holder["model"].normalize_flags == [True, True]  # L2-normalized vectors
 
 
-def test_embed_query_applies_prefix(monkeypatch):
+def test_embed_query_encodes_raw_text(monkeypatch):
+    # bge-m3 dropped the query-instruction-prefix requirement present in
+    # earlier BGE versions, so embed_query is a direct passthrough.
     holder = _install_fake(monkeypatch)
     model = EmbeddingModel(model_name="m", revision="r")
     model.embed_query("auth")
-    assert holder["model"].calls[0][0] == embeddings.QUERY_PREFIX + "auth"
+    assert holder["model"].calls[0][0] == "auth"
 
 
 def test_identity_and_env_overrides(monkeypatch):
@@ -464,7 +466,7 @@ def test_identity_and_env_overrides(monkeypatch):
 - [ ] **Step 3: Pin the model revision.** Run:
 
 ```bash
-uv run python -c "from huggingface_hub import HfApi; print(HfApi().model_info('nomic-ai/nomic-embed-code').sha)"
+uv run python -c "from huggingface_hub import HfApi; print(HfApi().model_info('BAAI/bge-m3').sha)"
 ```
 
 (`huggingface_hub` ships with sentence-transformers.) Use the printed sha as `DEFAULT_REVISION` below. If offline, set `DEFAULT_REVISION = "main"` and leave a `# pin to a commit sha before first real index` comment — but try the fetch first.
@@ -484,10 +486,8 @@ from __future__ import annotations
 
 import os
 
-DEFAULT_MODEL = "nomic-ai/nomic-embed-code"
+DEFAULT_MODEL = "BAAI/bge-m3"
 DEFAULT_REVISION = "<sha-from-step-3>"
-# Per the nomic-embed-code model card: queries take this prefix, documents none.
-QUERY_PREFIX = "Represent this query for searching relevant code: "
 DEFAULT_BATCH_SIZE = 32
 _INSTALL_HINT = "semantic search requires the 'semantic' extra: uv sync --extra semantic"
 
@@ -533,7 +533,9 @@ class EmbeddingModel:
         return vectors
 
     def embed_query(self, query: str) -> list[float]:
-        return self.embed_texts([QUERY_PREFIX + query])[0]
+        # bge-m3 needs no query-side instruction prefix (unlike earlier BGE
+        # versions) — encode the raw query text directly.
+        return self.embed_texts([query])[0]
 
 
 _default: EmbeddingModel | None = None
