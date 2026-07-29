@@ -569,3 +569,59 @@ def test_forget_removes_the_zoekt_shard(tmp_path: Path, monkeypatch, capsys):
     assert rc == 0
     assert not shard.exists(), "a forgotten repo must not stay searchable"
     assert not index_dir.exists()
+
+
+def test_semantic_stage_skips_cleanly_when_extra_missing(monkeypatch, capsys):
+    import sys
+
+    import codeintel
+    from codeintel.index_cli import _run_semantic_stage
+
+    # Setting the sys.modules entry to None is the standard trick to force
+    # the next `import` to raise ImportError -- but if some other test
+    # module already ran `import codeintel.semantic` earlier in the suite,
+    # Python has cached it as an attribute on the `codeintel` package
+    # object, and `from codeintel import semantic` resolves via that
+    # attribute without consulting sys.modules at all. Clearing the
+    # attribute too makes this deterministic regardless of test order.
+    monkeypatch.setitem(sys.modules, "codeintel.semantic", None)
+    monkeypatch.delattr(codeintel, "semantic", raising=False)
+    assert _run_semantic_stage(Path("/repo"), "slug", None) is False
+    assert "uv sync --extra semantic" in capsys.readouterr().err
+
+
+def test_semantic_stage_failure_is_nonfatal(monkeypatch, capsys):
+    import codeintel.semantic as semantic_module
+    from codeintel.index_cli import _run_semantic_stage
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("model download failed")
+
+    monkeypatch.setattr(semantic_module, "index_semantic", _boom)
+    assert _run_semantic_stage(Path("/repo"), "slug", None) is False
+    assert "still published" in capsys.readouterr().err
+
+
+def test_semantic_stage_success_returns_true(monkeypatch):
+    import codeintel.semantic as semantic_module
+    from codeintel.index_cli import _run_semantic_stage
+
+    monkeypatch.setattr(semantic_module, "index_semantic", lambda *a, **k: 5)
+    assert _run_semantic_stage(Path("/repo"), "slug", None) is True
+
+
+def test_forget_removes_lance_table_dir(tmp_path: Path, monkeypatch):
+    import argparse
+
+    from codeintel.index_cli import _cmd_forget
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("gone", "/p", "python", None, "indexed")
+    registry.close()
+    lance_dir = tmp_path / "lancedb" / "gone.lance"
+    lance_dir.mkdir(parents=True)
+    (lance_dir / "data.bin").write_text("x")
+
+    assert _cmd_forget(argparse.Namespace(slug="gone")) == 0
+    assert not lance_dir.exists()

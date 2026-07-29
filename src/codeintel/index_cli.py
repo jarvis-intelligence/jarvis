@@ -217,6 +217,34 @@ def _resolve_scheme(registry: Registry, slug: str, scheme: str | None) -> str | 
     return existing.scheme_override if existing is not None else None
 
 
+def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None) -> bool:
+    """Chunk + embed + write the LanceDB table. Optional and non-fatal:
+    a missing `semantic` extra skips with a hint, any other failure warns
+    and lets the SCIP/Zoekt publish proceed — the previous semantic table
+    (if any) stays live."""
+    try:
+        from codeintel import semantic
+        from codeintel.embeddings import SemanticExtraMissingError
+    except ImportError:
+        print(
+            "semantic indexing skipped — install with `uv sync --extra semantic`",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        semantic.index_semantic(repo_path, slug, root=root)
+        return True
+    except SemanticExtraMissingError as exc:
+        print(f"semantic indexing skipped — {exc}", file=sys.stderr)
+        return False
+    except Exception as exc:
+        print(
+            f"warning: semantic indexing failed (SCIP/Zoekt index still published): {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None, scheme: str | None = None
 ) -> str:
@@ -282,6 +310,8 @@ def index_repo(
                 step="zoekt-index",
             )
 
+            semantic_ok = _run_semantic_stage(repo_path, slug, root)
+
             target_dir = config.index_dir(slug, root)
             target_dir.mkdir(parents=True, exist_ok=True)
             versioned_name = f"index-{sha}.db"
@@ -293,6 +323,8 @@ def index_repo(
 
         final_status = "indexed" if has_nav else PARTIAL_STATUS
         registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme)
+        if semantic_ok:
+            registry.mark_semantic_indexed(slug)
         if not has_nav:
             print(
                 f"warning: {slug} published with symbols but no navigable positions "
@@ -405,6 +437,7 @@ def _cmd_forget(args: argparse.Namespace) -> int:
     if index_dir.exists():
         shutil.rmtree(index_dir)
     _remove_zoekt_shards(slug)
+    shutil.rmtree(config.lancedb_dir() / f"{slug}.lance", ignore_errors=True)
     print(f"forgot {slug}")
     return 0
 
