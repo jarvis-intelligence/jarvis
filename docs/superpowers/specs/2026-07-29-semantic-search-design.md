@@ -51,11 +51,14 @@ New dependencies (under `[project.optional-dependencies] semantic`):
    `function_declaration`/`class_declaration`; Swift: adds `protocol_declaration`).
 3. Target 256–512 tokens per chunk, estimated as `len(content) // 4` (no tokenizer
    dependency). A class over 512 tokens is split into per-method chunks, each
-   prefixed with the class definition line for context. Chunks under 256 tokens
-   merge with adjacent siblings.
+   prefixed with a context header: the file's import lines (collected from
+   tree-sitter import nodes, capped at the first 10 lines to protect the token
+   budget) plus the class definition line. Chunks under 256 tokens merge with
+   adjacent siblings.
 4. Files tree-sitter cannot parse fall back to fixed 512-token windows with
    50-token overlap.
-5. Each chunk carries `content_hash = sha256(content)` for deduplication.
+5. Each chunk carries `content_hash = sha256(content)` for deduplication and
+   `file_hash = sha256(file_bytes)` for file-level change detection.
 
 ```python
 @dataclass(frozen=True)
@@ -66,6 +69,7 @@ class Chunk:
     content: str
     symbol_name: str | None # None for fixed-window chunks
     content_hash: str
+    file_hash: str
     language: str
 ```
 
@@ -74,8 +78,10 @@ class Chunk:
 - Model: `nomic-ai/nomic-embed-code` (768-dim), loaded via `sentence-transformers`.
 - Lazy singleton — loaded on first use, never at MCP server startup (same pattern
   as `ZoektLifecycle`).
-- Pinned by HuggingFace revision hash; revision stored per row in LanceDB. A
-  revision mismatch logs a warning, never crashes.
+- Pinned by HuggingFace revision hash. Model identity (`model_name` +
+  `model_revision`) is stored per row and as table-level metadata; vectors from
+  different models never coexist in a table (see the model-identity rule under
+  Storage & Search).
 - Batch size 32. Before embedding, chunks are grouped by `content_hash` and only
   unique hashes are embedded.
 - Missing `semantic` extra raises:
@@ -89,18 +95,35 @@ class Chunk:
 is the fourth storage layer next to `registry.db`, per-repo `index-<sha>.db`, and
 Zoekt shards.
 
-**Table columns:** `chunk_id` (UUID pk), `content_hash`, `file_path`,
-`start_line`, `end_line`, `symbol_name`, `language`, `content`,
-`vector` (768-dim), `model_revision`. LanceDB's default IVF_PQ ANN index applies;
-no manual tuning.
+**Table columns:** `chunk_id` (UUID pk), `content_hash`, `file_hash`,
+`file_path`, `start_line`, `end_line`, `symbol_name`, `language`, `content`,
+`vector` (768-dim), `model_name`, `model_revision`. Table-level metadata records
+the authoritative `model_name` + `model_revision` for the whole table. LanceDB's
+default IVF_PQ ANN index applies; no manual tuning.
 
-**Write path (during `codeintel index`):** chunk → dedup by hash → embed unique
-chunks (hashes present in the previous table reuse the stored vector — only
-changed code pays embedding cost) → drop existing table → insert all rows in one
-batch. Rebuild-not-accumulate, matching `populate_graph_for_repo()`.
+**Model-identity rule:** a table only ever contains vectors from one model at
+one revision. Reuse and querying are both conditioned on it:
 
-**Query path (`semanticSearch` tool):** embed query → LanceDB top-30 → Zoekt
-top-30 via existing `search_zoekt()` → RRF merge:
+- **Reuse:** the previous table's vectors are eligible for reuse only when its
+  table-level `model_name`/`model_revision` match the currently configured
+  model. On mismatch the old table is ignored entirely and every chunk is
+  re-embedded — there is no migration path between vector spaces.
+- **Query:** `semanticSearch` embeds the query with the model recorded in the
+  table, not the currently configured one. If configuration and table disagree,
+  the query still runs correctly (table's model wins) and the result carries a
+  `"warning"` field advising a reindex.
+
+**Write path (during `codeintel index`):** hash each file in the current file
+tree → files whose `file_hash` matches the previous table are not re-parsed;
+their chunk rows (and vectors) carry over wholesale → changed/new files are
+chunked, deduped by `content_hash`, and only unique new hashes are embedded
+(subject to the model-identity rule) → build the replacement table from
+carried-over + new rows → atomic swap. Deleted files drop out naturally because
+carry-over is driven by walking the current file tree — rebuild-not-accumulate,
+matching `populate_graph_for_repo()`.
+
+**Query path (`semanticSearch` tool):** embed query with the table's model →
+LanceDB top-30 → Zoekt top-30 via existing `search_zoekt()` → RRF merge:
 
 ```python
 def reciprocal_rank_fusion(vector_hits, zoekt_hits, k: int = 60) -> list[FusedHit]:
@@ -142,6 +165,7 @@ per-tool try/except returning `{"error": "..."}` — the stdio server never cras
 | Model download fails (offline first run) | Embedding stage aborts; SCIP/Zoekt index still publishes |
 | tree-sitter cannot parse a file | Fixed-window fallback for that file only |
 | LanceDB table missing at query time | `{"error": "no semantic index for <slug> — run codeintel reindex <slug>"}` |
+| Configured model ≠ table model at query time | Query runs with the table's model; result carries a `"warning"` advising reindex |
 | Zoekt down during hybrid query | Return vector-only results; `sources` reflects it |
 
 ## Testing
@@ -149,11 +173,14 @@ per-tool try/except returning `{"error": "..."}` — the stdio server never cras
 Mirrors the existing 1:1 test-file convention:
 
 - `test_chunker.py` — unit: real tree-sitter parsing on fixture strings (pure
-  library, nothing to mock); oversized-class split, tiny-sibling merge,
-  unparseable-file fallback.
+  library, nothing to mock); oversized-class split with imports+class context
+  header, tiny-sibling merge, unparseable-file fallback.
 - `test_embeddings.py` — unit: mocked model; batching, dedup-before-embed,
   missing-extra error message.
 - `test_semantic.py` — unit: RRF math against hand-computed scores; LanceDB on a
-  tmp-dir table (embedded, real I/O acceptable); Zoekt side mocked.
+  tmp-dir table (embedded, real I/O acceptable); Zoekt side mocked; unchanged
+  files carry rows over while changed files re-embed; model-revision mismatch
+  triggers full re-embed instead of reuse; query-time model mismatch surfaces
+  the `"warning"` field.
 - `test_index_cli.py` — integration (extended): full pipeline with semantic stage
   on the existing Python fixture; skip-cleanly-when-extra-missing path.
