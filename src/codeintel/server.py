@@ -1,8 +1,8 @@
 """codeintel MCP stdio server: thin tool wrappers around QueryService, the
 Zoekt search client, and the package dependency graph.
 
-Registers 8 tools: documentSymbols, goToDefinition, findReferences,
-callHierarchy, typeHierarchy, getIndexStatus, searchCode, blastRadius.
+Registers 9 tools: documentSymbols, goToDefinition, findReferences,
+callHierarchy, typeHierarchy, getIndexStatus, searchCode, semanticSearch, blastRadius.
 """
 
 from __future__ import annotations
@@ -175,6 +175,31 @@ def search_code(query: str, repo: str | None = None) -> dict[str, Any]:
         ],
         "total": len(hits),
     }
+
+
+def _zoekt_base_url_or_none() -> str | None:
+    """Hybrid search wants Zoekt but must not require it — a Zoekt spawn
+    failure degrades semanticSearch to vector-only rather than erroring."""
+    try:
+        return _zoekt().ensure_running()
+    except Exception:
+        return None
+
+
+@mcp.tool(name="semanticSearch")
+def semantic_search_tool(repo: str, query: str, limit: int = 10) -> dict[str, Any]:
+    """Natural-language code search over `repo`: embeds `query`, retrieves
+    top vector matches from the repo's semantic index, fuses them with
+    Zoekt lexical hits via reciprocal rank fusion. Requires the repo to
+    have been indexed with the `semantic` extra installed."""
+    from codeintel import semantic  # deferred: tool must exist even without the extra
+
+    try:
+        return semantic.semantic_search(repo, query, limit,
+                                        zoekt_base_url=_zoekt_base_url_or_none())
+    except Exception as exc:
+        # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
+        return {"error": str(exc)}
 
 
 @mcp.tool(name="blastRadius")

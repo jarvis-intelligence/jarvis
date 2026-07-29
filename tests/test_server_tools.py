@@ -1,5 +1,5 @@
-"""MCP in-memory client session: list_tools returns the 8 tools, and
-roundtrips for documentSymbols, searchCode, and blastRadius against the
+"""MCP in-memory client session: list_tools returns the 9 tools, and
+roundtrips for documentSymbols, searchCode, semanticSearch, and blastRadius against the
 synthetic fixture / a fake zoekt-webserver / an in-memory package graph."""
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ EXPECTED_TOOLS = {
     "typeHierarchy",
     "getIndexStatus",
     "searchCode",
+    "semanticSearch",
     "blastRadius",
 }
 
@@ -40,7 +41,7 @@ def _wired_query_service(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_list_tools_returns_eight_tools():
+async def test_list_tools_returns_nine_tools():
     async with create_connected_server_and_client_session(server.mcp) as client:
         result = await client.list_tools()
         names = {tool.name for tool in result.tools}
@@ -216,3 +217,23 @@ async def test_type_hierarchy_returns_results_when_relationships_present():
     assert "error" not in payload, payload
     assert "supertypes" in payload
     assert "subtypes" in payload
+
+
+def test_semantic_search_tool_returns_results(monkeypatch):
+    def _fake_search(repo, query, limit, zoekt_base_url=None):
+        return {"query": query, "results": [], "total": 0}
+
+    monkeypatch.setattr(server, "_zoekt_base_url_or_none", lambda: "http://x")
+    monkeypatch.setattr("codeintel.semantic.semantic_search", _fake_search)
+    result = server.semantic_search_tool(repo="r", query="auth logic")
+    assert result == {"query": "auth logic", "results": [], "total": 0}
+
+
+def test_semantic_search_tool_wraps_errors(monkeypatch):
+    def _boom(*args, **kwargs):
+        raise RuntimeError("no semantic index for r — run codeintel reindex r")
+
+    monkeypatch.setattr(server, "_zoekt_base_url_or_none", lambda: None)
+    monkeypatch.setattr("codeintel.semantic.semantic_search", _boom)
+    result = server.semantic_search_tool(repo="r", query="q")
+    assert "no semantic index" in result["error"]
