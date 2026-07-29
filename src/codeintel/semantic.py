@@ -185,3 +185,46 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
     ]
     store.overwrite(slug, rows)
     return len(rows)
+
+
+def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None = None,
+                    zoekt_base_url: str | None = None,
+                    model: EmbeddingModel | None = None) -> dict:
+    store = SemanticStore(config.lancedb_dir(root))
+    identity = store.table_identity(slug)
+    if identity is None:
+        raise NoSemanticIndexError(f"no semantic index for {slug} — run codeintel reindex {slug}")
+
+    model = model or default_model()
+    warning: str | None = None
+    if model.identity() != identity:
+        # Query must use the model the table was built with — never the
+        # configured one. Correct results now; the warning nudges a reindex.
+        warning = (f"configured embedding model {model.identity()[0]}@{model.identity()[1]} "
+                   f"differs from the index's {identity[0]}@{identity[1]}; queried with the "
+                   f"index's model — run codeintel reindex {slug} to migrate")
+        model = EmbeddingModel(model_name=identity[0], revision=identity[1])
+
+    vector_rows = store.search(slug, model.embed_query(query), VECTOR_TOP_K)
+
+    zoekt_hits: list[ZoektHit] = []
+    if zoekt_base_url is not None:
+        try:
+            zoekt_hits = search_zoekt(zoekt_base_url, f"r:{slug} {query}")[:ZOEKT_TOP_K]
+        except ZoektUnavailableError:
+            pass  # hybrid degrades to vector-only; sources fields reflect it
+
+    fused = reciprocal_rank_fusion(slug, vector_rows, zoekt_hits)[:limit]
+    result = {
+        "query": query,
+        "results": [
+            {"repo": h.repo, "filePath": h.file_path, "startLine": h.start_line,
+             "endLine": h.end_line, "symbolName": h.symbol_name or None,
+             "content": h.content, "score": h.score, "sources": list(h.sources)}
+            for h in fused
+        ],
+        "total": len(fused),
+    }
+    if warning:
+        result["warning"] = warning
+    return result

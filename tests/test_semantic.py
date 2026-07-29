@@ -1,7 +1,7 @@
 """Unit tests for semantic store + RRF fusion."""
 import pytest
 
-from codeintel.search import ZoektHit
+from codeintel.search import ZoektHit, ZoektUnavailableError
 from codeintel.semantic import FusedHit, reciprocal_rank_fusion
 
 
@@ -134,3 +134,58 @@ def test_duplicate_content_embedded_once(tmp_path, lancedb_available):
     embedder = FakeEmbedder()
     count = index_semantic(repo, "myrepo", root=tmp_path / "data", model=embedder)
     assert count == 2 and len(embedder.embedded) == 1
+
+
+def _indexed(tmp_path):
+    from codeintel.semantic import index_semantic
+    repo = _write_repo(tmp_path)
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    return tmp_path / "data"
+
+
+def test_semantic_search_returns_fused_results(tmp_path, lancedb_available, monkeypatch):
+    from codeintel import semantic
+    data = _indexed(tmp_path)
+    monkeypatch.setattr(semantic, "search_zoekt",
+                        lambda url, q: [ZoektHit(repo="myrepo", path="mod_0.py",
+                                                 line_number=1, line_text="def f_0():")])
+    result = semantic.semantic_search("myrepo", "function zero", root=data,
+                                      zoekt_base_url="http://x", model=FakeEmbedder())
+    assert result["total"] >= 1 and "warning" not in result
+    top = result["results"][0]
+    assert top["filePath"] == "mod_0.py" and set(top["sources"]) == {"vector", "zoekt"}
+
+
+def test_missing_table_raises_reindex_hint(tmp_path, lancedb_available):
+    from codeintel.semantic import NoSemanticIndexError, semantic_search
+    with pytest.raises(NoSemanticIndexError, match="codeintel reindex nosuch"):
+        semantic_search("nosuch", "q", root=tmp_path, model=FakeEmbedder())
+
+
+def test_query_model_mismatch_uses_table_model_and_warns(tmp_path, lancedb_available, monkeypatch):
+    from codeintel import semantic
+    data = _indexed(tmp_path)  # table identity: fake-model@rev1
+    # semantic_search rebuilds a model from the table's identity; patch the
+    # class so it never tries to download "fake-model" from HuggingFace.
+    monkeypatch.setattr(
+        semantic, "EmbeddingModel",
+        lambda model_name, revision: FakeEmbedder(name=model_name, revision=revision),
+    )
+    configured = FakeEmbedder(name="other-model", revision="rev9")
+    result = semantic.semantic_search("myrepo", "query", root=data, model=configured)
+    assert "reindex" in result["warning"]
+    assert configured.embedded == []  # configured model never used for the query
+
+
+def test_zoekt_down_degrades_to_vector_only(tmp_path, lancedb_available, monkeypatch):
+    from codeintel import semantic
+
+    def _boom(url, q):
+        raise ZoektUnavailableError("down")
+
+    monkeypatch.setattr(semantic, "search_zoekt", _boom)
+    data = _indexed(tmp_path)
+    result = semantic.semantic_search("myrepo", "query", root=data,
+                                      zoekt_base_url="http://x", model=FakeEmbedder())
+    assert result["total"] >= 1
+    assert all(h["sources"] == ["vector"] for h in result["results"])
