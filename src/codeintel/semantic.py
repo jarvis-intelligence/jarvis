@@ -86,7 +86,11 @@ class SemanticStore:
 
     def _connect(self):
         if self._db is None:
-            import lancedb
+            try:
+                import lancedb
+            except ImportError as exc:
+                from codeintel.embeddings import SemanticExtraMissingError, _INSTALL_HINT
+                raise SemanticExtraMissingError(_INSTALL_HINT) from exc
             self._db_dir.mkdir(parents=True, exist_ok=True)
             self._db = lancedb.connect(str(self._db_dir))
         return self._db

@@ -1,6 +1,6 @@
 ---
 name: codeintel-use
-description: Use codeintel MCP tools for code structure queries: finding references, go-to-definition, call/type hierarchy, who calls a function, where a symbol is defined, document symbols. Prefer over grep.
+description: Use codeintel MCP tools for code structure queries: finding references, go-to-definition, call/type hierarchy, who calls a function, where a symbol is defined, document symbols, natural-language semantic search. Prefer over grep.
 version: "0.1.0"
 ---
 
@@ -22,6 +22,7 @@ For any **structural** code question, prefer the codeintel tool over grep. `repo
 | Is this repo indexed? | `getIndexStatus(repo, repo_path)` | — |
 | Cross-repo dependents of a package? | `blastRadius(repo, pkg)` | — |
 | Lexical text search? | grep **or** `searchCode(query, repo?)` | — |
+| Natural-language / conceptual code search? | `semanticSearch(repo, query, limit?)` | `searchCode` (needs `semantic` extra + reindex) |
 
 ## Symbol format (critical)
 
@@ -58,6 +59,7 @@ Before any structural tool call, check freshness:
 
 - **`typeHierarchy` errors on real indexes.** Upstream `scip expt-convert` never populates `relationships`, so the tool returns an explicit error (not a bug, not "no supertypes"). Do not file this as a bug; it's a known upstream gap.
 - **Bare symbol names return empty results, not errors.** `goToDefinition(repo, "index_repo")` returns `{"definitions": []}` silently. The match is exact against the fully-qualified SCIP string — see "Symbol format" above. If a nav tool returns empty and the symbol definitely exists, you passed the wrong form: run `documentSymbols` first and use the returned `symbol` string verbatim.
+- **`semanticSearch` needs the `semantic` extra.** If `repo` was indexed without `uv sync --extra semantic`, it returns `{"error": "..."}` with an install hint — index/reindex after installing the extra.
 - **`blastRadius` only sees already-indexed repos.** Index the dependency first, or re-run `codeintel index`/`reindex` after indexing it, for an edge to appear.
 - **One language per repo.** No multi-language merge — a polyglot repo indexes only its plurality language.
 - **Every tool returns `{"error": "..."}` on failure, never raises.** Check for an `error` key before reading results.

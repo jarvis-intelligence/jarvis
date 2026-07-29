@@ -1,6 +1,6 @@
 # codeintel tool roster
 
-The 8 MCP tools registered by `codeintel-server`. All take `repo` (the slug from `codeintel index`). On failure every tool returns `{"error": "..."}` rather than raising.
+The 9 MCP tools registered by `codeintel-server`. All take `repo` (the slug from `codeintel index`). On failure every tool returns `{"error": "..."}` rather than raising.
 
 ## Tool detail
 
@@ -30,6 +30,10 @@ Returns: `{"repo": ..., "indexed": bool, "freshness": {...}}`. Without `repo_pat
 ### searchCode(query, repo=None) → dict
 Lexical search via an embedded Zoekt index (lazy-started on first call). `repo`, if given, is applied as a Zoekt `r:` filter scoping results to that one indexed repo.
 Returns: `{"query": ..., "hits": [{"repo","path","lineNumber","lineText"}], "total": int}`.
+
+### semanticSearch(repo, query, limit=10) → dict
+Natural-language code search over `repo`: embeds `query`, retrieves top vector matches from the repo's semantic index, fuses them with Zoekt lexical hits via reciprocal rank fusion. Requires `repo` to have been indexed with the `semantic` extra installed (`uv sync --extra semantic`); otherwise returns `{"error": "..."}` with an install hint.
+Returns: `{"query": ..., "results": [{"repo","filePath","startLine","endLine","symbolName","content","score","sources"}], "total": int}` (plus an optional `"warning"` if the configured embedding model differs from the index's).
 
 ### blastRadius(repo, symbol_or_package) → dict
 2-hop bounded BFS over the package dependency graph: every other indexed repo whose package directly (1 hop) or transitively through one intermediary (2 hops) depends on `symbol_or_package` as registered for `repo` (e.g. `"npm:@scope/name"`). The graph has no per-node timestamp, so `freshness` is always `unknown` here.

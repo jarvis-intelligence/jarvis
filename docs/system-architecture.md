@@ -2,7 +2,7 @@
 
 ## High-Level Overview
 
-codeintel is a **local-first, single-user code intelligence MCP server** that combines semantic navigation (SCIP-backed) with lexical search (Zoekt-backed) in a single stdio process. It bridges the SCIP indexing ecosystem with the MCP protocol, exposing 8 tools to Claude Code, Cursor, and other MCP clients.
+codeintel is a **local-first, single-user code intelligence MCP server** that combines semantic navigation (SCIP-backed) with lexical search (Zoekt-backed) in a single stdio process. It bridges the SCIP indexing ecosystem with the MCP protocol, exposing 9 tools to Claude Code, Cursor, and other MCP clients.
 
 The system is built around three core engines:
 
@@ -23,7 +23,7 @@ other contract.
 | Layer | Contents |
 |---|---|
 | 1 · Clients | Claude Code, Cursor, any MCP host |
-| 2 · MCP Server | `server.py` — FastMCP over stdio, 8 tools |
+| 2 · MCP Server | `server.py` — FastMCP over stdio, 9 tools |
 | 3 · Engines | Query (`query.py`), Search (`search.py`), Graph (`graph.py`) |
 | 4 · Storage | `index-<sha>.db` + pointer, `.zoekt/` shards, `registry.db` |
 | 5 · Indexing orchestration | `index_cli.py` — detect → run indexer → convert → graph/zoekt → atomic publish |
@@ -42,7 +42,7 @@ only.
 
 Diagram shows:
 - **Client**: Claude Code / Cursor / any MCP client → MCP stdio
-- **Server** (`server.py`): FastMCP dispatcher → 8 tools
+- **Server** (`server.py`): FastMCP dispatcher → 9 tools
 - **Query Engine** (`query.py`): Reads SCIP index SQLite (documents/chunks/global_symbols)
 - **Search Engine** (`search.py`): HTTP client to embedded Zoekt webserver
 - **Graph Engine** (`graph.py`): Queries package edges in registry.db

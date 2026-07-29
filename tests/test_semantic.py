@@ -1,4 +1,6 @@
 """Unit tests for semantic store + RRF fusion."""
+import sys
+
 import pytest
 
 from codeintel.search import ZoektHit, ZoektUnavailableError
@@ -76,6 +78,15 @@ def _write_repo(tmp_path, n_files=2):
 @pytest.fixture()
 def lancedb_available():
     pytest.importorskip("lancedb")
+
+
+def test_missing_lancedb_raises_install_hint(tmp_path, monkeypatch):
+    from codeintel.embeddings import SemanticExtraMissingError
+    from codeintel.semantic import SemanticStore
+    monkeypatch.setitem(sys.modules, "lancedb", None)
+    store = SemanticStore(tmp_path / "lancedb")
+    with pytest.raises(SemanticExtraMissingError, match="uv sync --extra semantic"):
+        store.table_identity("myrepo")
 
 
 def test_index_semantic_writes_rows(tmp_path, lancedb_available):
