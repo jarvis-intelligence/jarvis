@@ -19,6 +19,12 @@ dependencies = [
 
 [project.optional-dependencies]
 watch = ["watchdog>=4.0"]
+semantic = [
+    "lancedb>=0.20",
+    "sentence-transformers>=3.0",
+    "tree-sitter>=0.25",
+    "tree-sitter-language-pack>=0.1",
+]
 
 [dependency-groups]
 dev = [

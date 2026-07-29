@@ -22,6 +22,14 @@ DEFAULT_DATA_DIR = Path.home() / ".codeintel"
 PROJECT = "_"
 BRANCH = "_"
 
+IGNORED_DIRS = {".git", "node_modules", ".venv", "__pycache__", "dist", "build", "DerivedData", ".build"}
+
+
+def lancedb_dir(root: Path | None = None) -> Path:
+    """Directory holding one LanceDB table per repo (semantic search vectors)."""
+    return data_dir(root) / "lancedb"
+
+
 _SLUG_UNSAFE = re.compile(r"[^a-z0-9._-]+")
 
 

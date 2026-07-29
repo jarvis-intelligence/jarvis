@@ -43,7 +43,7 @@ _LANGUAGE_INDEXERS: dict[str, tuple[str, list[str]]] = {
 # Priority order for tie-breaking when extension counts are equal.
 _EXT_PRIORITY = [".ts", ".tsx", ".py", ".java", ".kt", ".swift"]
 
-_IGNORED_DIRS = {".git", "node_modules", ".venv", "__pycache__", "dist", "build", "DerivedData", ".build"}
+_IGNORED_DIRS = config.IGNORED_DIRS
 
 # `scip expt-convert` below this version cannot read scip.proto's `typed_range`
 # oneof (its Go bindings predate occurrence_range.go), so it silently writes a

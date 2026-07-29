@@ -28,3 +28,13 @@ def test_repo_slug_strips_path_separators_to_single_component():
     slug = config.repo_slug("../../etc")
     assert "/" not in slug
     assert "\\" not in slug
+
+
+def test_lancedb_dir_under_data_dir(tmp_path):
+    assert config.lancedb_dir(tmp_path) == tmp_path / "lancedb"
+
+
+def test_ignored_dirs_shared_with_index_cli():
+    from codeintel import index_cli
+    assert index_cli._IGNORED_DIRS is config.IGNORED_DIRS
+    assert "node_modules" in config.IGNORED_DIRS
