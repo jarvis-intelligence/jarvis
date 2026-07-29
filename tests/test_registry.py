@@ -125,3 +125,27 @@ def test_ensure_scheme_override_column_swallows_duplicate_column_error():
     # Should not raise — error is swallowed
     _ensure_scheme_override_column(mock_conn)
     # If we reach here, the test passed (no exception was raised)
+
+
+def test_mark_semantic_indexed_sets_timestamp(tmp_path: Path):
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("r", "/p", "python", "sha", "indexed")
+    assert registry.get("r").semantic_indexed_at is None
+    registry.mark_semantic_indexed("r")
+    assert registry.get("r").semantic_indexed_at is not None
+    registry.close()
+
+
+def test_upsert_preserves_semantic_timestamp(tmp_path: Path):
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("r", "/p", "python", "sha", "indexed")
+    registry.mark_semantic_indexed("r")
+    stamp = registry.get("r").semantic_indexed_at
+    registry.upsert("r", "/p", "python", "sha2", "indexed")
+    assert registry.get("r").semantic_indexed_at == stamp
+    registry.close()
+
+
+def test_migration_is_idempotent(tmp_path: Path):
+    Registry(tmp_path / "registry.db").close()
+    Registry(tmp_path / "registry.db").close()  # second open must not raise

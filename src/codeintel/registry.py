@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS repos (
     commit_sha TEXT,
     last_indexed TEXT NOT NULL,
     status TEXT NOT NULL,
-    scheme_override TEXT
+    scheme_override TEXT,
+    semantic_indexed_at TEXT
 )
 """
 
@@ -46,6 +47,24 @@ def _ensure_scheme_override_column(conn: sqlite3.Connection) -> None:
             raise
 
 
+def _ensure_semantic_indexed_at_column(conn: sqlite3.Connection) -> None:
+    """Idempotent migration for databases created before this column
+    existed. `ALTER TABLE ... ADD COLUMN` on a column that already exists
+    raises `sqlite3.OperationalError` with a "duplicate column name"
+    message -- caught and ignored, since that means a previous run (or a
+    fresh `_SCHEMA` create) already added it. Any other `OperationalError`
+    (e.g. "database is locked" from a concurrent `codeintel watch`
+    reindex) is re-raised rather than silently swallowed -- otherwise a
+    lock timeout during migration would look identical to "column already
+    exists" while actually leaving the column missing."""
+    try:
+        conn.execute("ALTER TABLE repos ADD COLUMN semantic_indexed_at TEXT")
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
+
+
 @dataclass(frozen=True)
 class RegisteredRepo:
     slug: str
@@ -55,10 +74,11 @@ class RegisteredRepo:
     last_indexed: datetime
     status: str  # "indexed" | "indexing" | "failed" | "partial"
     scheme_override: str | None = None
+    semantic_indexed_at: datetime | None = None
 
 
 def _row_to_repo(row: tuple) -> RegisteredRepo:
-    slug, path, language, commit_sha, last_indexed, status, scheme_override = row
+    slug, path, language, commit_sha, last_indexed, status, scheme_override, semantic_indexed_at = row
     return RegisteredRepo(
         slug=slug,
         path=path,
@@ -67,6 +87,7 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
         last_indexed=datetime.fromisoformat(last_indexed),
         status=status,
         scheme_override=scheme_override,
+        semantic_indexed_at=datetime.fromisoformat(semantic_indexed_at) if semantic_indexed_at is not None else None,
     )
 
 
@@ -82,6 +103,7 @@ class Registry:
         self._conn.execute(_SCHEMA)
         self._conn.commit()
         _ensure_scheme_override_column(self._conn)
+        _ensure_semantic_indexed_at_column(self._conn)
 
     def upsert(
         self,
@@ -94,8 +116,8 @@ class Registry:
     ) -> RegisteredRepo:
         last_indexed = datetime.now(UTC)
         self._conn.execute(
-            "INSERT INTO repos (slug, path, language, commit_sha, last_indexed, status, scheme_override) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "INSERT INTO repos (slug, path, language, commit_sha, last_indexed, status, scheme_override, semantic_indexed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL) "
             "ON CONFLICT(slug) DO UPDATE SET "
             "path=excluded.path, language=excluded.language, commit_sha=excluded.commit_sha, "
             "last_indexed=excluded.last_indexed, status=excluded.status, "
@@ -106,6 +128,7 @@ class Registry:
         return RegisteredRepo(
             slug=slug, path=path, language=language, commit_sha=commit_sha,
             last_indexed=last_indexed, status=status, scheme_override=scheme_override,
+            semantic_indexed_at=None,
         )
 
     def mark_status(self, slug: str, status: str) -> None:
@@ -115,9 +138,16 @@ class Registry:
         )
         self._conn.commit()
 
+    def mark_semantic_indexed(self, slug: str) -> None:
+        self._conn.execute(
+            "UPDATE repos SET semantic_indexed_at = ? WHERE slug = ?",
+            (datetime.now(UTC).isoformat(), slug),
+        )
+        self._conn.commit()
+
     def get(self, slug: str) -> RegisteredRepo | None:
         row = self._conn.execute(
-            "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override "
+            "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, semantic_indexed_at "
             "FROM repos WHERE slug = ?",
             (slug,),
         ).fetchone()
@@ -125,7 +155,7 @@ class Registry:
 
     def list(self) -> list[RegisteredRepo]:
         rows = self._conn.execute(
-            "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override "
+            "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, semantic_indexed_at "
             "FROM repos ORDER BY slug"
         ).fetchall()
         return [_row_to_repo(row) for row in rows]

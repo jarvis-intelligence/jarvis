@@ -345,6 +345,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         return 1
     print(f"slug: {repo.slug}\npath: {repo.path}\nlanguage: {repo.language}\nstatus: {repo.status}")
     print(f"commit: {repo.commit_sha or '-'}\nlast_indexed: {repo.last_indexed.isoformat()}")
+    semantic = repo.semantic_indexed_at.isoformat() if repo.semantic_indexed_at else "-"
+    print(f"semantic: {semantic}")
     return 0
 
 
