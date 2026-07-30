@@ -59,6 +59,19 @@ def test_embed_query_encodes_raw_text(monkeypatch):
     assert holder["model"].calls[0][0] == "auth"
 
 
+def test_load_caps_max_seq_length(monkeypatch):
+    # bge-m3 defaults to 8192, far beyond our chunk target; an oversized or
+    # under-estimated chunk must not be free to blow encode-time memory.
+    holder = _install_fake(monkeypatch)
+    model = EmbeddingModel(model_name="m", revision="r")
+    model.embed_texts(["x"])
+    assert holder["model"].max_seq_length == embeddings.MAX_SEQ_LENGTH
+
+
+def test_default_batch_size_is_conservative():
+    assert EmbeddingModel().batch_size == embeddings.DEFAULT_BATCH_SIZE == 8
+
+
 def test_identity_and_env_overrides(monkeypatch):
     monkeypatch.setenv("CODEINTEL_EMBEDDING_MODEL", "custom/model")
     monkeypatch.setenv("CODEINTEL_EMBEDDING_BATCH_SIZE", "7")

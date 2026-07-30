@@ -4,9 +4,14 @@ Splits source files at function/class boundaries (256-512 token target;
 tokens approximated as len(text)//4, no tokenizer dependency). An
 oversized class splits into per-method chunks, each prefixed with the
 file's imports (capped) plus the class definition line — the "context
-re-add" pattern. Unparseable files fall back to fixed overlapping
-windows. tree_sitter_language_pack is imported lazily so a base install
-never needs it.
+re-add" pattern. An oversized function/non-class def (no natural
+sub-boundary to split into) instead falls back to fixed overlapping
+windows over just its own text — without this, a single long function
+ships as one unbounded chunk, which can blow an embedding model's
+sequence-length/memory limits at encode time. Unparseable files fall
+back to fixed overlapping windows over the whole file.
+tree_sitter_language_pack is imported lazily so a base install never
+needs it.
 """
 
 from __future__ import annotations
@@ -113,28 +118,70 @@ def _walk(node):
         yield from _walk(child)
 
 
-def _fixed_windows(rel_path: str, language: str, file_hash: str, source: str) -> list[Chunk]:
-    lines = source.splitlines()
-    if not lines:
-        return []
+def _window_lines(lines: list[str], base_line: int) -> list[tuple[str, int, int]]:
+    """Split `lines` into MAX_TOKENS-sized windows with OVERLAP_TOKENS overlap,
+    each returned as (text, start_line, end_line) with `base_line` as the
+    1-indexed file line of `lines[0]`. Shared by whole-file fallback chunking
+    and oversized-def splitting.
+
+    A single line longer than the window (e.g. a minified/generated file's
+    serialized-literal line) is first character-sliced into window-sized
+    pieces, each still tagged with its original source line number -- so the
+    greedy accumulation loop below only ever handles pieces already capped
+    at the window size, and never has to special-case a line mid-window."""
     window_chars, overlap_chars = MAX_TOKENS * 4, OVERLAP_TOKENS * 4
-    chunks: list[Chunk] = []
-    i = 0
-    while i < len(lines):
+
+    pieces: list[tuple[str, int]] = []  # (text, source_line_no)
+    for idx, line in enumerate(lines):
+        line_no = base_line + idx
+        if len(line) + 1 > window_chars:
+            pieces.extend((line[start:start + window_chars], line_no)
+                          for start in range(0, len(line), window_chars))
+        else:
+            pieces.append((line, line_no))
+
+    windows: list[tuple[str, int, int]] = []
+    i, n = 0, len(pieces)
+    while i < n:
         j, size = i, 0
-        while j < len(lines) and size < window_chars:
-            size += len(lines[j]) + 1
+        while j < n:
+            piece_len = len(pieces[j][0]) + 1
+            if size > 0 and size + piece_len > window_chars:
+                break
+            size += piece_len
             j += 1
-        chunks.append(_make_chunk(rel_path, language, file_hash,
-                                  "\n".join(lines[i:j]), i + 1, j, None))
-        if j >= len(lines):
+            if size >= window_chars:
+                break
+        text = "\n".join(p for p, _ in pieces[i:j])
+        windows.append((text, pieces[i][1], pieces[j - 1][1]))
+        if j >= n:
             break
         back, osize = j, 0
         while back > i + 1 and osize < overlap_chars:
             back -= 1
-            osize += len(lines[back]) + 1
+            osize += len(pieces[back][0]) + 1
         i = back
-    return chunks
+    return windows
+
+
+def _fixed_windows(rel_path: str, language: str, file_hash: str, source: str) -> list[Chunk]:
+    lines = source.splitlines()
+    if not lines:
+        return []
+    return [_make_chunk(rel_path, language, file_hash, text, start, end, None)
+            for text, start, end in _window_lines(lines, base_line=1)]
+
+
+def _split_oversized_def(node, text: str, rel_path: str, language: str, file_hash: str) -> list[Chunk]:
+    """A function/non-class def that alone exceeds MAX_TOKENS has no natural
+    sub-boundary (unlike a class, which splits into methods), so it falls
+    back to fixed windows over just its own text. All resulting chunks share
+    the def's symbol_name."""
+    symbol = _node_name(node)
+    lines = text.splitlines()
+    base_line = node.start_point[0] + 1
+    return [_make_chunk(rel_path, language, file_hash, chunk_text, start, end, symbol)
+            for chunk_text, start, end in _window_lines(lines, base_line)]
 
 
 def _split_class(node, source: str, rel_path: str, language: str,
@@ -147,18 +194,34 @@ def _split_class(node, source: str, rel_path: str, language: str,
         text = source[node.start_byte:node.end_byte]
         return [_make_chunk(rel_path, language, file_hash, text,
                             node.start_point[0] + 1, node.end_point[0] + 1, _node_name(node))]
-    return [
-        _make_chunk(rel_path, language, file_hash,
-                    f"{header}\n{source[m.start_byte:m.end_byte]}",
-                    m.start_point[0] + 1, m.end_point[0] + 1, _node_name(m))
-        for m in methods
-    ]
+    chunks: list[Chunk] = []
+    for m in methods:
+        symbol = _node_name(m)
+        full_text = f"{header}\n{source[m.start_byte:m.end_byte]}"
+        if _tokens(full_text) > MAX_TOKENS:
+            # A single method (plus its context header) can itself exceed
+            # the cap -- window it the same way an oversized top-level def
+            # would be, rather than shipping it whole.
+            base_line = m.start_point[0] + 1
+            chunks.extend(
+                _make_chunk(rel_path, language, file_hash, piece, start, end, symbol)
+                for piece, start, end in _window_lines(full_text.splitlines(), base_line)
+            )
+        else:
+            chunks.append(_make_chunk(rel_path, language, file_hash, full_text,
+                                      m.start_point[0] + 1, m.end_point[0] + 1, symbol))
+    return chunks
 
 
 def _merge_small(chunks: list[Chunk]) -> list[Chunk]:
     merged: list[Chunk] = []
     for chunk in chunks:
-        if merged and _tokens(merged[-1].content) < MIN_TOKENS and merged[-1].end_line < chunk.start_line:
+        if (merged and _tokens(merged[-1].content) < MIN_TOKENS
+                and merged[-1].end_line < chunk.start_line
+                # MAX_TOKENS is a hard cap; MIN_TOKENS is only a soft
+                # preference -- never merge past the hard cap just to grow
+                # a too-small chunk.
+                and _tokens(merged[-1].content) + _tokens(chunk.content) <= MAX_TOKENS):
             prev = merged.pop()
             merged.append(_make_chunk(chunk.file_path, chunk.language, chunk.file_hash,
                                       f"{prev.content}\n\n{chunk.content}",
@@ -207,6 +270,8 @@ def chunk_file(rel_path: str, source: str, file_hash: str, language: str) -> lis
         target = node.children[-1] if node.type == "decorated_definition" else node
         if target.type in _CLASS_NODE_TYPES and _tokens(text) > MAX_TOKENS:
             chunks.extend(_split_class(target, source, rel_path, language, file_hash, imports))
+        elif _tokens(text) > MAX_TOKENS:
+            chunks.extend(_split_oversized_def(node, text, rel_path, language, file_hash))
         else:
             chunks.append(_make_chunk(rel_path, language, file_hash, text,
                                       node.start_point[0] + 1, node.end_point[0] + 1,

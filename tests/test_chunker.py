@@ -47,6 +47,73 @@ def test_oversized_class_splits_into_methods_with_imports_and_class_header():
         assert chunk.symbol_name.startswith("method_")
 
 
+def test_oversized_function_splits_into_windows_with_shared_symbol_name():
+    # A single top-level function has no natural sub-boundary like a class's
+    # methods, so an oversized one must fall back to windowed splitting
+    # instead of shipping as one unbounded chunk.
+    body = "\n".join(f"    x{i} = {i}  # " + "pad " * 20 for i in range(80))
+    source = f"def huge():\n{body}\n    return x0\n"
+    chunks = chunk_file("h.py", source, "fh", "python")
+    assert len(chunks) > 1
+    assert all(c.symbol_name == "huge" for c in chunks)
+    assert all(c.file_hash == "fh" and c.language == "python" for c in chunks)
+    assert chunks[0].start_line == 1
+
+
+def test_single_oversized_line_is_character_sliced():
+    # A generated/minified file can have one line far exceeding the token
+    # budget (e.g. a serialized literal) -- the fixed-window fallback must
+    # not ship it whole as one unbounded chunk.
+    huge_line = "x = 1  # " + "z" * 3000
+    source = "just some text\n" * 200 + huge_line + "\n" + "just some text\n" * 200
+    chunks = chunk_file("gen.py", source, "fh", "nosuchlanguage")
+    from codeintel.chunker import MAX_TOKENS, _tokens
+    assert all(_tokens(c.content) <= MAX_TOKENS for c in chunks)
+    assert any(huge_line[:50] in c.content for c in chunks)
+
+
+def test_merge_never_exceeds_max_tokens():
+    # A tiny function (well under MIN_TOKENS on its own) directly followed by
+    # a function close to but under MAX_TOKENS: naively merging them (as
+    # "small chunk, always merge with neighbor") would push the combined
+    # chunk over the hard MAX_TOKENS cap. MIN_TOKENS is only a soft
+    # preference; MAX_TOKENS must never be violated to satisfy it.
+    from codeintel.chunker import MAX_TOKENS, _tokens
+    tiny = f'def tiny():\n    """{"p" * 600}"""\n    return 1\n'
+    large_body = "\n".join(f"    y{i} = {i}  # " + "pad " * 10 for i in range(30))
+    large = f"def large():\n{large_body}\n    return y0\n"
+    assert _tokens(large) <= MAX_TOKENS  # precondition: fits alone
+
+    source = f"{tiny}\n\n{large}"
+    assert _tokens(tiny) + _tokens(large) > MAX_TOKENS  # precondition: combined would not
+
+    chunks = chunk_file("m.py", source, "fh", "python")
+    assert all(_tokens(c.content) <= MAX_TOKENS for c in chunks)
+    names = {c.symbol_name for c in chunks}
+    assert "tiny" in names and "large" in names
+
+
+def test_oversized_method_within_oversized_class_is_windowed():
+    # _split_class emits one chunk per method -- if a single method (plus
+    # its context header) is itself over budget, it must be windowed too,
+    # not shipped whole just because the class-level split already happened.
+    from codeintel.chunker import MAX_TOKENS, _tokens
+    small_body = "\n".join(f"    def m{i}(self):\n        return {i}\n" for i in range(3))
+    big_lines = "\n".join(f"        z{i} = {i}  # " + "pad " * 15 for i in range(50))
+    source = (
+        "import os\n\n\n"
+        f"class Big:\n{small_body}\n"
+        f"    def huge(self):\n{big_lines}\n        return z0\n"
+    )
+    chunks = chunk_file("c.py", source, "fh", "python")
+    assert all(_tokens(c.content) <= MAX_TOKENS for c in chunks)
+    huge_chunks = [c for c in chunks if c.symbol_name == "huge"]
+    assert len(huge_chunks) > 1
+    # Only the first window carries the header -- repeating it on every
+    # window would waste the very budget this split is meant to protect.
+    assert huge_chunks[0].content.startswith("import os\nclass Big:")
+
+
 def test_tiny_siblings_merge():
     source = "def a():\n    return 1\n\n\ndef b():\n    return 2\n"
     chunks = chunk_file("t.py", source, "fh", "python")

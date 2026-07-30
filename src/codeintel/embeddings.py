@@ -12,7 +12,13 @@ import os
 
 DEFAULT_MODEL = "BAAI/bge-m3"
 DEFAULT_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
-DEFAULT_BATCH_SIZE = 32
+DEFAULT_BATCH_SIZE = 8
+# bge-m3 defaults to 8192 — far beyond our 512-token chunk target and the
+# tokenizer's real token count can exceed our chars//4 estimate. Capping well
+# above the target but far below the model's default keeps a runaway chunk
+# (or an estimate that undercounts) from blowing up encode-time memory:
+# attention cost scales with batch x sequence_length^2.
+MAX_SEQ_LENGTH = 1024
 _INSTALL_HINT = "semantic search requires the 'semantic' extra: uv sync --extra semantic"
 
 
@@ -44,6 +50,7 @@ class EmbeddingModel:
             revision = None if self.revision == "unpinned" else self.revision
             self._model = SentenceTransformer(self.model_name, revision=revision,
                                               trust_remote_code=True)
+            self._model.max_seq_length = MAX_SEQ_LENGTH
         return self._model
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
