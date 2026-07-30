@@ -302,6 +302,23 @@ def test_truncated_is_none_when_counting_fails(tmp_path, lancedb_available):
     assert report.rows == 2          # the index itself still succeeded
 
 
+def test_token_stats_reported_for_new_chunks(tmp_path, lancedb_available):
+    from codeintel.semantic import index_semantic
+    repo = _write_repo(tmp_path)
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert report.token_stats is not None
+    stats = report.token_stats
+    assert 0 < stats.p50 <= stats.p90 <= stats.max
+
+
+def test_token_stats_is_none_when_nothing_new(tmp_path, lancedb_available):
+    from codeintel.semantic import index_semantic
+    repo = _write_repo(tmp_path)
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    again = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert again.token_stats is None
+
+
 def test_table_identity_round_trips(tmp_path, lancedb_available):
     from codeintel.chunker import CONTENT_FORMAT
     from codeintel.semantic import SemanticStore, TableIdentity, index_semantic

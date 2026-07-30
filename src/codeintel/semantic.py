@@ -99,11 +99,23 @@ class TableIdentity:
 
 
 @dataclass(frozen=True)
+class TokenStats:
+    """Chunk-size distribution over newly-chunked content. Percentiles beat a
+    bucketed histogram here: one line of CLI output that is directly
+    actionable against MAX_TOKENS."""
+    p50: int
+    p90: int
+    max: int
+
+
+@dataclass(frozen=True)
 class SemanticIndexReport:
     rows: int                                  # chunks written to the table
     files: int                                 # source files admitted
     skipped: tuple[SkippedFile, ...] = ()
     truncated: int | None = None               # None = could not be measured
+    token_stats: TokenStats | None = None
+    prefix_warning: str | None = None
 
 
 class SemanticStore:
@@ -241,6 +253,13 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
         # away a perfectly valid table over a mere counting failure.
         truncated = None
 
+    token_counts = sorted(len(c.content) // 4 for c in pending)
+    stats = TokenStats(
+        p50=token_counts[len(token_counts) // 2],
+        p90=token_counts[min(int(len(token_counts) * 0.9), len(token_counts) - 1)],
+        max=token_counts[-1],
+    ) if token_counts else None
+
     rows = carried + [
         {"chunk_id": uuid.uuid4().hex, "content_hash": c.content_hash,
          "file_hash": c.file_hash, "file_path": c.file_path,
@@ -254,7 +273,9 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
     ]
     store.overwrite(slug, rows)
     return SemanticIndexReport(rows=len(rows), files=admitted,
-                               skipped=tuple(skipped), truncated=truncated)
+                               skipped=tuple(skipped), truncated=truncated,
+                               token_stats=stats,
+                               prefix_warning=model.prefix_warning())
 
 
 def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None = None,
@@ -304,6 +325,9 @@ def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None
         ],
         "total": len(fused),
     }
+    prefix_note = model.prefix_warning()
+    if prefix_note:
+        warning = f"{warning}; {prefix_note}" if warning else prefix_note
     if warning:
         result["warning"] = warning
     return result
