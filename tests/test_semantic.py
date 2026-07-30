@@ -63,6 +63,9 @@ class FakeEmbedder:
     def embed_query(self, query):
         return self.embed_texts([query])[0]
 
+    def count_oversized(self, texts):
+        return 0
+
 
 FUNC = 'def f_{n}():\n    """{pad}"""\n    return {n}\n'
 
@@ -93,8 +96,8 @@ def test_index_semantic_writes_rows(tmp_path, lancedb_available):
     from codeintel.semantic import SemanticStore, index_semantic
     repo = _write_repo(tmp_path)
     embedder = FakeEmbedder()
-    count = index_semantic(repo, "myrepo", root=tmp_path / "data", model=embedder)
-    assert count == 2
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=embedder)
+    assert report.rows == 2
     store = SemanticStore((tmp_path / "data") / "lancedb")
     assert store.table_identity("myrepo") == ("fake-model", "rev1")
     rows = store.rows_by_path("myrepo")
@@ -143,8 +146,8 @@ def test_duplicate_content_embedded_once(tmp_path, lancedb_available):
     (repo / "a.py").write_text(same)
     (repo / "b.py").write_text(same)
     embedder = FakeEmbedder()
-    count = index_semantic(repo, "myrepo", root=tmp_path / "data", model=embedder)
-    assert count == 2 and len(embedder.embedded) == 1
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=embedder)
+    assert report.rows == 2 and len(embedder.embedded) == 1
 
 
 def _indexed(tmp_path):
@@ -200,3 +203,76 @@ def test_zoekt_down_degrades_to_vector_only(tmp_path, lancedb_available, monkeyp
                                       zoekt_base_url="http://x", model=FakeEmbedder())
     assert result["total"] >= 1
     assert all(h["sources"] == ["vector"] for h in result["results"])
+
+
+def test_generated_file_is_skipped_and_reported(tmp_path, lancedb_available):
+    from codeintel.semantic import SemanticStore, index_semantic
+    repo = _write_repo(tmp_path)
+    (repo / "gen.py").write_text("# @generated\n" + FUNC.format(n=7, pad="g" * 1100))
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert [s.file_path for s in report.skipped] == ["gen.py"]
+    assert report.skipped[0].reason == "banner:@generated"
+    assert report.files == 2          # mod_0.py + mod_1.py, gen.py excluded
+    rows = SemanticStore((tmp_path / "data") / "lancedb").rows_by_path("myrepo")
+    assert "gen.py" not in rows
+
+
+def test_force_include_keeps_generated_file(tmp_path, lancedb_available):
+    from codeintel.semantic import SemanticStore, index_semantic
+    repo = _write_repo(tmp_path)
+    (repo / "gen.py").write_text("# @generated\n" + FUNC.format(n=7, pad="g" * 1100))
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data",
+                            model=FakeEmbedder(), include_prefixes=("gen.py",))
+    assert report.skipped == ()
+    rows = SemanticStore((tmp_path / "data") / "lancedb").rows_by_path("myrepo")
+    assert "gen.py" in rows
+
+
+def test_stale_generated_rows_are_purged_on_reindex(tmp_path, lancedb_available, monkeypatch):
+    """Regression test for the carry-forward trap. A generated file already
+    in the table still hashes equal on reindex, so only skipping BEFORE the
+    hash check removes it. Filtering after the carry would keep it forever."""
+    from codeintel import semantic as semantic_module
+    from codeintel.semantic import SemanticStore, index_semantic
+    repo = _write_repo(tmp_path)
+    (repo / "gen.py").write_text("# @generated\n" + FUNC.format(n=7, pad="g" * 1100))
+
+    # First index with admission disabled, mimicking a table built before
+    # the filter existed.
+    monkeypatch.setattr(semantic_module, "skip_reason", lambda *a, **k: None)
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    store = SemanticStore((tmp_path / "data") / "lancedb")
+    assert "gen.py" in store.rows_by_path("myrepo")
+
+    # Second index with the real filter. gen.py is byte-identical, so its
+    # file_hash still matches the carried rows.
+    monkeypatch.undo()
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert "gen.py" not in store.rows_by_path("myrepo")
+
+
+def test_all_files_skipped_drops_the_table(tmp_path, lancedb_available):
+    """An all-generated repo must leave no empty table behind — the
+    existing overwrite() path drops it, and semanticSearch then raises
+    NoSemanticIndexError while the skip report explains why."""
+    from codeintel.semantic import SemanticStore, index_semantic
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "gen.py").write_text("# @generated\n" + FUNC.format(n=1, pad="g" * 1100))
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert report.rows == 0 and len(report.skipped) == 1
+    assert SemanticStore((tmp_path / "data") / "lancedb").table_identity("myrepo") is None
+
+
+def test_truncated_is_none_when_counting_fails(tmp_path, lancedb_available):
+    """Telemetry must never abort an otherwise-good index."""
+    from codeintel.semantic import index_semantic
+
+    class _BrokenCounter(FakeEmbedder):
+        def count_oversized(self, texts):
+            raise RuntimeError("tokenizer exploded")
+
+    repo = _write_repo(tmp_path)
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=_BrokenCounter())
+    assert report.truncated is None
+    assert report.rows == 2          # the index itself still succeeded
