@@ -233,6 +233,16 @@ def test_force_include_keeps_generated_file(tmp_path, lancedb_available):
     assert "gen.py" in rows
 
 
+def test_oversized_file_is_skipped_with_reason(tmp_path, lancedb_available, monkeypatch):
+    from codeintel import chunker
+    from codeintel.semantic import index_semantic
+    repo = _write_repo(tmp_path)
+    monkeypatch.setattr(chunker, "MAX_FILE_BYTES", 10)
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert report.rows == 0
+    assert all(s.reason.startswith("too-large:") for s in report.skipped)
+
+
 def test_stale_generated_rows_are_purged_on_reindex(tmp_path, lancedb_available, monkeypatch):
     """Regression test for the carry-forward trap. A generated file already
     in the table still hashes equal on reindex, so only skipping BEFORE the

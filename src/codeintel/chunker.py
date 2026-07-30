@@ -19,6 +19,7 @@ needs it.
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,6 +57,7 @@ GENERATED_BANNERS = ("auto" + "-generated", "@" + "generated",
                      "do not modify" + " this file")
 BANNER_SCAN_CHARS = 2048
 MAX_LINE_CHARS = 5000
+MAX_FILE_BYTES = 1_048_576   # 1 MB backstop for files that dodge the other rules
 
 LANGUAGES = {".py": "python", ".ts": "typescript", ".tsx": "tsx",
              ".java": "java", ".kt": "kotlin", ".swift": "swift"}
@@ -127,6 +129,39 @@ def skip_reason(rel_path: str, source: str,
     return None
 
 
+def oversized_file_reason(size_bytes: int) -> str | None:
+    """Checked from the file's stat() before read_bytes(), so a huge file is
+    never read into memory just to be rejected. A pure backstop: banner and
+    long-line detection already catch generated and minified content, leaving
+    only the large-file-with-normal-lines shape for this rule."""
+    if size_bytes > MAX_FILE_BYTES:
+        return f"too-large:{size_bytes}"
+    return None
+
+
+def gitignored(repo_path: Path, rel_paths: list[str]) -> set[str]:
+    """Which of `rel_paths` git ignores, via one batched subprocess.
+
+    `git check-ignore` does not use the usual exit-code convention: 0 means
+    some paths matched, 1 means none matched, and anything else is a real
+    error. Treating non-zero as failure would silently disable filtering on
+    every repo that happens to ignore nothing. Any genuine failure -- not a
+    git repo, git absent, a hang -- degrades to "nothing ignored", so the
+    worst case is indexing more, never less."""
+    if not rel_paths:
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "check-ignore", "--stdin"],
+            input="\n".join(rel_paths), capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line for line in result.stdout.splitlines() if line}
+
+
 def iter_source_files(repo_path: Path) -> list[tuple[Path, str]]:
     files: list[tuple[Path, str]] = []
     for path in sorted(repo_path.rglob("*")):
@@ -134,7 +169,8 @@ def iter_source_files(repo_path: Path) -> list[tuple[Path, str]]:
             continue
         if path.is_file() and path.suffix in LANGUAGES:
             files.append((path, path.relative_to(repo_path).as_posix()))
-    return files
+    ignored = gitignored(repo_path, [rel for _, rel in files])
+    return [(path, rel) for path, rel in files if rel not in ignored]
 
 
 def _make_chunk(rel_path: str, language: str, file_hash: str, content: str,

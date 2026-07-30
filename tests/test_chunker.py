@@ -329,3 +329,35 @@ def test_own_generated_protobuf_is_skipped():
             skipped.append(rel_path)
     assert any(path.endswith("scip_pb2.py") for path in skipped)
     assert not any(path.endswith("chunker.py") for path in skipped)
+
+
+def test_oversized_file_reason_threshold():
+    from codeintel.chunker import MAX_FILE_BYTES, oversized_file_reason
+    assert oversized_file_reason(MAX_FILE_BYTES) is None
+    reason = oversized_file_reason(MAX_FILE_BYTES + 1)
+    assert reason is not None and reason.startswith("too-large:")
+
+
+def test_gitignored_returns_empty_set_for_non_git_dir(tmp_path):
+    """The whole unit-test suite indexes plain tmp_path dirs, not git repos."""
+    from codeintel.chunker import gitignored
+    assert gitignored(tmp_path, ["a.py", "b.py"]) == set()
+
+
+@pytest.mark.integration
+def test_gitignored_reads_real_gitignore(tmp_path):
+    import subprocess
+    from codeintel.chunker import gitignored
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("build/\n")
+    assert gitignored(tmp_path, ["build/out.py", "src/keep.py"]) == {"build/out.py"}
+
+
+@pytest.mark.integration
+def test_gitignored_handles_no_matches(tmp_path):
+    """git check-ignore exits 1 when nothing matches -- that is NOT an error."""
+    import subprocess
+    from codeintel.chunker import gitignored
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("build/\n")
+    assert gitignored(tmp_path, ["src/keep.py"]) == set()

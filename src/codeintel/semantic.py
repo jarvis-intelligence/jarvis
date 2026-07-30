@@ -13,7 +13,8 @@ from pathlib import Path
 
 from codeintel import config
 from codeintel.chunker import (
-    Chunk, chunk_file, hash_file, iter_source_files, language_for, skip_reason,
+    Chunk, chunk_file, hash_file, iter_source_files, language_for,
+    oversized_file_reason, skip_reason,
 )
 from codeintel.embeddings import EmbeddingModel, default_model
 from codeintel.search import ZoektHit, ZoektUnavailableError, search_zoekt
@@ -182,6 +183,10 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
     skipped: list[SkippedFile] = []
     admitted = 0
     for abs_path, rel_path in iter_source_files(repo_path):
+        reason = oversized_file_reason(abs_path.stat().st_size)
+        if reason is not None:
+            skipped.append(SkippedFile(rel_path, reason))
+            continue
         data = abs_path.read_bytes()
         source = data.decode("utf-8", errors="replace")
         # Admission runs BEFORE the carry-forward hash check on purpose: a
