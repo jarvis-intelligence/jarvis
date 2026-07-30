@@ -149,3 +149,55 @@ def test_upsert_preserves_semantic_timestamp(tmp_path: Path):
 def test_migration_is_idempotent(tmp_path: Path):
     Registry(tmp_path / "registry.db").close()
     Registry(tmp_path / "registry.db").close()  # second open must not raise
+
+
+def test_semantic_include_roundtrips_as_tuple(tmp_path):
+    from codeintel.registry import Registry
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("r", "/p", "python", None, "indexed",
+                        semantic_include=("src/gen", "vendor/pb"))
+        assert registry.get("r").semantic_include == ("src/gen", "vendor/pb")
+        assert registry.list()[0].semantic_include == ("src/gen", "vendor/pb")
+    finally:
+        registry.close()
+
+
+def test_semantic_include_defaults_to_empty_tuple(tmp_path):
+    from codeintel.registry import Registry
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("r", "/p", "python", None, "indexed")
+        assert registry.get("r").semantic_include == ()
+    finally:
+        registry.close()
+
+
+def test_semantic_include_column_added_to_preexisting_db(tmp_path):
+    """A registry.db created before this column exists must migrate in
+    place rather than crash."""
+    import sqlite3
+    from codeintel.registry import Registry
+    db = tmp_path / "registry.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE repos (slug TEXT PRIMARY KEY, path TEXT NOT NULL, "
+        "language TEXT NOT NULL, commit_sha TEXT, last_indexed TEXT NOT NULL, "
+        "status TEXT NOT NULL, scheme_override TEXT, semantic_indexed_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO repos VALUES ('old', '/p', 'python', NULL, "
+        "'2026-01-01T00:00:00+00:00', 'indexed', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    registry = Registry(db)
+    try:
+        assert registry.get("old").semantic_include == ()
+        registry.upsert("old", "/p", "python", None, "indexed",
+                        semantic_include=("src/gen",))
+        assert registry.get("old").semantic_include == ("src/gen",)
+    finally:
+        registry.close()
