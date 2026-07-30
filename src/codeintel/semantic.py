@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codeintel import config
-from codeintel.chunker import Chunk, chunk_file, hash_file, iter_source_files, language_for
+from codeintel.chunker import (
+    Chunk, chunk_file, hash_file, iter_source_files, language_for, skip_reason,
+)
 from codeintel.embeddings import EmbeddingModel, default_model
 from codeintel.search import ZoektHit, ZoektUnavailableError, search_zoekt
 
@@ -75,6 +77,20 @@ def reciprocal_rank_fusion(repo: str, vector_rows: list[dict],
         for e in entries.values()
     ]
     return sorted(fused, key=lambda h: h.score, reverse=True)
+
+
+@dataclass(frozen=True)
+class SkippedFile:
+    file_path: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class SemanticIndexReport:
+    rows: int                                  # chunks written to the table
+    files: int                                 # source files admitted
+    skipped: tuple[SkippedFile, ...] = ()
+    truncated: int | None = None               # None = could not be measured
 
 
 class SemanticStore:
@@ -148,7 +164,8 @@ class SemanticStore:
 
 
 def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
-                   model: EmbeddingModel | None = None) -> int:
+                   model: EmbeddingModel | None = None,
+                   include_prefixes: tuple[str, ...] = ()) -> SemanticIndexReport:
     model = model or default_model()
     store = SemanticStore(config.lancedb_dir(root))
     model_name, model_revision = model.identity()
@@ -162,21 +179,40 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
 
     carried: list[dict] = []
     pending: list[Chunk] = []
+    skipped: list[SkippedFile] = []
+    admitted = 0
     for abs_path, rel_path in iter_source_files(repo_path):
         data = abs_path.read_bytes()
+        source = data.decode("utf-8", errors="replace")
+        # Admission runs BEFORE the carry-forward hash check on purpose: a
+        # generated file already in the table still hashes equal, so
+        # filtering after the carry would keep its stale rows alive forever.
+        # Skipping here makes the first post-filter reindex purge them.
+        reason = skip_reason(rel_path, source, include_prefixes)
+        if reason is not None:
+            skipped.append(SkippedFile(rel_path, reason))
+            continue
+        admitted += 1
         file_hash = hash_file(data)
         old_rows = previous.get(rel_path)
         if old_rows and old_rows[0]["file_hash"] == file_hash:
             carried.extend(old_rows)  # unchanged file: no re-parse, no re-embed
             continue
         language = language_for(abs_path)
-        source = data.decode("utf-8", errors="replace")
         pending.extend(chunk_file(rel_path, source, file_hash, language))
 
     unique = [c for c in {c.content_hash: c for c in pending}.values()
               if c.content_hash not in vector_by_hash]
     for chunk, vector in zip(unique, model.embed_texts([c.content for c in unique])):
         vector_by_hash[chunk.content_hash] = vector
+
+    try:
+        truncated = model.count_oversized([c.content for c in unique])
+    except Exception:
+        # Telemetry must never abort an otherwise-good index. index_cli
+        # already wraps this whole call, so an exception here would throw
+        # away a perfectly valid table over a mere counting failure.
+        truncated = None
 
     rows = carried + [
         {"chunk_id": uuid.uuid4().hex, "content_hash": c.content_hash,
@@ -188,7 +224,8 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
         for c in pending
     ]
     store.overwrite(slug, rows)
-    return len(rows)
+    return SemanticIndexReport(rows=len(rows), files=admitted,
+                               skipped=tuple(skipped), truncated=truncated)
 
 
 def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None = None,

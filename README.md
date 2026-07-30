@@ -84,6 +84,7 @@ cannot read scip.proto's `typed_range` oneof, which is the only range encoding
 codeintel index /path/to/your/repo            # slug defaults to the directory name
 codeintel index /path/to/your/repo --slug foo # or pick one explicitly
 codeintel index /path/to/your/repo --scheme MyScheme # Swift repo with an ambiguous Xcode scheme
+codeintel index /path/to/your/repo --semantic-include vendor/generated # force-include a path the generated-file filter would otherwise skip
 codeintel list
 codeintel status foo
 codeintel reindex foo
@@ -94,6 +95,10 @@ codeintel forget foo
 `failed`, but can also be `partial`: the index published real symbols but no
 navigable positions (an indexer/converter bug) — check the stderr warning
 from `codeintel index` for details.
+
+`--semantic-include` is repeatable — pass it once per path prefix to
+force-include several. Like `--scheme`, once set there is no flag to clear
+it; change it by re-running `codeintel index` with the new value(s).
 
 **Language detection** counts source files by extension and picks the winner —
 one language per index:

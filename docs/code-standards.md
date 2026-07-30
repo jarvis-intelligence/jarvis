@@ -320,12 +320,12 @@ uv run pytest -m integration     # real binaries only
 
 All commands are under `codeintel`:
 ```bash
-codeintel index <path> [--slug name] [--scheme name]
+codeintel index <path> [--slug name] [--scheme name] [--semantic-include path]
 codeintel list
 codeintel status <slug>
 codeintel reindex <slug>
 codeintel forget <slug>
-codeintel watch <path> [--slug name] [--scheme name] [--debounce 5]
+codeintel watch <path> [--slug name] [--scheme name] [--semantic-include path] [--debounce 5]
 ```
 
 ### Error Handling

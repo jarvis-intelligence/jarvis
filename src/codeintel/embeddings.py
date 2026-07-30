@@ -63,6 +63,25 @@ class EmbeddingModel:
                 vectors.append(list(vec) if not hasattr(vec, "tolist") else vec.tolist())
         return vectors
 
+    def count_oversized(self, texts: list[str]) -> int:
+        """How many of `texts` the model will silently truncate at encode
+        time. Uses the real tokenizer rather than the chunker's chars//4
+        estimate: that estimate is precisely what MAX_SEQ_LENGTH backstops,
+        so measuring it with the same approximation would be circular.
+
+        A separate tokenize pass is unavoidable — `encode()` tokenizes
+        internally but never exposes the counts. Overhead is ~1-2% against
+        the transformer forward pass. Empty input returns 0 without loading
+        the model, keeping unit tests offline."""
+        if not texts:
+            return 0
+        tokenizer = self._load().tokenizer
+        oversized = 0
+        for i in range(0, len(texts), self.batch_size):
+            encoded = tokenizer(texts[i:i + self.batch_size])["input_ids"]
+            oversized += sum(1 for ids in encoded if len(ids) > MAX_SEQ_LENGTH)
+        return oversized
+
     def embed_query(self, query: str) -> list[float]:
         # bge-m3 needs no query-side instruction prefix (unlike earlier BGE
         # versions) — encode the raw query text directly.
