@@ -361,3 +361,20 @@ def test_gitignored_handles_no_matches(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / ".gitignore").write_text("build/\n")
     assert gitignored(tmp_path, ["src/keep.py"]) == set()
+
+
+@pytest.mark.integration
+def test_own_repo_satisfies_header_invariants():
+    """Acceptance criteria 1 and 2, checked against real source."""
+    from pathlib import Path
+    src = Path(__file__).resolve().parent.parent / "src"
+    checked = 0
+    for abs_path, rel_path in iter_source_files(src):
+        source = abs_path.read_bytes().decode("utf-8", errors="replace")
+        if skip_reason(rel_path, source) is not None:
+            continue
+        for chunk in chunk_file(rel_path, source, "fh", language_for(abs_path)):
+            assert chunk.content.startswith(f"# file: {rel_path}\n")
+            assert len(chunk.content) // 4 <= MAX_TOKENS
+            checked += 1
+    assert checked > 50

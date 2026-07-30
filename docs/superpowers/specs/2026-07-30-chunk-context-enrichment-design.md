@@ -361,6 +361,10 @@ not have that failure mode.
 4. `codeintel index` on this repo reports a `chunk tokens p50=… p90=… max=…`
    line.
 
+**Verified 2026-07-30:** all four criteria met — headers present on every chunk,
+no chunk over `MAX_TOKENS`, a second consecutive index re-embeds 0 chunks, and
+the percentiles line is emitted.
+
 ## Deferred
 
 | Item | Why |
