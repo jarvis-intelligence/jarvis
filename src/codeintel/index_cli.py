@@ -217,7 +217,37 @@ def _resolve_scheme(registry: Registry, slug: str, scheme: str | None) -> str | 
     return existing.scheme_override if existing is not None else None
 
 
-def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None) -> bool:
+def _resolve_semantic_include(
+    registry: Registry, slug: str, include: tuple[str, ...] | None
+) -> tuple[str, ...]:
+    """`include=None` means "leave the persisted value alone" (a `codeintel
+    watch` reindex never repeats the flag) rather than "clear it" — the
+    same contract as `_resolve_scheme`."""
+    if include is not None:
+        return include
+    existing = registry.get(slug)
+    return existing.semantic_include if existing is not None else ()
+
+
+def _print_semantic_report(report) -> None:
+    """Index-time semantic summary. Everything goes to stderr, consistent
+    with the other semantic notices, so stdout stays just `indexed <slug>`
+    for scripting."""
+    print(f"semantic: {report.rows} chunks from {report.files} files", file=sys.stderr)
+    for skipped in report.skipped:
+        print(f"semantic: skipped {skipped.file_path} ({skipped.reason})", file=sys.stderr)
+    if report.truncated is None:
+        print("semantic: could not measure truncation", file=sys.stderr)
+    elif report.truncated > 0:
+        print(
+            f"warning: {report.truncated} chunks exceeded the model's token limit "
+            "and were truncated",
+            file=sys.stderr,
+        )
+
+
+def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
+                        include_prefixes: tuple[str, ...] = ()) -> bool:
     """Chunk + embed + write the LanceDB table. Optional and non-fatal:
     a missing `semantic` extra skips with a hint, any other failure warns
     and lets the SCIP/Zoekt publish proceed — the previous semantic table
@@ -232,8 +262,8 @@ def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None) -> bool:
         )
         return False
     try:
-        semantic.index_semantic(repo_path, slug, root=root)
-        return True
+        report = semantic.index_semantic(repo_path, slug, root=root,
+                                         include_prefixes=include_prefixes)
     except SemanticExtraMissingError as exc:
         print(f"semantic indexing skipped — {exc}", file=sys.stderr)
         return False
@@ -243,10 +273,13 @@ def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None) -> bool:
             file=sys.stderr,
         )
         return False
+    _print_semantic_report(report)
+    return True
 
 
 def index_repo(
-    repo_path: Path, *, slug: str | None = None, root: Path | None = None, scheme: str | None = None
+    repo_path: Path, *, slug: str | None = None, root: Path | None = None,
+    scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
 ) -> str:
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
@@ -269,11 +302,13 @@ def index_repo(
 
     registry = Registry(config.data_dir(root) / "registry.db")
     scheme = _resolve_scheme(registry, slug, scheme)
+    semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
 
     if language == "swift":
         indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
 
-    registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme)
+    registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme,
+                    semantic_include=semantic_include)
 
     try:
         with tempfile.TemporaryDirectory(prefix="codeintel-index-") as scratch:
@@ -310,7 +345,7 @@ def index_repo(
                 step="zoekt-index",
             )
 
-            semantic_ok = _run_semantic_stage(repo_path, slug, root)
+            semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
 
             target_dir = config.index_dir(slug, root)
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -322,7 +357,8 @@ def index_repo(
             _publish_atomically(target_dir, versioned_name, sha)
 
         final_status = "indexed" if has_nav else PARTIAL_STATUS
-        registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme)
+        registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme,
+                        semantic_include=semantic_include)
         if semantic_ok:
             registry.mark_semantic_indexed(slug)
         if not has_nav:
@@ -342,8 +378,12 @@ def index_repo(
 
 
 def _cmd_index(args: argparse.Namespace) -> int:
+    raw_include = getattr(args, "semantic_include", None)
     try:
-        slug = index_repo(Path(args.path), slug=args.slug, scheme=getattr(args, "scheme", None))
+        slug = index_repo(
+            Path(args.path), slug=args.slug, scheme=getattr(args, "scheme", None),
+            semantic_include=tuple(raw_include) if raw_include is not None else None,
+        )
     except (UnsupportedLanguageError, IndexingError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -396,7 +436,10 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     if repo is None:
         print(f"error: no such repo: {slug}", file=sys.stderr)
         return 1
-    return _cmd_index(argparse.Namespace(path=repo.path, slug=repo.slug, scheme=repo.scheme_override))
+    return _cmd_index(argparse.Namespace(
+        path=repo.path, slug=repo.slug, scheme=repo.scheme_override,
+        semantic_include=list(repo.semantic_include),
+    ))
 
 
 def _remove_zoekt_shards(slug: str, root: Path | None = None) -> list[Path]:
@@ -521,6 +564,13 @@ def build_parser() -> argparse.ArgumentParser:
     index_parser.add_argument("--slug", help="override the auto-derived slug")
     index_parser.add_argument(
         "--scheme", help="Xcode scheme to build (Swift repos using xcodebuild with more than one scheme)"
+    )
+    index_parser.add_argument(
+        "--semantic-include",
+        action="append",
+        metavar="PATH",
+        help="force-include a path prefix the generated-file filter would skip "
+             "(repeatable; persisted and reused by reindex/watch)",
     )
     index_parser.set_defaults(func=_cmd_index)
 

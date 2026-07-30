@@ -527,7 +527,7 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
 
     captured: dict = {}
 
-    def fake_index_repo(path, *, slug=None, root=None, scheme=None):
+    def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None):
         captured["path"] = path
         captured["slug"] = slug
         captured["scheme"] = scheme
@@ -605,8 +605,10 @@ def test_semantic_stage_failure_is_nonfatal(monkeypatch, capsys):
 def test_semantic_stage_success_returns_true(monkeypatch):
     import codeintel.semantic as semantic_module
     from codeintel.index_cli import _run_semantic_stage
+    from codeintel.semantic import SemanticIndexReport
 
-    monkeypatch.setattr(semantic_module, "index_semantic", lambda *a, **k: 5)
+    monkeypatch.setattr(semantic_module, "index_semantic",
+                        lambda *a, **k: SemanticIndexReport(rows=5, files=1))
     assert _run_semantic_stage(Path("/repo"), "slug", None) is True
 
 
@@ -654,3 +656,58 @@ def test_index_repo_builds_semantic_index_and_searches(tmp_path: Path, monkeypat
     result = semantic_search(slug, "function definition", root=data_root)
     assert result["total"] >= 1
     assert all("filePath" in r for r in result["results"])
+
+
+def test_semantic_include_flag_reaches_index_repo_as_a_tuple(tmp_path, monkeypatch):
+    """The CLI collects repeated --semantic-include into a list; index_repo
+    takes a tuple. Registry persistence itself is covered in test_registry.py."""
+    import argparse
+
+    from codeintel import index_cli
+
+    captured = {}
+
+    def _fake_index_repo(repo_path, *, slug=None, root=None, scheme=None,
+                         semantic_include=None):
+        captured["semantic_include"] = semantic_include
+        return "myrepo"
+
+    monkeypatch.setattr(index_cli, "index_repo", _fake_index_repo)
+    args = argparse.Namespace(path=str(tmp_path), slug="myrepo", scheme=None,
+                              semantic_include=["src/gen", "vendor/pb"])
+    assert index_cli._cmd_index(args) == 0
+    assert captured["semantic_include"] == ("src/gen", "vendor/pb")
+
+
+def test_semantic_report_names_every_skipped_file(capsys):
+    from codeintel.index_cli import _print_semantic_report
+    from codeintel.semantic import SemanticIndexReport, SkippedFile
+
+    report = SemanticIndexReport(
+        rows=95, files=15,
+        skipped=(SkippedFile("src/codeintel/scip_pb2.py", "banner:do not edit"),),
+        truncated=3,
+    )
+    _print_semantic_report(report)
+    err = capsys.readouterr().err
+    assert "semantic: 95 chunks from 15 files" in err
+    assert "semantic: skipped src/codeintel/scip_pb2.py (banner:do not edit)" in err
+    assert "3 chunks exceeded" in err
+
+
+def test_semantic_report_omits_truncation_line_when_zero(capsys):
+    from codeintel.index_cli import _print_semantic_report
+    from codeintel.semantic import SemanticIndexReport
+
+    _print_semantic_report(SemanticIndexReport(rows=10, files=2, truncated=0))
+    err = capsys.readouterr().err
+    assert "exceeded" not in err
+    assert "could not measure" not in err
+
+
+def test_semantic_report_notes_unmeasured_truncation(capsys):
+    from codeintel.index_cli import _print_semantic_report
+    from codeintel.semantic import SemanticIndexReport
+
+    _print_semantic_report(SemanticIndexReport(rows=10, files=2, truncated=None))
+    assert "could not measure truncation" in capsys.readouterr().err
