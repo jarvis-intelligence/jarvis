@@ -139,6 +139,11 @@ def test_model_change_forces_full_reembed(tmp_path, lancedb_available):
 
 
 def test_duplicate_content_embedded_once(tmp_path, lancedb_available):
+    """Two files with byte-identical bodies still embed separately, because
+    the per-chunk header (`# file: <path>`) differs and content_hash covers
+    the header. Dedup only applies to genuinely identical stored content —
+    e.g. the same file re-chunked, or two chunks within one file that
+    happen to produce identical text."""
     from codeintel.semantic import index_semantic
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -147,7 +152,7 @@ def test_duplicate_content_embedded_once(tmp_path, lancedb_available):
     (repo / "b.py").write_text(same)
     embedder = FakeEmbedder()
     report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=embedder)
-    assert report.rows == 2 and len(embedder.embedded) == 1
+    assert report.rows == 2 and len(embedder.embedded) == 2
 
 
 def _indexed(tmp_path):
