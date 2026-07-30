@@ -21,6 +21,17 @@ DEFAULT_BATCH_SIZE = 8
 MAX_SEQ_LENGTH = 1024
 _INSTALL_HINT = "semantic search requires the 'semantic' extra: uv sync --extra semantic"
 
+# Query/document instruction prefixes, by model. Matching is substring-based
+# so vendor-prefixed names resolve ("intfloat/multilingual-e5-large" matches
+# "e5"), and longest-pattern-first so the result is deterministic when two
+# patterns both match. A future model whose name coincidentally contains a
+# pattern would get the wrong prefix -- the env override exists for that case.
+MODEL_PREFIXES: dict[str, tuple[str, str]] = {
+    "bge-m3": ("", ""),
+    "e5": ("query: ", "passage: "),
+    "nomic-embed": ("search_query: ", "search_document: "),
+}
+
 
 class SemanticExtraMissingError(Exception):
     """The `semantic` optional dependencies are not installed."""
@@ -28,7 +39,8 @@ class SemanticExtraMissingError(Exception):
 
 class EmbeddingModel:
     def __init__(self, model_name: str | None = None, revision: str | None = None,
-                 batch_size: int | None = None) -> None:
+                 batch_size: int | None = None, query_prefix: str | None = None,
+                 doc_prefix: str | None = None) -> None:
         self.model_name = model_name or os.environ.get("CODEINTEL_EMBEDDING_MODEL", DEFAULT_MODEL)
         if revision is not None:
             self.revision = revision
@@ -38,8 +50,43 @@ class EmbeddingModel:
                                                            DEFAULT_BATCH_SIZE))
         self._model = None
 
+        env_query = os.environ.get("CODEINTEL_EMBEDDING_QUERY_PREFIX")
+        env_doc = os.environ.get("CODEINTEL_EMBEDDING_DOC_PREFIX")
+        matched = next(
+            (MODEL_PREFIXES[p] for p in sorted(MODEL_PREFIXES, key=len, reverse=True)
+             if p in self.model_name.lower()),
+            None,
+        )
+        # Explicit args win (restoring a table's identity), then env vars, then
+        # the model map. Each side resolves independently -- some models use
+        # asymmetric prefixes, so setting only one env var is legal.
+        base_query, base_doc = matched if matched is not None else ("", "")
+        self._query_prefix = next(
+            p for p in (query_prefix, env_query, base_query) if p is not None)
+        self._doc_prefix = next(
+            p for p in (doc_prefix, env_doc, base_doc) if p is not None)
+        # Not a config problem when prefixes were passed explicitly.
+        self._unlisted = (matched is None and env_query is None and env_doc is None
+                          and query_prefix is None and doc_prefix is None)
+
     def identity(self) -> tuple[str, str]:
         return (self.model_name, self.revision)
+
+    def prefixes(self) -> tuple[str, str]:
+        """(query_prefix, doc_prefix). Env override wins, else the model map,
+        else no prefix."""
+        return (self._query_prefix, self._doc_prefix)
+
+    def prefix_warning(self) -> str | None:
+        """Message when the model is unlisted and no override is set, naming
+        the env var to fix it. This module never prints -- semantic.py is
+        imported by the MCP stdio server, and a per-query print would repeat
+        on every call. Callers decide where to surface this."""
+        if not self._unlisted:
+            return None
+        return (f"embedding model {self.model_name} is not in the known-prefix map; "
+                "no query/document prefix will be applied. If this model needs one, "
+                "set CODEINTEL_EMBEDDING_QUERY_PREFIX and CODEINTEL_EMBEDDING_DOC_PREFIX.")
 
     def _load(self):
         if self._model is None:
@@ -53,7 +100,7 @@ class EmbeddingModel:
             self._model.max_seq_length = MAX_SEQ_LENGTH
         return self._model
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def _encode(self, texts: list[str]) -> list[list[float]]:
         model = self._load()
         vectors: list[list[float]] = []
         for i in range(0, len(texts), self.batch_size):
@@ -62,6 +109,9 @@ class EmbeddingModel:
             for vec in model.encode(texts[i:i + self.batch_size], normalize_embeddings=True):
                 vectors.append(list(vec) if not hasattr(vec, "tolist") else vec.tolist())
         return vectors
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return self._encode([f"{self._doc_prefix}{text}" for text in texts])
 
     def count_oversized(self, texts: list[str]) -> int:
         """How many of `texts` the model will silently truncate at encode
@@ -78,14 +128,15 @@ class EmbeddingModel:
         tokenizer = self._load().tokenizer
         oversized = 0
         for i in range(0, len(texts), self.batch_size):
-            encoded = tokenizer(texts[i:i + self.batch_size])["input_ids"]
+            batch = [f"{self._doc_prefix}{text}" for text in texts[i:i + self.batch_size]]
+            encoded = tokenizer(batch)["input_ids"]
             oversized += sum(1 for ids in encoded if len(ids) > MAX_SEQ_LENGTH)
         return oversized
 
     def embed_query(self, query: str) -> list[float]:
-        # bge-m3 needs no query-side instruction prefix (unlike earlier BGE
-        # versions) — encode the raw query text directly.
-        return self.embed_texts([query])[0]
+        # Deliberately NOT delegating to embed_texts: that would apply the
+        # document prefix to a query.
+        return self._encode([f"{self._query_prefix}{query}"])[0]
 
 
 _default: EmbeddingModel | None = None
