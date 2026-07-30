@@ -2,19 +2,24 @@
 
 ## High-Level Overview
 
-codeintel is a **local-first, single-user code intelligence MCP server** that combines semantic navigation (SCIP-backed) with lexical search (Zoekt-backed) in a single stdio process. It bridges the SCIP indexing ecosystem with the MCP protocol, exposing 9 tools to Claude Code, Cursor, and other MCP clients.
+codeintel is a **local-first, single-user code intelligence MCP server** that combines structural navigation (SCIP-backed) with lexical search (Zoekt-backed) and natural-language semantic/vector search in a single stdio process. It bridges the SCIP indexing ecosystem with the MCP protocol, exposing 9 tools to Claude Code, Cursor, and other MCP clients: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius`.
 
-The system is built around three core engines:
+The system is built around four core engines:
 
 1. **Query Engine** — reads SCIP SQLite indexes, executes nav queries (go-to-definition, find-references, etc.)
 2. **Search Engine** — manages embedded Zoekt instance, returns lexical search results
 3. **Graph Engine** — builds and queries package dependency relationships across indexed repos
+4. **Semantic Engine** — tree-sitter chunking + self-hosted embeddings into a per-repo LanceDB table, fused with Zoekt hits for natural-language `semanticSearch`
 
 ### Layered Architecture (primary view)
 
 ![codeintel layered architecture](assets/codeintel-full-architecture-with-swift.png)
 
 *Editable source: [`assets/codeintel-full-architecture-with-swift.drawio`](assets/codeintel-full-architecture-with-swift.drawio) — also exported as `.svg` and as an XML-embedded `.drawio.png`*
+
+*Note: this diagram predates the Semantic engine. See
+[`assets/semantic-search-architecture.png`](assets/semantic-search-architecture.png) for the
+up-to-date semantic indexing/query flow.*
 
 Seven layers, top to bottom. **Storage (layer 4) is the seam**: the runtime only ever reads
 down into it, the indexing pipeline only ever writes up into it, and the two halves share no
@@ -24,8 +29,8 @@ other contract.
 |---|---|
 | 1 · Clients | Claude Code, Cursor, any MCP host |
 | 2 · MCP Server | `server.py` — FastMCP over stdio, 9 tools |
-| 3 · Engines | Query (`query.py`), Search (`search.py`), Graph (`graph.py`) |
-| 4 · Storage | `index-<sha>.db` + pointer, `.zoekt/` shards, `registry.db` |
+| 3 · Engines | Query (`query.py`), Search (`search.py`), Graph (`graph.py`), Semantic (`semantic.py`, `chunker.py`, `embeddings.py`) |
+| 4 · Storage | `index-<sha>.db` + pointer, `.zoekt/` shards, `registry.db`, `~/.codeintel/lancedb/` |
 | 5 · Indexing orchestration | `index_cli.py` — detect → run indexer → convert → graph/zoekt → atomic publish |
 | 6 · Language indexers | `scip-typescript`, `scip-python`, `scip-java`, `scip-swift` |
 | 7 · External toolchain | Node/npm, Python, JDK, and (Swift only) Xcode + iOS SDK |
@@ -40,13 +45,18 @@ only.
 
 *Editable source: [`assets/codeintel-architecture.excalidraw`](assets/codeintel-architecture.excalidraw)*
 
+*Note: this diagram predates the Semantic engine. See
+[`assets/semantic-search-architecture.png`](assets/semantic-search-architecture.png) for the
+up-to-date semantic indexing/query flow.*
+
 Diagram shows:
 - **Client**: Claude Code / Cursor / any MCP client → MCP stdio
 - **Server** (`server.py`): FastMCP dispatcher → 9 tools
 - **Query Engine** (`query.py`): Reads SCIP index SQLite (documents/chunks/global_symbols)
 - **Search Engine** (`search.py`): HTTP client to embedded Zoekt webserver
 - **Graph Engine** (`graph.py`): Queries package edges in registry.db
-- **Storage**: SCIP indexes (index-<sha>.db), Zoekt shards (.zoekt/), registry (registry.db)
+- **Semantic Engine** (`chunker.py` + `embeddings.py` + `semantic.py`): tree-sitter chunking → embeddings → per-repo LanceDB table, fused with Zoekt hits
+- **Storage**: SCIP indexes (index-<sha>.db), Zoekt shards (.zoekt/), registry (registry.db), LanceDB tables (~/.codeintel/lancedb/)
 
 ---
 
@@ -55,6 +65,10 @@ Diagram shows:
 ![codeintel index pipeline and package graph](assets/codeintel-system-architecture.png)
 
 *Editable source: [`assets/codeintel-system-architecture.excalidraw`](assets/codeintel-system-architecture.excalidraw)*
+
+*Note: this diagram predates the semantic indexing stage. See
+[`assets/semantic-search-architecture.png`](assets/semantic-search-architecture.png) for the
+up-to-date pipeline including chunk/embed/store.*
 
 Diagram shows the full indexing lifecycle from file changes → published index:
 
@@ -85,7 +99,14 @@ Diagram shows the full indexing lifecycle from file changes → published index:
    - Creates Zoekt shards in `.zoekt/` directory
    - Files are searchable by keyword, filename, content
 
-6. **Atomic Publishing**
+6. **Semantic Indexing (non-fatal, `_run_semantic_stage()`)**
+   - Chunk source files (`chunker.py`), embed chunks (`embeddings.py`), write to a per-repo
+     LanceDB table (`semantic.index_semantic()`)
+   - Skips cleanly if the `semantic` extra isn't installed (`SemanticExtraMissingError`); any
+     other failure is caught and logged — neither case blocks the SCIP/Zoekt publish
+   - On success, `Registry.mark_semantic_indexed()` records `semantic_indexed_at`
+
+7. **Atomic Publishing**
    - Copy SCIP index to final location: `~/.codeintel/scip/_/<slug>/_/index-<sha>.db`
    - Update `current` pointer file (small text file, atomic `os.replace()`)
    - Update registry.db: mark repo as indexed, record commit SHA, timestamp
@@ -261,6 +282,41 @@ When a user calls `blastRadius(repo, symbol_or_package)`:
 
 ---
 
+## Semantic Path (Runtime)
+
+When a user calls `semanticSearch(repo, query, limit=10)`:
+
+1. **Chunking (indexing time, `chunker.py`)**
+   - Parse each source file with tree-sitter, splitting at function/class boundaries
+     (256-512 token target); an unparseable language falls back to fixed-window chunks
+   - Each chunk carries a content hash for dedup and the file hash for change detection
+
+2. **Embedding (indexing time, `embeddings.py`)**
+   - Lazy-loaded `EmbeddingModel` (default `BAAI/bge-m3`, 1024-dim, pinned revision) embeds
+     changed chunks; unchanged files carry over their existing vectors by file hash
+   - Vectors are L2-normalized for cosine search
+
+3. **Storage (`semantic.py`: `SemanticStore`)**
+   - One LanceDB table per repo under `~/.codeintel/lancedb/`, atomically overwritten per index run
+   - The table records the embedding model name + revision used to build it (`table_identity()`)
+
+4. **Query (`semantic.py`: `semantic_search()`)**
+   - Embeds the query using the model identity stored in the table (not whatever's currently
+     configured) and runs a cosine-metric vector search
+   - Fuses vector hits with `searchCode`'s Zoekt lexical hits via `reciprocal_rank_fusion()` (k=60);
+     degrades to vector-only if Zoekt is unavailable
+
+5. **Response to MCP client**
+   - Returns ranked hits; includes a `"warning"` field if the table's recorded model/revision
+     differs from the currently configured one, nudging a reindex
+
+**Key invariant:** a LanceDB table only ever holds vectors from one embedding model + revision at
+a time. If the configured model changes, old vectors are never reused — every chunk is fully
+re-embedded on the next `codeintel index`/`reindex`. This is what prevents silently mixing
+incompatible embedding spaces.
+
+---
+
 ## Storage Layout
 
 ```
@@ -273,13 +329,15 @@ When a user calls `blastRadius(repo, symbol_or_package)`:
 │               ├── current            # Pointer file (text, content: commit SHA or db name)
 │               ├── index-<sha1>.db    # SCIP SQLite (documents, chunks, global_symbols, ...)
 │               └── index-<sha2>.db    # (old versions, kept for GC later)
-└── .zoekt/
-    ├── zoekt.pid                      # Pidfile (zoekt-webserver PID)
-    └── <shards>                       # Zoekt index shards (repo-specific)
+├── .zoekt/
+│   ├── zoekt.pid                      # Pidfile (zoekt-webserver PID)
+│   └── <shards>                       # Zoekt index shards (repo-specific)
+└── lancedb/
+    └── <slug>                         # One LanceDB table per repo (semantic search vectors)
 ```
 
 **registry.db schema:**
-- `repos(slug TEXT PRIMARY KEY, path TEXT, language TEXT, commit_sha TEXT, last_indexed TIMESTAMP, status TEXT)`
+- `repos(slug TEXT PRIMARY KEY, path TEXT, language TEXT, commit_sha TEXT, last_indexed TIMESTAMP, status TEXT, scheme_override TEXT, semantic_indexed_at TEXT)`
 - `packages(id, repo_slug, package_name)`
 - `edges(source_repo TEXT, target_package TEXT, ...)`
 
@@ -323,7 +381,11 @@ Indexing is exclusive — only one reindex can run at a time per slug (enforced 
 - **protobuf** — SCIP document decoding
 - **zstandard** — SCIP blob decompression
 - **httpx** — Zoekt webserver HTTP client
-- **watchdog** (optional) — filesystem monitor for `codeintel watch`
+- **watchdog** (optional, `--extra watch`) — filesystem monitor for `codeintel watch`
+- **lancedb**, **sentence-transformers**, **tree-sitter**, **tree-sitter-language-pack**
+  (optional, `--extra semantic`) — chunking, embedding, and vector storage for `semanticSearch`.
+  Every import of these is deferred inside functions, never at module top-level, so a base
+  install (without the extra) is completely unaffected.
 
 ### External Binaries (Must be on PATH)
 

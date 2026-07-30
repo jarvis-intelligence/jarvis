@@ -11,7 +11,7 @@ See [`plans/0724-2316-codeintel-mcp-implementation/`](../plans/0724-2316-codeint
 | Phase | Feature | Delivered | Verification |
 |-------|---------|-----------|--------------|
 | **1** | Scaffold + vendored SCIP core (scip_pb2, scip_decoder, index_reader) | ✓ July 24 | Unit tests green, vendored code functional |
-| **2** | MCP stdio server + 5 SCIP nav tools + getIndexStatus | ✓ July 24 | 8 tools registered, error handling tested |
+| **2** | MCP stdio server + 5 SCIP nav tools + getIndexStatus | ✓ July 24 | 9 tools registered, error handling tested |
 | **3** | Indexer CLI, registry, embedded Zoekt + searchCode | ✓ July 25 | End-to-end index pipeline, search working |
 | **4** | blastRadius (package graph) + codeintel watch (auto-reindex) | ✓ July 25 | Graph BFS tested, watch debounce functional |
 
@@ -72,7 +72,7 @@ lands, `typeHierarchy` starts working with no change here beyond installing the
 newer `scip`.
 
 **Acceptance criteria met:**
-- ✓ All 8 MCP tools return correct results on real TypeScript/Python repos
+- ✓ All 9 MCP tools return correct results on real TypeScript/Python repos
 - ✓ `codeintel index` end-to-end: language detection → indexer → scip expt-convert → zoekt-index → atomic publish → registry update
 - ✓ `getIndexStatus` correctly flags stale after new commits; reindex has zero query downtime
 - ✓ Test suite green: `uv run pytest` passes, 12 test modules (17 files total under `tests/` with fixtures), integration tests use real binaries
@@ -89,6 +89,51 @@ New features:
 - `_ensure_scheme_override_column()` idempotent migration — adds the new column to existing databases
 
 Verified: End-to-end indexing works on real Swift repos with Xcode projects; all 8 MCP nav tools return correct results.
+
+---
+
+### Semantic/Vector Search (Landed, July 30)
+
+Added natural-language code search (`semanticSearch`) alongside the existing structural nav
+(SCIP) and lexical search (Zoekt) — a third, complementary way to find code, for queries that
+don't map to an exact symbol name or keyword.
+
+**New modules:**
+- `chunker.py` — tree-sitter AST chunking into function/class-sized chunks (256-512 token
+  target), with a fixed-window fallback for unparseable languages
+- `embeddings.py` — lazy-loaded self-hosted embedding model wrapper (`BAAI/bge-m3`, 1024-dim,
+  pinned revision, via `sentence-transformers`), L2-normalized vectors; `SemanticExtraMissingError`
+  for a clean skip when the optional extra isn't installed
+- `semantic.py` — `SemanticStore` (one LanceDB table per repo under `~/.codeintel/lancedb/`,
+  cosine-metric search), `index_semantic()` (chunk → dedup by content hash → embed → carry over
+  unchanged files by file hash → atomic table overwrite), `reciprocal_rank_fusion()` (merges
+  vector hits with Zoekt lexical hits, k=60), `semantic_search()`
+
+**Modified:** `config.py` (`IGNORED_DIRS`, `lancedb_dir()`); `index_cli.py` (`index_repo()` now
+runs a non-fatal semantic-indexing stage after Zoekt and before atomic publish — a missing extra
+or any semantic-stage failure is caught and logged, never blocks the SCIP/Zoekt publish; `forget`
+also drops the repo's LanceDB table); `registry.py` (nullable `semantic_indexed_at` column,
+survives failed semantic reindexes, `mark_semantic_indexed()`); `server.py` (new 9th tool
+`semanticSearch(repo, query, limit=10)`, same `{"error": ...}` pattern as every other tool,
+degrades to vector-only if Zoekt is unavailable).
+
+New optional extra in `pyproject.toml`, mirroring the existing `watch` extra:
+`semantic = ["lancedb>=0.20", "sentence-transformers>=3.0", "tree-sitter>=0.25", "tree-sitter-language-pack>=0.1"]`,
+installed via `uv sync --extra semantic`. Every heavy import (lancedb, sentence-transformers,
+tree-sitter) is deferred inside functions, never at module top-level — a base install's behavior
+is unchanged without the extra.
+
+**Key architectural decision — model-identity rule:** a LanceDB table only ever holds vectors from
+one embedding model + revision at a time. If the configured model changes, the old table's vectors
+are never reused — every chunk is fully re-embedded. At query time, `semanticSearch` always embeds
+the query using the model identity recorded in the table (not whatever's currently configured),
+and includes a `"warning"` field in the result if the two differ, nudging a reindex. This is what
+prevents silently mixing incompatible embedding spaces.
+
+New unit tests: `test_chunker.py`, `test_embeddings.py`, `test_semantic.py`. One new integration
+test in `test_index_cli.py` runs the full real pipeline with a small real model
+(`sentence-transformers/all-MiniLM-L6-v2`) to keep integration-test runtime reasonable — the
+production default is still `BAAI/bge-m3`.
 
 ---
 
@@ -250,7 +295,10 @@ If you want to add features or integrate deeper:
 
 ### Adding a New MCP Tool
 
-1. Implement query logic in `query.py` or `graph.py`
+1. Implement query logic in `query.py` or `graph.py` — or, for an engine backed by its own
+   storage layer (a second real example of this pattern, alongside Graph/`registry.db`), follow
+   `semantic.py`'s shape: own storage (LanceDB table), an indexing entry point called from
+   `index_cli.py`'s pipeline, and a query entry point called from `server.py`
 2. Add tool function in `server.py` with uniform error handling
 3. Write tests in `test_server_tools.py`
 4. Document the tool signature in README

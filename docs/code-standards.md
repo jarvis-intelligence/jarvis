@@ -157,7 +157,30 @@ def goToDefinition(repo: str, path: str, line: int, character: int):
 
 ---
 
-### 8. Single-Tenant Hardcoding
+### 8. Optional Dependency Extras
+
+**Pattern:** Heavier, optional capabilities are gated behind `pyproject.toml` extras
+(`[project.optional-dependencies]`) rather than always-required dependencies. Two extras exist
+today:
+- `watch = ["watchdog>=4.0"]` — needed for `codeintel watch`
+- `semantic = ["lancedb>=0.20", "sentence-transformers>=3.0", "tree-sitter>=0.25", "tree-sitter-language-pack>=0.1"]` — needed for `semanticSearch`
+
+**Why:**
+- A base `uv sync` install stays small and has no ML/native-binding dependencies
+- Every import of an extra's packages is deferred inside the function that needs it, never at
+  module top-level — so a base install can still import every module in `src/codeintel/`
+  without the extra installed
+- Missing an extra fails narrowly and legibly at the point of use (e.g. `semantic.py` raises
+  `SemanticExtraMissingError`, which `index_cli.py`'s semantic stage catches and skips with a
+  one-line hint) rather than crashing the whole CLI or server at import time
+
+**Convention:** Install with `uv sync --extra <name>`. New optional capabilities should follow
+this same shape: add the extra, defer its imports, and fail with a specific, catchable exception
+when it's missing.
+
+---
+
+### 9. Single-Tenant Hardcoding
 
 **Pattern:** `PROJECT = "_"` and `BRANCH = "_"` are pinned constants in `config.py`; the vendored `IndexConnectionCache` keys on `(project, repo, branch)`, but codeintel uses only `repo`.
 
@@ -167,6 +190,26 @@ def goToDefinition(repo: str, path: str, line: int, character: int):
 - Disk path `scip/_/<slug>/_/` is an artifact of the cache's path shape
 
 **Convention:** These constants are intentionally hardcoded and not configurable. Document clearly in config.py docstring if ever tempted to make them dynamic.
+
+---
+
+### 10. Model-Identity-Locked Vector Store
+
+**Pattern:** A `SemanticStore` LanceDB table (`semantic.py`) only ever holds vectors from one
+embedding model + model revision at a time. The model identity is recorded in the table itself
+(`table_identity()`), not inferred from current config.
+
+**Why:**
+- Embedding spaces from different models (or model revisions) are not comparable — mixing them
+  silently would rank results by meaningless distances
+- `index_semantic()` always fully re-embeds every chunk when the configured model changes; the
+  old table's vectors are never reused
+- `semantic_search()` embeds the query using the table's *recorded* model identity, and includes
+  a `"warning"` in results if that differs from the currently configured model — nudging a
+  reindex instead of silently returning wrong-space results
+
+**Convention:** Never compare or merge vectors across table identities. Any change to the default
+embedding model is a data-migration event (full reindex), not a config tweak.
 
 ---
 
@@ -199,6 +242,10 @@ so `typeHierarchy` is empty on real indexes (upstream issue scip-code/scip#464).
 - `repo_slug(name: str) -> str` — normalize user input, reject traversal attacks
 - `scip_range_to_positions(range) -> (line, character)` — convert SCIP to LSP coordinates
 - `should_ignore_path(path) -> bool` — centralized exclusion list
+- `hash_file(data: bytes) -> str` (`chunker.py`) — content hash used for chunk dedup and
+  carry-over-unchanged-files detection
+- `language_for(path: Path) -> str | None` (`chunker.py`) — maps a file extension to its
+  tree-sitter grammar, or `None` to fall back to fixed-window chunking
 
 **Convention:** No "god functions" combining multiple concerns. If a function grows beyond ~50 lines, consider splitting.
 
@@ -224,6 +271,9 @@ so `typeHierarchy` is empty on real indexes (upstream issue scip-code/scip#464).
 Each test file mirrors its source module:
 - `test_query.py` → `query.py`
 - `test_graph.py` → `graph.py`
+- `test_chunker.py` → `chunker.py`
+- `test_embeddings.py` → `embeddings.py`
+- `test_semantic.py` → `semantic.py`
 - etc.
 
 (`models.py` and `__init__.py` are the only modules without a dedicated test file — see Test Coverage below.)

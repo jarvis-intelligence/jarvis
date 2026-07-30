@@ -2,11 +2,12 @@
 
 ## What Is codeintel?
 
-**codeintel** is a personal, local-first code intelligence MCP server that brings semantic code navigation (SCIP-backed) and lexical search (Zoekt-backed) to Claude Code, Cursor, and any MCP client. It runs as a single stdio process — no server, no auth, no network.
+**codeintel** is a personal, local-first code intelligence MCP server that brings structural code navigation (SCIP-backed), lexical search (Zoekt-backed), and natural-language semantic/vector search to Claude Code, Cursor, and any MCP client. It runs as a single stdio process — no server, no auth, no network.
 
 **Core value proposition:**
-- **Semantic navigation** at your fingertips: go-to-definition, find-references, call/type hierarchy, document symbols
+- **Structural navigation** (SCIP) at your fingertips: go-to-definition, find-references, call/type hierarchy, document symbols
 - **Lexical search** with Zoekt: index your repos once, search instantly across all indexed code
+- **Semantic/vector search:** ask in plain English (`semanticSearch`) and get tree-sitter-chunked code ranked by a self-hosted embedding model, fused with lexical hits — distinct from SCIP's structural navigation above
 - **Single-user, local:** read-only runtime, atomic publish guarantees, privacy-by-default
 - **Minimal dependencies:** stdlib sqlite3, plain dataclasses, no ORMs or async framework bloat
 
@@ -26,10 +27,11 @@
 | 2 | MCP stdio server + 5 SCIP nav tools + `getIndexStatus` | ✓ Done |
 | 3 | Indexer CLI (`codeintel index`), registry, embedded Zoekt + `searchCode` | ✓ Done |
 | 4 | `blastRadius` (package dependency graph) + `codeintel watch` (auto-reindex) | ✓ Done |
+| Post-Phase-4 | Semantic/vector search (`semanticSearch`): tree-sitter chunking, self-hosted embeddings, per-repo LanceDB store, fused with Zoekt via reciprocal rank fusion. Gated behind the optional `semantic` extra | ✓ Done |
 
-**Language support:** TypeScript, Python, Java, plus Swift — `.swift` repos are recognized by `detect_language()` and routed to [`scip-swift`](https://github.com/phuongddx/scip-swift), which builds and indexes end-to-end. All 8 nav tools return correct results on real Swift repos: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy` all work. Requires a macOS host (Xcode + iOS SDK) for repos importing Apple-platform frameworks. One language per index; language detection by file-extension plurality.
+**Language support:** TypeScript, Python, Java, plus Swift — `.swift` repos are recognized by `detect_language()` and routed to [`scip-swift`](https://github.com/phuongddx/scip-swift), which builds and indexes end-to-end. All 9 nav tools return correct results on real Swift repos: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy` all work. Requires a macOS host (Xcode + iOS SDK) for repos importing Apple-platform frameworks. One language per index; language detection by file-extension plurality.
 
-**8 MCP tools:** `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `blastRadius`
+**9 MCP tools:** `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius`
 
 ### Out of Scope (Explicitly Not Planned)
 
@@ -58,6 +60,11 @@ Core runtime:
 - `httpx` — Zoekt webserver client
 - `watchdog` (optional, `--extra watch`) — file monitor for `codeintel watch`
 
+Optional, gated behind `--extra semantic` (not required for the base install):
+- `lancedb` — per-repo vector table storage
+- `sentence-transformers` — self-hosted embedding model (`BAAI/bge-m3` by default)
+- `tree-sitter`, `tree-sitter-language-pack` — AST-aware source chunking
+
 External binaries (must be on `PATH`):
 - Language indexers: `scip-typescript`, `scip-python`, `scip-java` (pick per language); `scip-swift` ([phuongddx/scip-swift](https://github.com/phuongddx/scip-swift))
 - SCIP converter: `scip` (uses `scip expt-convert`)
@@ -73,15 +80,16 @@ External binaries (must be on `PATH`):
 ## Database Schema
 
 **Indexing:**
-- `registry.db` — repos table (slug/path/language/commit_sha/last_indexed/status/scheme_override); packages/edges tables (dependency graph)
+- `registry.db` — repos table (slug/path/language/commit_sha/last_indexed/status/scheme_override/semantic_indexed_at); packages/edges tables (dependency graph)
 - Per-repo: `index-<sha>.db` (from `scip expt-convert`) — documents/chunks/global_symbols/mentions/defn_enclosing_ranges
 - Zoekt shards: `.zoekt/` directory (spawned lazily)
+- `~/.codeintel/lancedb/` — one LanceDB vector table per repo (semantic search), gated behind the `semantic` extra
 
 **Current pointer:** Small `current` file per repo, atomically updated on successful publish.
 
 ## Success Criteria (All Met)
 
-- From Claude Code (user-scope MCP), on real TypeScript and Python repos: all 8 tools return correct results; nav results hand-verified on known symbols ✓
+- From Claude Code (user-scope MCP), on real TypeScript and Python repos: all 9 tools return correct results; nav results hand-verified on known symbols ✓
 - `codeintel index <repo>` end-to-end: detect language → run language indexer → `scip expt-convert` → zoekt-index → atomic pointer swap → registry update ✓
 - `getIndexStatus` correctly flags stale after new commits; reindex has zero query downtime ✓
 - Test suite: all phases gate on `uv run pytest` green (12 test modules, 1-1 map to src modules except `__init__.py`/`models.py`, plus fixtures with real SCIP/Zoekt blobs — 17 files total under `tests/`) ✓
