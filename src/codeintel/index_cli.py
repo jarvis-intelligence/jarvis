@@ -20,11 +20,15 @@ import time
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from codeintel import config
 from codeintel.graph import GraphStore, populate_graph_for_repo
 from codeintel.registry import Registry
 from codeintel.watch import Debouncer, should_ignore_path
+
+if TYPE_CHECKING:
+    from codeintel.semantic import SemanticIndexReport
 
 _LANGUAGE_INDEXERS: dict[str, tuple[str, list[str]]] = {
     ".ts": ("typescript", ["scip-typescript", "index"]),
@@ -229,7 +233,7 @@ def _resolve_semantic_include(
     return existing.semantic_include if existing is not None else ()
 
 
-def _print_semantic_report(report) -> None:
+def _print_semantic_report(report: "SemanticIndexReport") -> None:
     """Index-time semantic summary. Everything goes to stderr, consistent
     with the other semantic notices, so stdout stays just `indexed <slug>`
     for scripting."""
@@ -264,6 +268,7 @@ def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
     try:
         report = semantic.index_semantic(repo_path, slug, root=root,
                                          include_prefixes=include_prefixes)
+        _print_semantic_report(report)
     except SemanticExtraMissingError as exc:
         print(f"semantic indexing skipped — {exc}", file=sys.stderr)
         return False
@@ -273,7 +278,6 @@ def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
             file=sys.stderr,
         )
         return False
-    _print_semantic_report(report)
     return True
 
 

@@ -20,12 +20,12 @@ uv run pytest -m "not integration"   # unit only — no external binaries requir
 uv run pytest -m integration         # integration only — runs real scip-python/scip/zoekt-index
 uv run pytest tests/test_query.py::test_go_to_definition_returns_location   # single test
 
-uv run codeintel index /path/to/repo [--slug name] [--scheme name]
+uv run codeintel index /path/to/repo [--slug name] [--scheme name] [--semantic-include path]
 uv run codeintel list
 uv run codeintel status <slug>
 uv run codeintel reindex <slug>
 uv run codeintel forget <slug>
-uv run codeintel watch /path/to/repo [--debounce 5] [--scheme name]   # foreground, not a daemon
+uv run codeintel watch /path/to/repo [--debounce 5] [--scheme name] [--semantic-include path]   # foreground, not a daemon
 
 uv run codeintel-server              # MCP stdio entry point
 claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run codeintel-server

@@ -135,6 +135,19 @@ test in `test_index_cli.py` runs the full real pipeline with a small real model
 (`sentence-transformers/all-MiniLM-L6-v2`) to keep integration-test runtime reasonable — the
 production default is still `BAAI/bge-m3`.
 
+### Post-Phase-Semantic: Pre-Indexing Admission Filter (Landed, July 30)
+
+`chunker.py`'s `skip_reason()` now filters generated/minified files out of the semantic index
+before embedding — a generated-banner scan (`GENERATED_BANNERS`, built via string concatenation
+so `chunker.py` itself doesn't match its own filter) plus an overlong-line check catches files
+like `scip_pb2.py` that are pure noise once embedded, while staying lexically searchable through
+Zoekt.
+
+New features:
+- `--semantic-include` CLI flag (repeatable) on `codeintel index` — force-include a path prefix the generated-file filter would otherwise skip
+- `semantic_include` column in registry.db — persists the force-include prefixes across `reindex` and `watch` runs; `_resolve_semantic_include()` manages the None-preserves / explicit-overwrites semantics (same contract as `_resolve_scheme`)
+- `_ensure_semantic_include_column()` idempotent migration — adds the new column to existing databases
+
 ---
 
 ## Explicitly Out of Scope (Not Planned)

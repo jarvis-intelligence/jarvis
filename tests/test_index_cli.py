@@ -522,7 +522,8 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
 
     registry = Registry(config.data_dir() / "registry.db")
-    registry.upsert("my-repo", "/repos/my-repo", "swift", "abc123", "indexed", scheme_override="ios_theme_ui")
+    registry.upsert("my-repo", "/repos/my-repo", "swift", "abc123", "indexed", scheme_override="ios_theme_ui",
+                    semantic_include=("src/gen",))
     registry.close()
 
     captured: dict = {}
@@ -531,6 +532,7 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
         captured["path"] = path
         captured["slug"] = slug
         captured["scheme"] = scheme
+        captured["semantic_include"] = semantic_include
         return slug
 
     monkeypatch.setattr(cli, "index_repo", fake_index_repo)
@@ -539,6 +541,10 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
     assert rc == 0
     assert captured["scheme"] == "ios_theme_ui"
     assert str(captured["path"]) == "/repos/my-repo"
+    # _cmd_reindex forwards `list(repo.semantic_include)` to _cmd_index, which
+    # converts it back to a tuple before calling index_repo — so the value
+    # observed here (at the index_repo boundary) is a tuple, not a list.
+    assert captured["semantic_include"] == ("src/gen",)
 
 
 def test_forget_removes_the_zoekt_shard(tmp_path: Path, monkeypatch, capsys):

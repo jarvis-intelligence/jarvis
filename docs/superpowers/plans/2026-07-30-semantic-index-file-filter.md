@@ -44,7 +44,7 @@ Tasks 1, 2, and 4 are independent leaves and may be done in any order.
 - Consumes: nothing (pure function, no new imports)
 - Produces: `skip_reason(rel_path: str, source: str, include_prefixes: tuple[str, ...] = ()) -> str | None` — returns `None` to admit a file, else a short trigger tag like `"banner:do not edit"` or `"long-line:12224"`. Also exports module constants `GENERATED_BANNERS`, `BANNER_SCAN_CHARS`, `MAX_LINE_CHARS`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the end of `tests/test_chunker.py`. Note the existing file already imports from `codeintel.chunker` at line 7 — add `skip_reason` to that import list.
 
@@ -96,12 +96,12 @@ def test_force_include_respects_directory_boundary():
     assert skip_reason("src/generated/a.py", source, ("src/gen",)) == "banner:@generated"
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_chunker.py -k skip_reason -v`
 Expected: FAIL — `ImportError: cannot import name 'skip_reason' from 'codeintel.chunker'`
 
-- [ ] **Step 3: Add the constants**
+- [x] **Step 3: Add the constants**
 
 In `src/codeintel/chunker.py`, immediately after `MAX_IMPORT_LINES = 10` (line 28):
 
@@ -116,7 +116,7 @@ BANNER_SCAN_CHARS = 2048
 MAX_LINE_CHARS = 5000
 ```
 
-- [ ] **Step 4: Add the predicate**
+- [x] **Step 4: Add the predicate**
 
 In `src/codeintel/chunker.py`, immediately after `language_for()` (which ends at line 77):
 
@@ -148,16 +148,16 @@ def skip_reason(rel_path: str, source: str,
     return None
 ```
 
-- [ ] **Step 5: Add `skip_reason` to the test file's import**
+- [x] **Step 5: Add `skip_reason` to the test file's import**
 
 In `tests/test_chunker.py`, line 7, add `skip_reason` to the existing import from `codeintel.chunker`.
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [x] **Step 6: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_chunker.py -v`
 Expected: PASS — the 8 new tests plus all 12 pre-existing ones.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/codeintel/chunker.py tests/test_chunker.py
@@ -176,7 +176,7 @@ git commit -m "feat(semantic): add generated-file admission predicate"
 - Consumes: nothing from other tasks. Uses existing `EmbeddingModel._load()` and module constant `MAX_SEQ_LENGTH` (currently 1024, defined at line 21).
 - Produces: `EmbeddingModel.count_oversized(texts: list[str]) -> int` — how many texts the model will silently truncate at encode time. Returns `0` for empty input **without loading the model**.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the end of `tests/test_embeddings.py`:
 
@@ -213,12 +213,12 @@ def test_count_oversized_counts_texts_past_max_seq_length(monkeypatch):
     assert model.count_oversized([short, long_text, long_text]) == 2
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_embeddings.py -k count_oversized -v`
 Expected: FAIL with `AttributeError: 'EmbeddingModel' object has no attribute 'count_oversized'`
 
-- [ ] **Step 3: Implement the method**
+- [x] **Step 3: Implement the method**
 
 In `src/codeintel/embeddings.py`, add to `EmbeddingModel` right after `embed_texts()` (ends line 64), before `embed_query()`:
 
@@ -243,12 +243,12 @@ In `src/codeintel/embeddings.py`, add to `EmbeddingModel` right after `embed_tex
         return oversized
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_embeddings.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/codeintel/embeddings.py tests/test_embeddings.py
@@ -270,7 +270,7 @@ git commit -m "feat(semantic): count chunks the embedding model will truncate"
   - `SemanticIndexReport(rows: int, files: int, skipped: tuple[SkippedFile, ...] = (), truncated: int | None = None)` — frozen dataclass. `truncated=None` means "could not be measured".
   - `index_semantic(repo_path, slug, *, root=None, model=None, include_prefixes: tuple[str, ...] = ()) -> SemanticIndexReport` — **return type changed** from `int`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_semantic.py`. The file already defines `FakeEmbedder` (line 50), `FUNC` (line 67), `_write_repo` (line 70), and the `lancedb_available` fixture (line 78) — reuse them.
 
@@ -362,12 +362,12 @@ Also update the two existing tests that bind the return value:
 - Line 96-97: `count = index_semantic(...)` / `assert count == 2` → `report = index_semantic(...)` / `assert report.rows == 2`
 - Line 146-147: `count = index_semantic(...)` / `assert count == 2 and len(embedder.embedded) == 1` → `report = index_semantic(...)` / `assert report.rows == 2 and len(embedder.embedded) == 1`
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_semantic.py -v`
 Expected: FAIL — `ImportError: cannot import name 'SemanticIndexReport'`, and the updated tests fail with `AttributeError: 'int' object has no attribute 'rows'`
 
-- [ ] **Step 3: Add the import**
+- [x] **Step 3: Add the import**
 
 In `src/codeintel/semantic.py`, line 15, add `skip_reason` to the existing chunker import:
 
@@ -377,7 +377,7 @@ from codeintel.chunker import (
 )
 ```
 
-- [ ] **Step 4: Add the report dataclasses**
+- [x] **Step 4: Add the report dataclasses**
 
 In `src/codeintel/semantic.py`, after the `FusedHit` dataclass (ends line 38):
 
@@ -396,7 +396,7 @@ class SemanticIndexReport:
     truncated: int | None = None               # None = could not be measured
 ```
 
-- [ ] **Step 5: Rewrite `index_semantic`**
+- [x] **Step 5: Rewrite `index_semantic`**
 
 Replace the body of `index_semantic` (lines 150-191) with:
 
@@ -466,12 +466,12 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
                                skipped=tuple(skipped), truncated=truncated)
 ```
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [x] **Step 6: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_semantic.py -v`
 Expected: PASS — all pre-existing tests plus the 4 new ones.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/codeintel/semantic.py tests/test_semantic.py
@@ -494,7 +494,7 @@ git commit -m "feat(semantic): skip generated files before the carry-forward che
 
 Storage contract: newline-joined TEXT in SQLite, `NULL` when empty. The registry owns serialization; every caller deals in tuples.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the end of `tests/test_registry.py`:
 
@@ -551,12 +551,12 @@ def test_semantic_include_column_added_to_preexisting_db(tmp_path):
         registry.close()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_registry.py -k semantic_include -v`
 Expected: FAIL with `TypeError: upsert() got an unexpected keyword argument 'semantic_include'`
 
-- [ ] **Step 3: Add the column to the schema**
+- [x] **Step 3: Add the column to the schema**
 
 In `src/codeintel/registry.py`, change `_SCHEMA` (lines 18-29) so the `repos` table ends with the new column:
 
@@ -576,7 +576,7 @@ CREATE TABLE IF NOT EXISTS repos (
 """
 ```
 
-- [ ] **Step 4: Add the migration function**
+- [x] **Step 4: Add the migration function**
 
 In `src/codeintel/registry.py`, after `_ensure_semantic_indexed_at_column` (ends line 65):
 
@@ -596,7 +596,7 @@ def _ensure_semantic_include_column(conn: sqlite3.Connection) -> None:
             raise
 ```
 
-- [ ] **Step 5: Add the serialization helpers and dataclass field**
+- [x] **Step 5: Add the serialization helpers and dataclass field**
 
 In `src/codeintel/registry.py`, add above `RegisteredRepo` (line 68):
 
@@ -618,7 +618,7 @@ Then add the field to `RegisteredRepo` (after `semantic_indexed_at`, line 77):
     semantic_include: tuple[str, ...] = ()
 ```
 
-- [ ] **Step 6: Update `_row_to_repo` to unpack nine columns**
+- [x] **Step 6: Update `_row_to_repo` to unpack nine columns**
 
 Replace `_row_to_repo` (lines 80-91):
 
@@ -639,7 +639,7 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
     )
 ```
 
-- [ ] **Step 7: Register the migration**
+- [x] **Step 7: Register the migration**
 
 In `Registry.__init__`, after line 106 (`_ensure_semantic_indexed_at_column(self._conn)`):
 
@@ -647,7 +647,7 @@ In `Registry.__init__`, after line 106 (`_ensure_semantic_indexed_at_column(self
         _ensure_semantic_include_column(self._conn)
 ```
 
-- [ ] **Step 8: Update `upsert`**
+- [x] **Step 8: Update `upsert`**
 
 Replace `upsert` (lines 108-132):
 
@@ -683,7 +683,7 @@ Replace `upsert` (lines 108-132):
         )
 ```
 
-- [ ] **Step 9: Update both SELECT column lists**
+- [x] **Step 9: Update both SELECT column lists**
 
 In `get()` (line 150) and `list()` (line 158), append `, semantic_include` to the selected columns:
 
@@ -692,12 +692,12 @@ In `get()` (line 150) and `list()` (line 158), append `, semantic_include` to th
             "semantic_indexed_at, semantic_include "
 ```
 
-- [ ] **Step 10: Run tests to verify they pass**
+- [x] **Step 10: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_registry.py -v`
 Expected: PASS
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add src/codeintel/registry.py tests/test_registry.py
@@ -716,7 +716,7 @@ git commit -m "feat(registry): persist per-repo semantic force-include prefixes"
 - Consumes: `SemanticIndexReport` from Task 3; `RegisteredRepo.semantic_include` and `Registry.upsert(semantic_include=...)` from Task 4.
 - Produces: `index_repo(..., semantic_include: tuple[str, ...] | None = None)` — `None` means "reuse the persisted value", matching `_resolve_scheme`'s contract.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the end of `tests/test_index_cli.py`:
 
@@ -785,12 +785,12 @@ Also update the existing stub at `tests/test_index_cli.py:609`, which currently 
                         lambda *a, **k: SemanticIndexReport(rows=5, files=1))
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_index_cli.py -k "semantic_include or semantic_report" -v`
 Expected: FAIL with `ImportError: cannot import name '_print_semantic_report'`
 
-- [ ] **Step 3: Add the resolver and report printer**
+- [x] **Step 3: Add the resolver and report printer**
 
 In `src/codeintel/index_cli.py`, immediately after `_resolve_scheme` (ends line 217):
 
@@ -824,7 +824,7 @@ def _print_semantic_report(report) -> None:
         )
 ```
 
-- [ ] **Step 4: Wire the report into `_run_semantic_stage`**
+- [x] **Step 4: Wire the report into `_run_semantic_stage`**
 
 Replace `_run_semantic_stage` (lines 220-245):
 
@@ -860,7 +860,7 @@ def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
     return True
 ```
 
-- [ ] **Step 5: Thread the value through `index_repo`**
+- [x] **Step 5: Thread the value through `index_repo`**
 
 In `src/codeintel/index_cli.py`:
 
@@ -899,7 +899,7 @@ Change the final upsert (line 325) to:
                         scheme_override=scheme, semantic_include=semantic_include)
 ```
 
-- [ ] **Step 6: Update the command handlers**
+- [x] **Step 6: Update the command handlers**
 
 Replace `_cmd_index` (lines 344-351):
 
@@ -929,7 +929,7 @@ Replace the final line of `_cmd_reindex` (line 399):
 
 `_cmd_watch` needs **no change** — it calls `index_repo` without `semantic_include`, so the default `None` resolves from the registry.
 
-- [ ] **Step 7: Add the CLI flag**
+- [x] **Step 7: Add the CLI flag**
 
 In `src/codeintel/index_cli.py`, after the existing `index_parser` arguments (the `--scheme` block ending at line 526):
 
@@ -943,12 +943,12 @@ In `src/codeintel/index_cli.py`, after the existing `index_parser` arguments (th
     )
 ```
 
-- [ ] **Step 8: Run the full unit suite**
+- [x] **Step 8: Run the full unit suite**
 
 Run: `uv run pytest -m "not integration" -v`
 Expected: PASS — everything, including the pre-existing `test_index_cli.py` semantic tests.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/codeintel/index_cli.py tests/test_index_cli.py
@@ -968,7 +968,7 @@ git commit -m "feat(cli): add --semantic-include and index-time skip reporting"
 
 The spec's acceptance criteria are 120 → 95 chunks and 25 → 0 no-symbol chunks on `src/`. Only the durable half is committed as a test — asserting the exact number 95 would break on any future source edit unrelated to this feature. The exact counts are verified once, manually, in Step 3.
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 Add to the end of `tests/test_chunker.py`:
 
@@ -988,12 +988,12 @@ def test_own_generated_protobuf_is_skipped():
     assert any(path.endswith("scip_pb2.py") for path in skipped)
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `uv run pytest tests/test_chunker.py -m integration -v`
 Expected: PASS (it exercises only pure functions — no external binaries needed).
 
-- [ ] **Step 3: Verify the exact acceptance numbers manually**
+- [x] **Step 3: Verify the exact acceptance numbers manually**
 
 Run this census — it is the same script that produced the spec's baseline of 120 chunks / 25 no-symbol chunks:
 
@@ -1018,7 +1018,7 @@ Expected: `chunks=95 no_symbol=0 files_skipped=1`
 
 If either number differs, the filter is wrong — stop and diagnose before continuing.
 
-- [ ] **Step 4: Record the measured result in the spec**
+- [x] **Step 4: Record the measured result in the spec**
 
 In `docs/superpowers/specs/2026-07-30-semantic-index-file-filter-design.md`, under "## Acceptance criteria", append a line below the table:
 
@@ -1026,12 +1026,12 @@ In `docs/superpowers/specs/2026-07-30-semantic-index-file-filter-design.md`, und
 **Verified 2026-07-30:** `chunks=95 no_symbol=0 files_skipped=1` — criteria met.
 ```
 
-- [ ] **Step 5: Run the complete suite**
+- [x] **Step 5: Run the complete suite**
 
 Run: `uv run pytest -v`
 Expected: PASS. Integration tests requiring `scip-python`/`scip`/`zoekt-index` skip cleanly if those binaries are absent — that is expected, not a failure.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tests/test_chunker.py docs/superpowers/specs/2026-07-30-semantic-index-file-filter-design.md

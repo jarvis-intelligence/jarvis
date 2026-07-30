@@ -245,3 +245,4 @@ def test_own_generated_protobuf_is_skipped():
         if skip_reason(rel_path, source) is not None:
             skipped.append(rel_path)
     assert any(path.endswith("scip_pb2.py") for path in skipped)
+    assert not any(path.endswith("chunker.py") for path in skipped)
