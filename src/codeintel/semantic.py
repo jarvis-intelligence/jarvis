@@ -13,8 +13,8 @@ from pathlib import Path
 
 from codeintel import config
 from codeintel.chunker import (
-    CONTENT_FORMAT, Chunk, chunk_file, hash_file, iter_source_files, language_for,
-    oversized_file_reason, skip_reason,
+    CONTENT_FORMAT, Chunk, _force_included, chunk_file, hash_file, iter_source_files,
+    language_for, oversized_file_reason, skip_reason,
 )
 from codeintel.embeddings import EmbeddingModel, default_model
 from codeintel.search import ZoektHit, ZoektUnavailableError, search_zoekt
@@ -216,11 +216,16 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
     pending: list[Chunk] = []
     skipped: list[SkippedFile] = []
     admitted = 0
-    for abs_path, rel_path in iter_source_files(repo_path):
-        reason = oversized_file_reason(abs_path.stat().st_size)
-        if reason is not None:
-            skipped.append(SkippedFile(rel_path, reason))
-            continue
+    for abs_path, rel_path in iter_source_files(repo_path, include_prefixes):
+        # Force-include always admits -- it must override the size cap the
+        # same way it overrides the banner/long-line check below, so an
+        # operator can rescue a huge generated file just as they rescue a
+        # gitignored one.
+        if not _force_included(rel_path, include_prefixes):
+            reason = oversized_file_reason(abs_path.stat().st_size)
+            if reason is not None:
+                skipped.append(SkippedFile(rel_path, reason))
+                continue
         data = abs_path.read_bytes()
         source = data.decode("utf-8", errors="replace")
         # Admission runs BEFORE the carry-forward hash check on purpose: a
@@ -296,10 +301,12 @@ def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None
         # feature exists to prevent.
         warning = (f"configured embedding model {configured.model_name}@"
                    f"{configured.model_revision} (prefixes "
-                   f"{configured.query_prefix!r}/{configured.doc_prefix!r}) differs from "
-                   f"the index's {identity.model_name}@{identity.model_revision} "
-                   f"(prefixes {identity.query_prefix!r}/{identity.doc_prefix!r}); "
-                   f"queried with the index's — run codeintel reindex {slug} to migrate")
+                   f"{configured.query_prefix!r}/{configured.doc_prefix!r}, content format "
+                   f"{configured.content_format}) differs from the index's "
+                   f"{identity.model_name}@{identity.model_revision} (prefixes "
+                   f"{identity.query_prefix!r}/{identity.doc_prefix!r}, content format "
+                   f"{identity.content_format}); queried with the index's — "
+                   f"run codeintel reindex {slug} to migrate")
         model = EmbeddingModel(model_name=identity.model_name,
                                revision=identity.model_revision,
                                query_prefix=identity.query_prefix,

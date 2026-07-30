@@ -119,7 +119,9 @@ def test_count_oversized_counts_texts_past_max_seq_length(monkeypatch):
     ("intfloat/multilingual-e5-large", ("query: ", "passage: ")),
     ("nomic-ai/nomic-embed-text-v1.5", ("search_query: ", "search_document: ")),
 ])
-def test_prefixes_resolve_from_model_map(model_name, expected):
+def test_prefixes_resolve_from_model_map(model_name, expected, monkeypatch):
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", raising=False)
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_DOC_PREFIX", raising=False)
     from codeintel.embeddings import EmbeddingModel
     assert EmbeddingModel(model_name=model_name).prefixes() == expected
 
@@ -131,7 +133,9 @@ def test_env_override_beats_the_map(monkeypatch):
     assert EmbeddingModel(model_name="intfloat/multilingual-e5-large").prefixes() == ("Q> ", "D> ")
 
 
-def test_unlisted_model_warns_and_uses_no_prefix():
+def test_unlisted_model_warns_and_uses_no_prefix(monkeypatch):
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", raising=False)
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_DOC_PREFIX", raising=False)
     from codeintel.embeddings import EmbeddingModel
     model = EmbeddingModel(model_name="some-vendor/unknown-model")
     assert model.prefixes() == ("", "")
@@ -139,7 +143,9 @@ def test_unlisted_model_warns_and_uses_no_prefix():
     assert warning is not None and "CODEINTEL_EMBEDDING_QUERY_PREFIX" in warning
 
 
-def test_listed_model_produces_no_warning():
+def test_listed_model_produces_no_warning(monkeypatch):
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", raising=False)
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_DOC_PREFIX", raising=False)
     from codeintel.embeddings import EmbeddingModel
     assert EmbeddingModel(model_name="BAAI/bge-m3").prefix_warning() is None
 
@@ -147,6 +153,8 @@ def test_listed_model_produces_no_warning():
 def test_query_gets_query_prefix_not_doc_prefix(monkeypatch):
     """embed_query must not inherit the document prefix by delegating to
     embed_texts -- that would be the exact bug this feature prevents."""
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", raising=False)
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_DOC_PREFIX", raising=False)
     from codeintel.embeddings import EmbeddingModel
     seen: list[str] = []
 

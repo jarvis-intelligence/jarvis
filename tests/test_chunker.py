@@ -344,6 +344,45 @@ def test_gitignored_returns_empty_set_for_non_git_dir(tmp_path):
     assert gitignored(tmp_path, ["a.py", "b.py"]) == set()
 
 
+def test_gitignored_degrades_to_nothing_ignored_when_git_is_absent(tmp_path, monkeypatch):
+    import subprocess
+    from codeintel.chunker import gitignored
+
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert gitignored(tmp_path, ["a.py"]) == set()
+
+
+@pytest.mark.integration
+def test_force_include_rescues_gitignored_file(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("thirdparty/\n")
+    (tmp_path / "thirdparty").mkdir()
+    (tmp_path / "thirdparty" / "g.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "keep.py").write_text("def g():\n    return 2\n")
+    files = iter_source_files(tmp_path, include_prefixes=("thirdparty/g.py",))
+    rels = {rel for _, rel in files}
+    assert "thirdparty/g.py" in rels and "keep.py" in rels
+
+
+def test_oversized_class_with_no_methods_is_windowed():
+    """A constants-only class (no methods) has no natural sub-boundary either
+    -- it must be windowed like an oversized top-level def, not shipped whole."""
+    from codeintel.chunker import MAX_TOKENS, _tokens
+    body = "\n".join(
+        f'    FIELD_{i} = "' + "p" * 120 + '"' for i in range(60)
+    )
+    source = f"class Constants:\n{body}\n"
+    chunks = chunk_file("constants.py", source, "fh", "python")
+    assert len(chunks) > 1
+    assert all(_tokens(c.content) <= MAX_TOKENS for c in chunks)
+    assert all(c.symbol_name == "Constants" and c.parent_name == "Constants"
+              for c in chunks)
+
+
 @pytest.mark.integration
 def test_gitignored_reads_real_gitignore(tmp_path):
     import subprocess

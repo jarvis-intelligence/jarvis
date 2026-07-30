@@ -202,6 +202,7 @@ def test_query_model_mismatch_uses_table_model_and_warns(tmp_path, lancedb_avail
     configured = FakeEmbedder(name="other-model", revision="rev9")
     result = semantic.semantic_search("myrepo", "query", root=data, model=configured)
     assert "reindex" in result["warning"]
+    assert "content format" in result["warning"]
     assert configured.embedded == []  # configured model never used for the query
 
 
@@ -250,6 +251,18 @@ def test_oversized_file_is_skipped_with_reason(tmp_path, lancedb_available, monk
     report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
     assert report.rows == 0
     assert all(s.reason.startswith("too-large:") for s in report.skipped)
+
+
+def test_force_include_rescues_oversized_file(tmp_path, lancedb_available, monkeypatch):
+    from codeintel import chunker
+    from codeintel.semantic import SemanticStore, index_semantic
+    repo = _write_repo(tmp_path)
+    monkeypatch.setattr(chunker, "MAX_FILE_BYTES", 10)
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder(),
+                            include_prefixes=("mod_0.py",))
+    assert not any(s.file_path == "mod_0.py" for s in report.skipped)
+    rows = SemanticStore((tmp_path / "data") / "lancedb").rows_by_path("myrepo")
+    assert "mod_0.py" in rows
 
 
 def test_stale_generated_rows_are_purged_on_reindex(tmp_path, lancedb_available, monkeypatch):

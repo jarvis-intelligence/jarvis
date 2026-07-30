@@ -162,7 +162,11 @@ def gitignored(repo_path: Path, rel_paths: list[str]) -> set[str]:
     return {line for line in result.stdout.splitlines() if line}
 
 
-def iter_source_files(repo_path: Path) -> list[tuple[Path, str]]:
+def iter_source_files(repo_path: Path,
+                      include_prefixes: tuple[str, ...] = ()) -> list[tuple[Path, str]]:
+    """`include_prefixes` rescues a gitignored path the same way it rescues a
+    banner/long-line match in skip_reason() -- --semantic-include is a single
+    escape hatch across every admission check, not just some of them."""
     files: list[tuple[Path, str]] = []
     for path in sorted(repo_path.rglob("*")):
         if any(part in IGNORED_DIRS for part in path.parts):
@@ -170,7 +174,8 @@ def iter_source_files(repo_path: Path) -> list[tuple[Path, str]]:
         if path.is_file() and path.suffix in LANGUAGES:
             files.append((path, path.relative_to(repo_path).as_posix()))
     ignored = gitignored(repo_path, [rel for _, rel in files])
-    return [(path, rel) for path, rel in files if rel not in ignored]
+    return [(path, rel) for path, rel in files
+            if rel not in ignored or _force_included(rel, include_prefixes)]
 
 
 def _make_chunk(rel_path: str, language: str, file_hash: str, content: str,
@@ -305,6 +310,16 @@ def _split_class(node, source: str, rel_path: str, language: str,
                if n.type in _DEF_NODE_TYPES[language] and n.type not in _CLASS_NODE_TYPES]
     if not methods:
         text = source[node.start_byte:node.end_byte]
+        if _tokens(text) > _EFFECTIVE_MAX_TOKENS:
+            # A methods-less class (e.g. constants-only) has no natural
+            # sub-boundary either -- window it the same way an oversized
+            # top-level def is windowed, so no chunk ships over the cap.
+            base_line = node.start_point[0] + 1
+            return [
+                _make_chunk(rel_path, language, file_hash, piece, start, end,
+                            class_name, class_name)
+                for piece, start, end in _window_lines(text.splitlines(), base_line)
+            ]
         return [_make_chunk(rel_path, language, file_hash, text,
                             node.start_point[0] + 1, node.end_point[0] + 1, class_name)]
     chunks: list[Chunk] = []
