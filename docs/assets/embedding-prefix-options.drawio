@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="30.4.1">
+  <diagram name="Embedding prefix options">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageWidth="1520" pageHeight="880" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Gap B — where does the query/document prefix come from?" style="text;html=1;align=left;verticalAlign=middle;fontSize=20;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="60" y="10" width="900" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="prob" value="TODAY — embed_query() / embed_texts() apply no prefix, regardless of which model is loaded" style="swimlane;startSize=34;html=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;fontSize=13;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="60" y="60" width="1400" height="210" as="geometry" />
+        </mxCell>
+
+        <mxCell id="a1" value="model unset&#xa;→ bge-m3 (default)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="prob">
+          <mxGeometry x="20" y="50" width="230" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="embed_query(&quot;auth flow&quot;)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="prob">
+          <mxGeometry x="300" y="50" width="220" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" value="no prefix added" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="prob">
+          <mxGeometry x="570" y="50" width="180" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="a4" value="✅ correct — bge-m3&#xa;genuinely needs none" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;fontColor=#2d5016;" vertex="1" parent="prob">
+          <mxGeometry x="800" y="50" width="250" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="b1" value="CODEINTEL_EMBEDDING_MODEL&#xa;= multilingual-e5-large" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="prob">
+          <mxGeometry x="20" y="130" width="230" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="b2" value="embed_query(&quot;auth flow&quot;)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=11;" vertex="1" parent="prob">
+          <mxGeometry x="300" y="130" width="220" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="b3" value="no prefix added&#xa;(needed &quot;query: &quot;)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=11;fontColor=#b85450;" vertex="1" parent="prob">
+          <mxGeometry x="570" y="130" width="180" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="b4" value="⚠️ SILENTLY DEGRADED&#xa;no error, worse results" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;fontColor=#8b2c28;" vertex="1" parent="prob">
+          <mxGeometry x="800" y="130" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="bgap" value="← THIS is the gap" style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontStyle=1;fontColor=#b85450;" vertex="1" parent="prob">
+          <mxGeometry x="1070" y="130" width="220" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#82b366;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="prob" source="a1" target="a2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#82b366;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="prob" source="a2" target="a3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#82b366;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="prob" source="a3" target="a4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#b85450;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="prob" source="b1" target="b2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#b85450;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="prob" source="b2" target="b3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#b85450;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="prob" source="b3" target="b4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hA" value="OPTION A&#xa;map + env override" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;fontColor=#2d5016;" vertex="1" parent="1">
+          <mxGeometry x="280" y="310" width="380" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="hB" value="OPTION B&#xa;map only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;fontColor=#1a3d66;" vertex="1" parent="1">
+          <mxGeometry x="680" y="310" width="380" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="hC" value="OPTION C&#xa;env vars only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;fontStyle=1;fontColor=#7f6000;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="310" width="380" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r1l" value="Prefix comes from" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="380" width="200" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r1a" value="Built-in map, else env var,&#xa;else nothing" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="280" y="380" width="380" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r1b" value="Built-in map only" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="380" width="380" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r1c" value="CODEINTEL_EMBEDDING_QUERY_PREFIX&#xa;CODEINTEL_EMBEDDING_DOC_PREFIX" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="380" width="380" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r2l" value="Swap to e5&#xa;(a listed model)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="480" width="200" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r2a" value="✅ just works&#xa;&quot;query: &quot; applied automatically" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="280" y="480" width="380" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r2b" value="✅ just works&#xa;&quot;query: &quot; applied automatically" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="480" width="380" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r2c" value="⚠️ still silently wrong&#xa;unless you knew to set the env vars" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="480" width="380" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r3l" value="Swap to an&#xa;unlisted model" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="580" width="200" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r3a" value="⚠️ warns, and the warning&#xa;tells you which env var to set&#xa;→ visible AND fixable" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="280" y="580" width="380" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r3b" value="⚠️ warns, but you cannot fix it&#xa;without editing source&#xa;→ visible, NOT fixable" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="580" width="380" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="r3c" value="⚠️ silent&#xa;→ same gap we started with" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="580" width="380" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r4l" value="Upkeep cost" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;fontStyle=1;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="680" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="r4a" value="Map goes stale as models ship,&#xa;but env var is the escape hatch" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="280" y="680" width="380" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="r4b" value="Map goes stale, and staleness&#xa;is unrecoverable without a code change" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="680" width="380" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="r4c" value="Zero upkeep&#xa;nothing to keep current" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="680" width="380" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="foot" value="If bge-m3 is permanent and you never intend to swap models, this whole gap is theoretical — &quot;do nothing&quot; is a legitimate fourth answer." style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#666666;dashed=1;fontSize=12;fontColor=#333333;align=left;spacingLeft=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="785" width="1400" height="50" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
