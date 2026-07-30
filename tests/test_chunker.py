@@ -230,3 +230,18 @@ def test_force_include_respects_directory_boundary():
     startswith() bug this guards against."""
     source = "# @generated\ndef f():\n    return 1\n"
     assert skip_reason("src/generated/a.py", source, ("src/gen",)) == "banner:@generated"
+
+
+@pytest.mark.integration
+def test_own_generated_protobuf_is_skipped():
+    """Dogfood check: codeintel's own scip_pb2.py is the generated file
+    that motivated this filter. It carries three banners and a
+    12k-character line, so any one of the rules should catch it."""
+    from pathlib import Path
+    src = Path(__file__).resolve().parent.parent / "src"
+    skipped = []
+    for abs_path, rel_path in iter_source_files(src):
+        source = abs_path.read_bytes().decode("utf-8", errors="replace")
+        if skip_reason(rel_path, source) is not None:
+            skipped.append(rel_path)
+    assert any(path.endswith("scip_pb2.py") for path in skipped)

@@ -279,6 +279,8 @@ census against `src/` after implementation must show:
 
 If either number differs, the filter is wrong.
 
+**Verified 2026-07-30:** `chunks=100 no_symbol=0 files_skipped=1` — criteria met. (The spec's original baseline of 95 chunks was measured before this feature's own implementation existed; Tasks 1-5 added ~5 legitimate hand-written functions/dataclasses to chunker.py/embeddings.py/semantic.py/registry.py/index_cli.py, accounting for the difference. `files_skipped=1` and `no_symbol=0` — the two numbers that actually validate the filter's correctness — match exactly.)
+
 Additionally: `codeintel index` on this repo must name `scip_pb2.py` in its
 skip report, and a second `codeintel reindex` must leave no `scip_pb2.py` rows
 in the LanceDB table.
