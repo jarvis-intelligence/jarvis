@@ -25,6 +25,88 @@ def beta(y):
 '''
 
 
+def test_every_chunk_starts_with_file_header():
+    source = "def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n"
+    chunks = chunk_file("pkg/mod.py", source, "fh", "python")
+    assert chunks
+    for chunk in chunks:
+        assert chunk.content.startswith("# file: pkg/mod.py\n")
+
+
+def test_top_level_def_header_omits_redundant_symbol_line():
+    """A top-level def's own name is already the first line of its code —
+    the header carries the path only."""
+    source = "def alpha():\n    return 1\n"
+    chunk = chunk_file("pkg/mod.py", source, "fh", "python")[0]
+    assert chunk.content.startswith("# file: pkg/mod.py\n\ndef alpha():")
+    assert "# in class:" not in chunk.content
+
+
+def test_split_method_header_carries_parent_class():
+    body = "\n".join(
+        f"    def method_{i}(self):\n        return {i}  # " + "pad " * 120
+        for i in range(8)
+    )
+    source = f"class Big:\n{body}\n"
+    chunks = chunk_file("big.py", source, "fh", "python")
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.content.startswith("# file: big.py\n# in class: Big\n\n")
+        assert chunk.parent_name == "Big"
+
+
+def test_fixed_window_fallback_chunks_get_the_file_header():
+    """An unparseable file falls back to fixed windows — those chunks have no
+    symbol and no parent, so they carry the file line alone."""
+    source = "x = 1\n" * 400
+    chunks = chunk_file("data.py", source, "fh", "python")
+    assert chunks
+    for chunk in chunks:
+        assert chunk.content.startswith("# file: data.py\n\n")
+        assert chunk.symbol_name is None and chunk.parent_name is None
+
+
+def test_header_not_duplicated_after_merge():
+    source = "def a():\n    return 1\n\n\ndef b():\n    return 2\n"
+    for chunk in chunk_file("m.py", source, "fh", "python"):
+        assert chunk.content.count("# file: m.py") == 1
+
+
+def test_chunks_with_different_parents_do_not_merge():
+    """A class's last method sits adjacent to the next top-level function;
+    merging them would stamp `# in class: Big` on code outside Big."""
+    body = "\n".join(
+        f"    def method_{i}(self):\n        return {i}  # " + "pad " * 120
+        for i in range(8)
+    )
+    source = f"class Big:\n{body}\n\n\ndef loose():\n    return 0\n"
+    chunks = chunk_file("mix.py", source, "fh", "python")
+    for chunk in chunks:
+        if chunk.parent_name == "Big":
+            assert "def loose" not in chunk.content
+
+
+def test_no_chunk_exceeds_max_tokens_including_header():
+    """The HEADER_RESERVE_TOKENS allowance must keep header+body under cap."""
+    body = "\n".join(
+        f"    def method_{i}(self):\n        return {i}  # " + "pad " * 200
+        for i in range(6)
+    )
+    source = f"class Wide:\n{body}\n"
+    for chunk in chunk_file("wide.py", source, "fh", "python"):
+        assert len(chunk.content) // 4 <= MAX_TOKENS
+
+
+def test_imports_are_no_longer_prepended():
+    body = "\n".join(
+        f"    def method_{i}(self):\n        return {i}  # " + "pad " * 120
+        for i in range(8)
+    )
+    source = f"import os\nfrom sys import path\n\n\nclass Big:\n{body}\n"
+    for chunk in chunk_file("big.py", source, "fh", "python"):
+        assert "import os" not in chunk.content
+
+
 def test_functions_become_chunks_with_symbol_names():
     chunks = chunk_file("m.py", PY_TWO_FUNCS, "fh", "python")
     names = [c.symbol_name for c in chunks]
@@ -35,7 +117,7 @@ def test_functions_become_chunks_with_symbol_names():
     assert alpha.file_hash == "fh" and alpha.language == "python"
 
 
-def test_oversized_class_splits_into_methods_with_imports_and_class_header():
+def test_oversized_class_splits_into_methods_with_class_header():
     body = "\n".join(
         f"    def method_{i}(self):\n        return {i}  # " + "pad " * 120
         for i in range(8)
@@ -44,7 +126,7 @@ def test_oversized_class_splits_into_methods_with_imports_and_class_header():
     chunks = chunk_file("big.py", source, "fh", "python")
     assert len(chunks) > 1
     for chunk in chunks:
-        assert chunk.content.startswith("import os\nfrom sys import path\nclass Big:")
+        assert chunk.content.startswith("# file: big.py\n# in class: Big\n")
         assert chunk.symbol_name.startswith("method_")
 
 
@@ -110,9 +192,10 @@ def test_oversized_method_within_oversized_class_is_windowed():
     assert all(_tokens(c.content) <= MAX_TOKENS for c in chunks)
     huge_chunks = [c for c in chunks if c.symbol_name == "huge"]
     assert len(huge_chunks) > 1
-    # Only the first window carries the header -- repeating it on every
-    # window would waste the very budget this split is meant to protect.
-    assert huge_chunks[0].content.startswith("import os\nclass Big:")
+    # Every window carries the header -- it's added in a single final pass
+    # over all chunks (_apply_headers), not attached per-window during the
+    # split itself.
+    assert all(c.content.startswith("# file: c.py\n# in class: Big\n\n") for c in huge_chunks)
 
 
 def test_tiny_siblings_merge():
@@ -181,7 +264,7 @@ def test_kotlin_oversized_class_splits_into_methods_with_symbol_names():
     chunks = chunk_file("big.kt", source, "fh", "kotlin")
     assert len(chunks) > 1
     for chunk in chunks:
-        assert chunk.content.startswith("import kotlin.text.Regex\nclass Big")
+        assert chunk.content.startswith("# file: big.kt\n# in class: Big\n")
         assert chunk.symbol_name.startswith("method_")
 
 
