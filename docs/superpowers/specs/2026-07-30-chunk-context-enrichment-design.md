@@ -129,8 +129,11 @@ Header shape:
 def apply_discount(self, invoice_id, rate):
 ```
 
-The scope line is omitted when a chunk has neither a parent class nor a symbol
-name (fixed-window fallback chunks keep only the file line).
+The scope line appears **only** when the chunk has a parent class — i.e. a
+method split out of an oversized class, where the class name is genuinely absent
+from the chunk body. Top-level defs and fixed-window fallback chunks carry the
+file line alone, because a top-level def's own name is already the first line of
+its code and repeating it buys nothing.
 
 ### Preserving class context
 
