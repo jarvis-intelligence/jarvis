@@ -150,6 +150,10 @@ CODEINTEL_DATA_DIR=/custom/path codeintel index /path/to/repo
 
 **Environment variables:**
 - `CODEINTEL_DATA_DIR` — override default `~/.codeintel` for all indexes and registry
+- `CODEINTEL_EMBEDDING_QUERY_PREFIX` / `CODEINTEL_EMBEDDING_DOC_PREFIX` — override the
+  query/document instruction prefix applied before embedding. Auto-detected for bge-m3,
+  e5, and nomic-embed; set these if using a different model that needs one — `semanticSearch`
+  warns when an unlisted model has no prefix configured.
 
 ## Register with Claude Code
 
@@ -192,7 +196,10 @@ tool-specific `symbol` or `path`. All tools report failure the same way — a
   Zoekt hits via reciprocal rank fusion. Raises a clear error if the repo has
   never been indexed with the extra installed (`codeintel reindex <slug>` after
   installing it builds the missing table); indexing itself is non-fatal — a
-  failure there never blocks the rest of `codeintel index`.
+  failure there never blocks the rest of `codeintel index`. Semantic indexing
+  also respects `.gitignore` (on top of the hardcoded ignore-directory list)
+  and skips any file over 1 MB, in addition to the existing generated-file
+  banner/long-line detection — `--semantic-include` overrides all three.
 
 ### Known upstream limitations
 

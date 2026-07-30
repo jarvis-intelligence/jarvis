@@ -97,4 +97,6 @@ against fixtures in `tests/fixtures/`.
   boundary to validate against, and `server.py` converts them via `dataclasses.asdict()`.
 - Direct `sqlite3`, no ORM, always parameterized queries.
 - Modern type-hint syntax throughout: `str | None`, `list[T]`, `dict[K, V]`.
-- Env vars are prefixed `CODEINTEL_` (currently `CODEINTEL_DATA_DIR`).
+- Env vars are prefixed `CODEINTEL_` (`CODEINTEL_DATA_DIR`, `CODEINTEL_EMBEDDING_MODEL`,
+  `CODEINTEL_EMBEDDING_BATCH_SIZE`, `CODEINTEL_EMBEDDING_QUERY_PREFIX`,
+  `CODEINTEL_EMBEDDING_DOC_PREFIX`).
