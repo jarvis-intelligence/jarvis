@@ -80,3 +80,35 @@ def test_identity_and_env_overrides(monkeypatch):
     assert model.batch_size == 7
     default = EmbeddingModel(model_name=embeddings.DEFAULT_MODEL)
     assert default.identity() == (embeddings.DEFAULT_MODEL, embeddings.DEFAULT_REVISION)
+
+
+def test_count_oversized_returns_zero_for_empty_without_loading_model():
+    """The empty guard must short-circuit before _load(), so unit tests
+    never trigger a model download."""
+    from codeintel.embeddings import EmbeddingModel
+    model = EmbeddingModel()
+
+    def _fail():
+        raise AssertionError("model must not load for empty input")
+
+    model._load = _fail
+    assert model.count_oversized([]) == 0
+
+
+def test_count_oversized_counts_texts_past_max_seq_length(monkeypatch):
+    from codeintel import embeddings
+    from codeintel.embeddings import EmbeddingModel
+
+    class _FakeTokenizer:
+        def __call__(self, texts):
+            # one token per character keeps the lengths trivially controllable
+            return {"input_ids": [list(range(len(t))) for t in texts]}
+
+    class _FakeModel:
+        tokenizer = _FakeTokenizer()
+
+    model = EmbeddingModel(batch_size=2)
+    monkeypatch.setattr(model, "_load", lambda: _FakeModel())
+    short = "a" * 10
+    long_text = "a" * (embeddings.MAX_SEQ_LENGTH + 1)
+    assert model.count_oversized([short, long_text, long_text]) == 2
