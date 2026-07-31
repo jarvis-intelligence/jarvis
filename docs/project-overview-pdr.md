@@ -29,7 +29,7 @@
 | 4 | `blastRadius` (package dependency graph) + `codeintel watch` (auto-reindex) | ✓ Done |
 | Post-Phase-4 | Semantic/vector search (`semanticSearch`): tree-sitter chunking, self-hosted embeddings, per-repo LanceDB store, fused with Zoekt via reciprocal rank fusion. Gated behind the optional `semantic` extra | ✓ Done |
 
-**Language support:** TypeScript, Python, Java, plus Swift — `.swift` repos are recognized by `detect_language()` and routed to [`scip-swift`](https://github.com/phuongddx/scip-swift), which builds and indexes end-to-end. All 9 nav tools return correct results on real Swift repos: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy` all work. Requires a macOS host (Xcode + iOS SDK) for repos importing Apple-platform frameworks. One language per index; language detection by file-extension plurality.
+**Language support:** TypeScript, Python, Java, plus Swift — `.swift` repos are recognized by `detect_language()` and routed to [`scip-swift`](https://github.com/phuongddx/scip-swift), which builds and indexes end-to-end. All 9 nav tools return correct results on real Swift repos: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy` all work. Requires a macOS host (Xcode + iOS SDK) for repos importing Apple-platform frameworks. One language per index; language detection by file-extension plurality across git-tracked files. Pass `--language <name>` to override detection.
 
 **9 MCP tools:** `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius`
 

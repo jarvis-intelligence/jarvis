@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import Mock
 
-from codeintel.registry import Registry, _ensure_scheme_override_column
+from codeintel.registry import Registry, _ensure_scheme_override_column, _ensure_language_override_column
 
 
 def test_upsert_then_get_roundtrips(tmp_path: Path):
@@ -201,3 +201,56 @@ def test_semantic_include_column_added_to_preexisting_db(tmp_path):
         assert registry.get("old").semantic_include == ("src/gen",)
     finally:
         registry.close()
+
+
+def test_upsert_persists_language_override(tmp_path: Path):
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed",
+                    language_override="python")
+    assert registry.get("my-repo").language_override == "python"
+    registry.close()
+
+
+def test_upsert_defaults_language_override_to_none(tmp_path: Path):
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed")
+    assert registry.get("my-repo").language_override is None
+    registry.close()
+
+
+def test_language_override_column_added_to_preexisting_db(tmp_path: Path):
+    """A registry.db written before this column existed must still open
+    cleanly -- the guarded ALTER TABLE has to be idempotent and safe
+    against a database that predates the column."""
+    db_path = tmp_path / "registry.db"
+    Registry(db_path).upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed")
+    reopened = Registry(db_path)
+    assert reopened.get("my-repo").language_override is None
+    reopened.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed",
+                    language_override="java")
+    assert reopened.get("my-repo").language_override == "java"
+    reopened.close()
+
+
+def test_ensure_language_override_column_re_raises_non_duplicate_errors():
+    """Only "duplicate column name" is idempotent-safe to swallow. A
+    "database is locked" from a concurrent `codeintel watch` reindex must
+    propagate -- swallowing it would leave the column missing while looking
+    like a successful migration."""
+    mock_conn = Mock(spec=sqlite3.Connection)
+    mock_conn.execute.side_effect = sqlite3.OperationalError("database is locked")
+
+    try:
+        _ensure_language_override_column(mock_conn)
+        assert False, "Expected OperationalError to be re-raised"
+    except sqlite3.OperationalError as exc:
+        assert str(exc) == "database is locked"
+
+
+def test_ensure_language_override_column_swallows_duplicate_column_error():
+    mock_conn = Mock(spec=sqlite3.Connection)
+    mock_conn.execute.side_effect = sqlite3.OperationalError(
+        "duplicate column name: language_override"
+    )
+
+    _ensure_language_override_column(mock_conn)  # must not raise

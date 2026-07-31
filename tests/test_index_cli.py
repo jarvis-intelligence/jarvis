@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from codeintel import config
-from codeintel.index_cli import UnsupportedLanguageError, detect_language, index_repo
+from codeintel.index_cli import PARTIAL_STATUS, UnsupportedLanguageError, detect_language, index_repo
 from codeintel.registry import Registry
 
 FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_py_repo"
@@ -26,9 +26,76 @@ _SWIFT_REQUIRED_BINARIES = ["scip-swift", "scip", "zoekt-index"]
 _missing_swift = [b for b in _SWIFT_REQUIRED_BINARIES if shutil.which(b) is None]
 
 
+def _init_git_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True)
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=path, check=True)
+
+
+def test_git_tracked_files_lists_committed_paths(tmp_path: Path):
+    from codeintel.index_cli import _git_tracked_files
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "b.py").write_text("y = 2\n")
+    _init_git_repo(tmp_path)
+
+    assert sorted(_git_tracked_files(tmp_path)) == ["a.py", "b.py"]
+
+
+def test_git_tracked_files_handles_paths_with_spaces(tmp_path: Path):
+    """`-z` is required: without it, git quotes/escapes non-ASCII names
+    (e.g. as octal escapes like "caf\\303\\251.py") on the default
+    newline-separated output, which would corrupt suffix parsing in
+    detect_language(). A plain space would NOT reproduce this -- git
+    does not quote plain-ASCII spaces even without `-z`."""
+    from codeintel.index_cli import _git_tracked_files
+
+    (tmp_path / "café.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    assert _git_tracked_files(tmp_path) == ["café.py"]
+
+
+def test_git_tracked_files_raises_for_non_git_directory(tmp_path: Path):
+    from codeintel.index_cli import NotAGitRepositoryError, _git_tracked_files
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    with pytest.raises(NotAGitRepositoryError):
+        _git_tracked_files(tmp_path)
+
+
+def test_git_head_raises_indexing_error_for_repo_with_no_commits(tmp_path: Path):
+    """A freshly `git init`-ed repo has no HEAD. Previously this surfaced as
+    a bare CalledProcessError with no explanation of what was wrong."""
+    from codeintel.index_cli import IndexingError, _git_head
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    with pytest.raises(IndexingError, match="no commits"):
+        _git_head(tmp_path)
+
+
+def test_git_head_raises_not_a_git_repository_for_non_git_directory(tmp_path: Path):
+    """Distinct from the no-commits case above: a directory that isn't a
+    git repository at all must not be misdiagnosed as "has no commits
+    yet" -- `git rev-parse HEAD` fails identically in both cases, so
+    `_git_head` must check `--is-inside-work-tree` first."""
+    from codeintel.index_cli import NotAGitRepositoryError, _git_head
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    with pytest.raises(NotAGitRepositoryError):
+        _git_head(tmp_path)
+
+
 def test_detect_language_picks_python_for_py_files(tmp_path: Path):
     (tmp_path / "a.py").write_text("x = 1\n")
     (tmp_path / "b.py").write_text("y = 2\n")
+    _init_git_repo(tmp_path)
     language, cmd = detect_language(tmp_path)
     assert language == "python"
     assert cmd[0] == "scip-python"
@@ -38,21 +105,26 @@ def test_detect_language_picks_majority_extension(tmp_path: Path):
     for i in range(3):
         (tmp_path / f"f{i}.ts").write_text("export const x = 1;\n")
     (tmp_path / "g.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
     language, _ = detect_language(tmp_path)
     assert language == "typescript"
 
 
-def test_detect_language_ignores_node_modules_and_git(tmp_path: Path):
+def test_detect_language_ignores_committed_node_modules(tmp_path: Path):
+    """Git alone does not save us here -- these files ARE tracked. The
+    retained _IGNORED_DIRS pass is what excludes them."""
     (tmp_path / "src.py").write_text("x = 1\n")
     ignored = tmp_path / "node_modules" / "pkg"
     ignored.mkdir(parents=True)
     for i in range(5):
         (ignored / f"f{i}.ts").write_text("export const x = 1;\n")
+    _init_git_repo(tmp_path)
     language, _ = detect_language(tmp_path)
     assert language == "python"
 
 
-def test_detect_language_ignores_derived_data_and_dot_build(tmp_path: Path):
+def test_detect_language_ignores_committed_derived_data_and_dot_build(tmp_path: Path):
+    """Same as above for Swift build output that a repo happens to commit."""
     (tmp_path / "src.swift").write_text("let x = 1\n")
     derived_data = tmp_path / "DerivedData" / "SourcePackages" / "checkouts" / "SomeDep"
     derived_data.mkdir(parents=True)
@@ -61,6 +133,7 @@ def test_detect_language_ignores_derived_data_and_dot_build(tmp_path: Path):
     for i in range(5):
         (derived_data / f"f{i}.py").write_text("x = 1\n")
         (dot_build / f"g{i}.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
     language, _ = detect_language(tmp_path)
     assert language == "swift"
 
@@ -68,6 +141,7 @@ def test_detect_language_ignores_derived_data_and_dot_build(tmp_path: Path):
 def test_detect_language_picks_swift_for_swift_files(tmp_path: Path):
     (tmp_path / "a.swift").write_text("let x = 1\n")
     (tmp_path / "b.swift").write_text("let y = 2\n")
+    _init_git_repo(tmp_path)
     language, cmd = detect_language(tmp_path)
     assert language == "swift"
     assert cmd[0] == "scip-swift"
@@ -81,8 +155,64 @@ def test_swift_invocation_omits_index_subcommand(tmp_path: Path):
     parses "index" as the repo path. The bare form works on every version.
     """
     (tmp_path / "a.swift").write_text("let x = 1\n")
+    _init_git_repo(tmp_path)
     _, cmd = detect_language(tmp_path)
     assert cmd == ["scip-swift"], f"must stay bare for version tolerance, got {cmd}"
+
+
+def test_detect_language_tie_break_prefers_earlier_priority_over_swift(tmp_path: Path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "b.swift").write_text("let x = 1\n")
+    _init_git_repo(tmp_path)
+    language, _ = detect_language(tmp_path)
+    assert language == "python"
+
+
+def test_detect_language_raises_for_no_supported_files(tmp_path: Path):
+    (tmp_path / "README.md").write_text("# hi\n")
+    _init_git_repo(tmp_path)
+    with pytest.raises(UnsupportedLanguageError):
+        detect_language(tmp_path)
+
+
+def test_detect_language_ignores_gitignored_checkout_directory(tmp_path: Path):
+    """Direct regression test for the polaris-code-intelligence failure: a
+    gitignored `.local-checkouts/` of cloned sibling repos held 4782 .ts/.tsx
+    files against the repo's own 81 tracked .py files, and detection picked
+    typescript. Nothing in _IGNORED_DIRS covered it, and nothing could --
+    the directory name is arbitrary and per-project."""
+    (tmp_path / "app.py").write_text("x = 1\n")
+    (tmp_path / ".gitignore").write_text(".local-checkouts/\n")
+    checkouts = tmp_path / ".local-checkouts" / "vendored-repo"
+    checkouts.mkdir(parents=True)
+    for i in range(50):
+        (checkouts / f"f{i}.ts").write_text("export const x = 1;\n")
+
+    _init_git_repo(tmp_path)  # `git add .` honors .gitignore
+
+    language, _ = detect_language(tmp_path)
+    assert language == "python"
+
+
+def test_detect_language_ignores_untracked_files(tmp_path: Path):
+    """Tracked-only by design. Uncommitted scratch files do not vote."""
+    (tmp_path / "app.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    for i in range(50):
+        (tmp_path / f"scratch{i}.ts").write_text("export const x = 1;\n")
+
+    language, _ = detect_language(tmp_path)
+    assert language == "python"
+
+
+def test_detect_language_raises_for_non_git_directory(tmp_path: Path):
+    from codeintel.index_cli import NotAGitRepositoryError
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    with pytest.raises(NotAGitRepositoryError):
+        detect_language(tmp_path)
 
 
 def test_prefers_xcodebuild_false_for_bare_spm_package(tmp_path: Path):
@@ -145,19 +275,14 @@ def test_swift_indexer_cmd_ignores_scheme_without_xcodeproj(tmp_path: Path):
     assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme="ios_theme_ui") == ["scip-swift"]
 
 
-def test_detect_language_tie_break_prefers_earlier_priority_over_swift(tmp_path: Path):
+def test_detect_language_tie_break_prefers_java_over_swift(tmp_path: Path):
     (tmp_path / "a.java").write_text("class A {}\n")
     (tmp_path / "b.java").write_text("class B {}\n")
     (tmp_path / "a.swift").write_text("let x = 1\n")
     (tmp_path / "b.swift").write_text("let y = 2\n")
+    _init_git_repo(tmp_path)
     language, _ = detect_language(tmp_path)
     assert language == "java"
-
-
-def test_detect_language_raises_for_no_supported_files(tmp_path: Path):
-    (tmp_path / "README.md").write_text("hello\n")
-    with pytest.raises(UnsupportedLanguageError):
-        detect_language(tmp_path)
 
 
 def test_index_repo_rejects_dotdot_slug_before_touching_disk(tmp_path: Path):
@@ -181,14 +306,6 @@ def test_forget_rejects_dotdot_slug(tmp_path: Path, monkeypatch, capsys):
     rc = _cmd_forget(argparse.Namespace(slug=".."))
     assert rc == 1
     assert "error" in capsys.readouterr().err
-
-
-def _init_git_repo(path: Path) -> None:
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True)
-    subprocess.run(["git", "add", "."], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=path, check=True)
 
 
 @pytest.mark.integration
@@ -306,6 +423,29 @@ def test_index_repo_preserves_scheme_override_when_not_repassed(tmp_path: Path):
         entry = registry.get(slug)
         assert entry is not None
         assert entry.scheme_override == "some-scheme"
+    finally:
+        registry.close()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_index_repo_preserves_language_override_across_successful_index(tmp_path: Path):
+    """The success path upserts a second time. If that call omits
+    language_override, the override silently resets to NULL and a later
+    reindex falls back to detection."""
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    slug = index_repo(repo_dir, root=data_root, language="python")
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status in ("indexed", PARTIAL_STATUS)
+        assert entry.language_override == "python"
     finally:
         registry.close()
 
@@ -528,11 +668,13 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
 
     captured: dict = {}
 
-    def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None):
+    def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
+                        language=None):
         captured["path"] = path
         captured["slug"] = slug
         captured["scheme"] = scheme
         captured["semantic_include"] = semantic_include
+        captured["language"] = language
         return slug
 
     monkeypatch.setattr(cli, "index_repo", fake_index_repo)
@@ -674,7 +816,7 @@ def test_semantic_include_flag_reaches_index_repo_as_a_tuple(tmp_path, monkeypat
     captured = {}
 
     def _fake_index_repo(repo_path, *, slug=None, root=None, scheme=None,
-                         semantic_include=None):
+                         semantic_include=None, language=None):
         captured["semantic_include"] = semantic_include
         return "myrepo"
 
@@ -743,3 +885,236 @@ def test_report_prints_prefix_warning(capsys):
     _print_semantic_report(SemanticIndexReport(
         rows=10, files=2, truncated=0, prefix_warning="model X is not in the map"))
     assert "model X is not in the map" in capsys.readouterr().err
+
+
+def test_indexer_by_language_covers_every_supported_language():
+    from codeintel.index_cli import _INDEXER_BY_LANGUAGE
+
+    assert sorted(_INDEXER_BY_LANGUAGE) == ["java", "python", "swift", "typescript"]
+    assert _INDEXER_BY_LANGUAGE["python"] == ["scip-python", "index"]
+    assert _INDEXER_BY_LANGUAGE["swift"] == ["scip-swift"]
+
+
+def test_resolve_language_preserves_stored_override_when_none_given(tmp_path: Path):
+    from codeintel.index_cli import _resolve_language
+
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed",
+                    language_override="python")
+    assert _resolve_language(registry, "my-repo", language=None) == "python"
+    registry.close()
+
+
+def test_resolve_language_prefers_explicit_value_over_stored(tmp_path: Path):
+    from codeintel.index_cli import _resolve_language
+
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed",
+                    language_override="python")
+    assert _resolve_language(registry, "my-repo", language="java") == "java"
+    registry.close()
+
+
+def test_resolve_language_returns_none_for_unknown_slug(tmp_path: Path):
+    from codeintel.index_cli import _resolve_language
+
+    registry = Registry(tmp_path / "registry.db")
+    assert _resolve_language(registry, "nope", language=None) is None
+    registry.close()
+
+
+def test_index_repo_language_override_skips_detection(tmp_path: Path, monkeypatch):
+    """An override means "do not guess" -- detect_language must not run at
+    all, so a repo whose plurality says otherwise still gets the forced
+    language, and the registry records both the effective language and the
+    fact that it was forced."""
+    import codeintel.index_cli as cli
+
+    for i in range(5):
+        (tmp_path / f"f{i}.ts").write_text("export const x = 1;\n")
+    (tmp_path / "app.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    def boom(_repo_path):
+        raise AssertionError("detect_language must not be called when overridden")
+
+    monkeypatch.setattr(cli, "detect_language", boom)
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    captured: dict = {}
+
+    def fake_run(cmd, *, cwd, step):
+        captured.setdefault("cmds", []).append(cmd)
+        raise cli.IndexingError("stop after the indexer command is built")
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    data_root = tmp_path / "data"
+    with pytest.raises(cli.IndexingError):
+        cli.index_repo(tmp_path, slug="forced", root=data_root, language="python")
+
+    assert captured["cmds"][0][0] == "scip-python"
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get("forced")
+        assert entry is not None
+        assert entry.language == "python"
+        assert entry.language_override == "python"
+    finally:
+        registry.close()
+
+
+def test_language_override_to_swift_still_gets_xcodebuild(tmp_path: Path, monkeypatch):
+    """The Swift build-tool selection keys off the *effective* language, so
+    it must fire when swift came from an override just as it does when swift
+    came from detection."""
+    import codeintel.index_cli as cli
+
+    (tmp_path / "app.py").write_text("x = 1\n")
+    (tmp_path / "App.swift").write_text("let x = 1\n")
+    (tmp_path / "App.xcodeproj").mkdir()
+    (tmp_path / "App.xcodeproj" / "project.pbxproj").write_text("// stub\n")
+    _init_git_repo(tmp_path)
+
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    captured: dict = {}
+
+    def fake_run(cmd, *, cwd, step):
+        captured.setdefault("cmds", []).append(cmd)
+        raise cli.IndexingError("stop after the indexer command is built")
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    with pytest.raises(cli.IndexingError):
+        cli.index_repo(tmp_path, slug="forced-swift", root=tmp_path / "data",
+                       language="swift", scheme="MyScheme")
+
+    cmd = captured["cmds"][0]
+    assert cmd[0] == "scip-swift"
+    assert "--build-tool" in cmd and "xcodebuild" in cmd
+    assert "--scheme" in cmd and "MyScheme" in cmd
+
+
+def test_index_repo_raises_unsupported_language_for_stale_registry_override(
+    tmp_path: Path, monkeypatch
+):
+    """`argparse`'s `choices=` only guards a fresh `--language` value typed
+    by a user -- it does not guard a value already persisted in
+    `registry.db` from an earlier version (e.g. a language a future release
+    stops supporting, or a hand-edited row). `codeintel reindex` reaches
+    `index_repo` with that stale value; it must raise `UnsupportedLanguageError`
+    (caught at the CLI boundary), not a bare `KeyError`."""
+    import codeintel.index_cli as cli
+
+    (tmp_path / "app.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    data_root = tmp_path / "data"
+    registry = Registry(config.data_dir(data_root) / "registry.db")
+    registry.upsert("stale-lang", str(tmp_path), "cobol", "abc123", "indexed",
+                    language_override="cobol")
+    registry.close()
+
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    with pytest.raises(UnsupportedLanguageError, match="cobol"):
+        cli.index_repo(tmp_path, slug="stale-lang", root=data_root)
+
+
+def test_cmd_reindex_reports_stale_language_override_as_error(tmp_path: Path, monkeypatch, capsys):
+    """Same as above, exercised through the actual `reindex` CLI path."""
+    import argparse
+    import codeintel.index_cli as cli
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+    (tmp_path / "app.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("stale-lang", str(tmp_path), "cobol", "abc123", "indexed",
+                    language_override="cobol")
+    registry.close()
+
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    rc = cli._cmd_reindex(argparse.Namespace(slug="stale-lang"))
+
+    assert rc == 1
+    assert "cobol" in capsys.readouterr().err
+
+
+def test_index_parser_accepts_language_flag():
+    from codeintel.index_cli import build_parser
+
+    args = build_parser().parse_args(["index", "/repos/x", "--language", "python"])
+    assert args.language == "python"
+
+
+def test_watch_parser_accepts_language_flag():
+    from codeintel.index_cli import build_parser
+
+    args = build_parser().parse_args(["watch", "/repos/x", "--language", "swift"])
+    assert args.language == "swift"
+
+
+def test_index_parser_rejects_unknown_language():
+    from codeintel.index_cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["index", "/repos/x", "--language", "cobol"])
+
+
+def test_reindex_forwards_stored_language_override(tmp_path: Path, monkeypatch):
+    import argparse
+    import codeintel.index_cli as cli
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed",
+                    language_override="python")
+    registry.close()
+
+    captured: dict = {}
+
+    def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
+                        language=None):
+        captured["language"] = language
+        return slug
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    rc = cli._cmd_reindex(argparse.Namespace(slug="my-repo"))
+    assert rc == 0
+    assert captured["language"] == "python"
+
+
+def test_cmd_index_reports_non_git_directory_as_error(tmp_path: Path, monkeypatch, capsys):
+    """NotAGitRepositoryError must be caught at the CLI boundary and printed,
+    not escape as a traceback.
+
+    Monkeypatches `index_repo` to raise `NotAGitRepositoryError` directly, so
+    this test fails if that exception type were ever removed from
+    `_cmd_index`'s except tuple -- unlike asserting on a real non-git
+    directory's error text, which would keep passing on substring luck even
+    with the type removed (git's own stderr for a plain `IndexingError`
+    happens to contain the same phrase). The real end-to-end path -- that a
+    non-git directory actually raises `NotAGitRepositoryError`, not a
+    misdiagnosed "no commits yet" -- is pinned separately by
+    `test_git_head_raises_not_a_git_repository_for_non_git_directory`."""
+    import argparse
+    import codeintel.index_cli as cli
+
+    def fake_index_repo(*args, **kwargs):
+        raise cli.NotAGitRepositoryError(f"{tmp_path} is not a git repository (fake)")
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(tmp_path), slug=None, scheme=None, semantic_include=None, language=None,
+    ))
+
+    assert rc == 1
+    assert "not a git repository" in capsys.readouterr().err

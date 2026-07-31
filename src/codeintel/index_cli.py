@@ -47,6 +47,14 @@ _LANGUAGE_INDEXERS: dict[str, tuple[str, list[str]]] = {
 # Priority order for tie-breaking when extension counts are equal.
 _EXT_PRIORITY = [".ts", ".tsx", ".py", ".java", ".kt", ".swift"]
 
+# Reverse of `_LANGUAGE_INDEXERS`, derived from it so the two cannot drift.
+# Several extensions share a language (.ts/.tsx, .java/.kt) and map to the
+# same command, so the collapse is lossless. Its keys are the valid
+# `--language` values.
+_INDEXER_BY_LANGUAGE: dict[str, list[str]] = {
+    language: cmd for language, cmd in _LANGUAGE_INDEXERS.values()
+}
+
 _IGNORED_DIRS = config.IGNORED_DIRS
 
 # `scip expt-convert` below this version cannot read scip.proto's `typed_range`
@@ -71,21 +79,39 @@ class IndexingError(Exception):
     """Raised when an indexing pipeline step (indexer/convert/zoekt) fails."""
 
 
+class NotAGitRepositoryError(Exception):
+    """Raised when a repo path is not a git working tree.
+
+    Indexing already required git -- `_git_head()` reads the commit SHA --
+    so this is not a new restriction, just an early and explicit one.
+    """
+
+
 def detect_language(repo_path: Path) -> tuple[str, list[str]]:
-    """Scan `repo_path` for supported source extensions; return
-    `(language, indexer_command)` for whichever extension has the most
-    files, ties broken by `_EXT_PRIORITY` order."""
+    """Scan `repo_path`'s git-tracked files for supported source
+    extensions; return `(language, indexer_command)` for whichever
+    extension has the most files, ties broken by `_EXT_PRIORITY` order.
+
+    Git-tracked, not a filesystem walk: a walk also counts gitignored
+    vendored checkouts and sibling clones, which can outnumber the repo's
+    own code and pick a language the repo does not use.
+
+    `_IGNORED_DIRS` is still applied on top, because git does not exclude
+    build output a repo happens to commit (a checked-in `dist/` or a
+    vendored `node_modules`).
+    """
     counts: Counter[str] = Counter()
-    for path in repo_path.rglob("*"):
+    for name in _git_tracked_files(repo_path):
+        path = Path(name)
         if any(part in _IGNORED_DIRS for part in path.parts):
             continue
-        if path.is_file() and path.suffix in _LANGUAGE_INDEXERS:
+        if path.suffix in _LANGUAGE_INDEXERS:
             counts[path.suffix] += 1
 
     present = [ext for ext in _EXT_PRIORITY if counts[ext] > 0]
     if not present:
         raise UnsupportedLanguageError(
-            f"no supported source files (.ts/.tsx/.py/.java/.kt/.swift) found under {repo_path}"
+            f"no supported source files (.ts/.tsx/.py/.java/.kt/.swift) tracked under {repo_path}"
         )
     best_ext = max(present, key=lambda ext: (counts[ext], -_EXT_PRIORITY.index(ext)))
     return _LANGUAGE_INDEXERS[best_ext]
@@ -115,10 +141,60 @@ def _swift_indexer_cmd(base_cmd: list[str], repo_path: Path, scheme: str | None)
     return cmd
 
 
-def _git_head(repo_path: Path) -> str:
+def _git_tracked_files(repo_path: Path) -> list[str]:
+    """Repo-relative paths of git-tracked files.
+
+    Git is the source of truth for "what belongs to this repo". A
+    filesystem walk also counts gitignored scratch directories -- vendored
+    checkouts, sibling clones, worktrees -- which can outnumber the repo's
+    own code and flip language detection to a language the repo does not
+    actually use.
+
+    `-z` (NUL-delimited) is required, not stylistic: with the default
+    newline separator git quotes non-ASCII names, which would corrupt
+    suffix parsing downstream.
+    """
     result = subprocess.run(
-        ["git", "-C", str(repo_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ["git", "-C", str(repo_path), "ls-files", "-z"],
+        capture_output=True,
+        text=True,
     )
+    if result.returncode != 0:
+        raise NotAGitRepositoryError(
+            f"{repo_path} is not a git repository (git ls-files: {result.stderr.strip()})"
+        )
+    return [name for name in result.stdout.split("\0") if name]
+
+
+def _git_head(repo_path: Path) -> str:
+    """Current commit SHA.
+
+    Distinguishes "not a git repository at all" from "git repository with
+    no commits": `git rev-parse HEAD` fails identically in both cases, so
+    a directory that isn't a git repo at all would otherwise be
+    misdiagnosed as "has no commits yet". Checking `--is-inside-work-tree`
+    first raises `NotAGitRepositoryError` for the former; only a real
+    git repo with no commits reaches the `IndexingError` below, naming the
+    cause rather than letting a bare CalledProcessError escape."""
+    check = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode != 0:
+        raise NotAGitRepositoryError(
+            f"{repo_path} is not a git repository "
+            f"(git rev-parse --is-inside-work-tree: {check.stderr.strip()})"
+        )
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise IndexingError(
+            f"{repo_path} has no commits yet (git rev-parse HEAD: {result.stderr.strip()})"
+        )
     return result.stdout.strip()
 
 
@@ -221,6 +297,17 @@ def _resolve_scheme(registry: Registry, slug: str, scheme: str | None) -> str | 
     return existing.scheme_override if existing is not None else None
 
 
+def _resolve_language(registry: Registry, slug: str, language: str | None) -> str | None:
+    """`language=None` means "leave the persisted override alone" (a
+    `codeintel watch` reindex never repeats the flag) rather than "clear
+    it" — the same contract as `_resolve_scheme`. Returning None means no
+    override is in force and detection should run."""
+    if language is not None:
+        return language
+    existing = registry.get(slug)
+    return existing.language_override if existing is not None else None
+
+
 def _resolve_semantic_include(
     registry: Registry, slug: str, include: tuple[str, ...] | None
 ) -> tuple[str, ...]:
@@ -290,6 +377,7 @@ def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
 def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None,
     scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
+    language: str | None = None,
 ) -> str:
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
@@ -297,6 +385,12 @@ def index_repo(
     failure, or `PARTIAL_STATUS` ("partial") on success when
     `index_has_navigation_data()` finds symbols published but `chunks` and
     `mentions` both empty.
+
+    An explicit `language` (or one persisted from an earlier `--language`)
+    bypasses `detect_language()` entirely -- an override means "do not
+    guess", not "guess then correct". The registry's `language` column
+    still records the effective language, so `list`/`status` show what was
+    actually indexed.
 
     `zoekt-index` runs BEFORE the pointer swap: if it fails, no repo was
     ever left half-published — the previous version (if any) is still the
@@ -306,11 +400,21 @@ def index_repo(
     live)."""
     repo_path = repo_path.resolve()
     slug = config.repo_slug(slug or repo_path.name)
-    language, indexer_cmd = detect_language(repo_path)
     sha = _git_head(repo_path)
     check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
+    language_override = _resolve_language(registry, slug, language)
+    if language_override is not None:
+        if language_override not in _INDEXER_BY_LANGUAGE:
+            raise UnsupportedLanguageError(
+                f"{slug!r} has a persisted language override {language_override!r} that is no "
+                f"longer supported (expected one of {sorted(_INDEXER_BY_LANGUAGE)})"
+            )
+        language, indexer_cmd = language_override, _INDEXER_BY_LANGUAGE[language_override]
+    else:
+        language, indexer_cmd = detect_language(repo_path)
+
     scheme = _resolve_scheme(registry, slug, scheme)
     semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
 
@@ -318,7 +422,7 @@ def index_repo(
         indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
 
     registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme,
-                    semantic_include=semantic_include)
+                    semantic_include=semantic_include, language_override=language_override)
 
     try:
         with tempfile.TemporaryDirectory(prefix="codeintel-index-") as scratch:
@@ -368,7 +472,7 @@ def index_repo(
 
         final_status = "indexed" if has_nav else PARTIAL_STATUS
         registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme,
-                        semantic_include=semantic_include)
+                        semantic_include=semantic_include, language_override=language_override)
         if semantic_ok:
             registry.mark_semantic_indexed(slug)
         if not has_nav:
@@ -393,8 +497,9 @@ def _cmd_index(args: argparse.Namespace) -> int:
         slug = index_repo(
             Path(args.path), slug=args.slug, scheme=getattr(args, "scheme", None),
             semantic_include=tuple(raw_include) if raw_include is not None else None,
+            language=getattr(args, "language", None),
         )
-    except (UnsupportedLanguageError, IndexingError, ValueError) as exc:
+    except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"indexed {slug}")
@@ -449,6 +554,7 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     return _cmd_index(argparse.Namespace(
         path=repo.path, slug=repo.slug, scheme=repo.scheme_override,
         semantic_include=list(repo.semantic_include),
+        language=repo.language_override,
     ))
 
 
@@ -522,7 +628,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     def _reindex() -> None:
         print(f"[watch] change detected, reindexing {slug} ...")
         try:
-            index_repo(repo_path, slug=slug, scheme=args.scheme)
+            index_repo(repo_path, slug=slug, scheme=args.scheme, language=args.language)
             print(f"[watch] {slug} reindexed")
         except Exception as exc:
             # Broad on purpose: index_repo() can raise before its own
@@ -582,6 +688,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="force-include a path prefix the generated-file filter would skip "
              "(repeatable; persisted and reused by reindex/watch)",
     )
+    index_parser.add_argument(
+        "--language",
+        choices=sorted(_INDEXER_BY_LANGUAGE),
+        help="force the indexer language instead of detecting it from git-tracked files "
+             "(persisted and reused by reindex/watch)",
+    )
     index_parser.set_defaults(func=_cmd_index)
 
     list_parser = subparsers.add_parser("list", help="list indexed repos")
@@ -606,6 +718,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--scheme", help="Xcode scheme to build (Swift repos using xcodebuild with more than one scheme)"
     )
     watch_parser.add_argument("--debounce", type=float, default=5.0, help="quiet-period seconds (default: 5.0)")
+    watch_parser.add_argument(
+        "--language",
+        choices=sorted(_INDEXER_BY_LANGUAGE),
+        help="force the indexer language instead of detecting it from git-tracked files "
+             "(persisted and reused by reindex/watch)",
+    )
     watch_parser.set_defaults(func=_cmd_watch)
 
     return parser

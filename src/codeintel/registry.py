@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS repos (
     status TEXT NOT NULL,
     scheme_override TEXT,
     semantic_indexed_at TEXT,
-    semantic_include TEXT
+    semantic_include TEXT,
+    language_override TEXT
 )
 """
 
@@ -81,6 +82,21 @@ def _ensure_semantic_include_column(conn: sqlite3.Connection) -> None:
             raise
 
 
+def _ensure_language_override_column(conn: sqlite3.Connection) -> None:
+    """Idempotent migration for databases created before this column
+    existed. Same contract as `_ensure_scheme_override_column`: a
+    "duplicate column name" error means a previous run (or a fresh
+    `_SCHEMA` create) already added it, so it is ignored; any other
+    `OperationalError` (e.g. "database is locked" from a concurrent
+    `codeintel watch` reindex) is re-raised rather than swallowed."""
+    try:
+        conn.execute("ALTER TABLE repos ADD COLUMN language_override TEXT")
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
+
+
 def _split_include(raw: str | None) -> tuple[str, ...]:
     """Force-include prefixes are stored newline-joined; NULL or empty
     means none. Newline is a safe separator — a path prefix cannot
@@ -103,11 +119,12 @@ class RegisteredRepo:
     scheme_override: str | None = None
     semantic_indexed_at: datetime | None = None
     semantic_include: tuple[str, ...] = ()
+    language_override: str | None = None
 
 
 def _row_to_repo(row: tuple) -> RegisteredRepo:
     (slug, path, language, commit_sha, last_indexed, status,
-     scheme_override, semantic_indexed_at, semantic_include) = row
+     scheme_override, semantic_indexed_at, semantic_include, language_override) = row
     return RegisteredRepo(
         slug=slug,
         path=path,
@@ -118,6 +135,7 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
         scheme_override=scheme_override,
         semantic_indexed_at=datetime.fromisoformat(semantic_indexed_at) if semantic_indexed_at is not None else None,
         semantic_include=_split_include(semantic_include),
+        language_override=language_override,
     )
 
 
@@ -135,6 +153,7 @@ class Registry:
         _ensure_scheme_override_column(self._conn)
         _ensure_semantic_indexed_at_column(self._conn)
         _ensure_semantic_include_column(self._conn)
+        _ensure_language_override_column(self._conn)
 
     def upsert(
         self,
@@ -145,25 +164,28 @@ class Registry:
         status: str,
         scheme_override: str | None = None,
         semantic_include: tuple[str, ...] = (),
+        language_override: str | None = None,
     ) -> RegisteredRepo:
         last_indexed = datetime.now(UTC)
         self._conn.execute(
             "INSERT INTO repos (slug, path, language, commit_sha, last_indexed, status, "
-            "scheme_override, semantic_indexed_at, semantic_include) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?) "
+            "scheme_override, semantic_indexed_at, semantic_include, language_override) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) "
             "ON CONFLICT(slug) DO UPDATE SET "
             "path=excluded.path, language=excluded.language, commit_sha=excluded.commit_sha, "
             "last_indexed=excluded.last_indexed, status=excluded.status, "
             "scheme_override=excluded.scheme_override, "
-            "semantic_include=excluded.semantic_include",
+            "semantic_include=excluded.semantic_include, "
+            "language_override=excluded.language_override",
             (slug, path, language, commit_sha, last_indexed.isoformat(), status,
-             scheme_override, _join_include(semantic_include)),
+             scheme_override, _join_include(semantic_include), language_override),
         )
         self._conn.commit()
         return RegisteredRepo(
             slug=slug, path=path, language=language, commit_sha=commit_sha,
             last_indexed=last_indexed, status=status, scheme_override=scheme_override,
             semantic_indexed_at=None, semantic_include=semantic_include,
+            language_override=language_override,
         )
 
     def mark_status(self, slug: str, status: str) -> None:
@@ -183,7 +205,7 @@ class Registry:
     def get(self, slug: str) -> RegisteredRepo | None:
         row = self._conn.execute(
             "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, "
-            "semantic_indexed_at, semantic_include "
+            "semantic_indexed_at, semantic_include, language_override "
             "FROM repos WHERE slug = ?",
             (slug,),
         ).fetchone()
@@ -192,7 +214,7 @@ class Registry:
     def list(self) -> list[RegisteredRepo]:
         rows = self._conn.execute(
             "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, "
-            "semantic_indexed_at, semantic_include "
+            "semantic_indexed_at, semantic_include, language_override "
             "FROM repos ORDER BY slug"
         ).fetchall()
         return [_row_to_repo(row) for row in rows]

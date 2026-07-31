@@ -20,12 +20,12 @@ uv run pytest -m "not integration"   # unit only — no external binaries requir
 uv run pytest -m integration         # integration only — runs real scip-python/scip/zoekt-index
 uv run pytest tests/test_query.py::test_go_to_definition_returns_location   # single test
 
-uv run codeintel index /path/to/repo [--slug name] [--scheme name] [--semantic-include path]
+uv run codeintel index /path/to/repo [--slug name] [--scheme name] [--language name] [--semantic-include path]
 uv run codeintel list
 uv run codeintel status <slug>
 uv run codeintel reindex <slug>
 uv run codeintel forget <slug>
-uv run codeintel watch /path/to/repo [--debounce 5] [--scheme name] [--semantic-include path]   # foreground, not a daemon
+uv run codeintel watch /path/to/repo [--debounce 5] [--scheme name] [--language name] [--semantic-include path]   # foreground, not a daemon
 
 uv run codeintel-server              # MCP stdio entry point
 claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run codeintel-server
@@ -56,13 +56,25 @@ Three engines sit behind the MCP server, each backed by its own storage:
   never blocks the SCIP/Zoekt publish). A LanceDB table only ever holds vectors from one
   model+revision — the model-identity rule.
 
-**Index pipeline** (`index_cli.py`, `index_repo()`): detect language by file-extension plurality
-(ties broken by fixed priority `.ts→.tsx→.py→.java→.kt→.swift`; one language per repo, no
+**Index pipeline** (`index_cli.py`, `index_repo()`): detect language by extension plurality
+**across git-tracked files** (ties broken by fixed priority `.ts→.tsx→.py→.java→.kt→.swift`; one language per repo, no
 multi-language merge) → run the matching indexer → `scip expt-convert` → populate the graph →
 `zoekt-index` → **atomic publish**: write the new versioned `index-<sha>.db`, and only once graph +
 Zoekt both succeed, flip the `current` pointer file via `os.replace()`. A query already reading the
 old file is never interrupted; a failure anywhere leaves the previous index live. Never mutate a
 published `index-<sha>.db` in place — queries always open it `mode=ro&immutable=1`.
+
+**Language detection reads git, not the filesystem:** `detect_language()` counts extensions across
+`git ls-files`, not a `rglob` walk. A walk also counts gitignored scratch directories — vendored
+checkouts, sibling clones, `.worktrees/` — which can outnumber a repo's own code and pick a
+language it doesn't use. (Real case: a repo with 81 tracked `.py` files and a gitignored
+`.local-checkouts/` of 4782 `.ts`/`.tsx` files was detected as TypeScript.) `IGNORED_DIRS` is still
+applied on top, because git does not exclude build output a repo happens to commit. A non-git path
+raises `NotAGitRepositoryError`. This is a heuristic with known edge cases (git shows duplicate
+entries for unmerged paths, sparse-checkout entries absent from disk still count, and repositories
+with code entirely in git submodules won't be counted). Pass `--language <name>` on the first
+`codeintel index` to override detection for a polyglot repo — it's persisted in the registry, so
+`reindex`/`watch` reuse it automatically.
 
 **Single-tenant hardcoding:** `config.py` pins `PROJECT = "_"` and `BRANCH = "_"`. The on-disk
 `scip/_/<slug>/_/` path shape is an artifact of reusing the vendored `IndexConnectionCache`'s
