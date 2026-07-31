@@ -45,14 +45,17 @@ def test_git_tracked_files_lists_committed_paths(tmp_path: Path):
 
 
 def test_git_tracked_files_handles_paths_with_spaces(tmp_path: Path):
-    """`-z` is required: with a newline separator git quotes unusual names,
-    which would corrupt suffix parsing in detect_language()."""
+    """`-z` is required: without it, git quotes/escapes non-ASCII names
+    (e.g. as octal escapes like "caf\\303\\251.py") on the default
+    newline-separated output, which would corrupt suffix parsing in
+    detect_language(). A plain space would NOT reproduce this -- git
+    does not quote plain-ASCII spaces even without `-z`."""
     from codeintel.index_cli import _git_tracked_files
 
-    (tmp_path / "my module.py").write_text("x = 1\n")
+    (tmp_path / "café.py").write_text("x = 1\n")
     _init_git_repo(tmp_path)
 
-    assert _git_tracked_files(tmp_path) == ["my module.py"]
+    assert _git_tracked_files(tmp_path) == ["café.py"]
 
 
 def test_git_tracked_files_raises_for_non_git_directory(tmp_path: Path):
@@ -73,6 +76,19 @@ def test_git_head_raises_indexing_error_for_repo_with_no_commits(tmp_path: Path)
     (tmp_path / "a.py").write_text("x = 1\n")
 
     with pytest.raises(IndexingError, match="no commits"):
+        _git_head(tmp_path)
+
+
+def test_git_head_raises_not_a_git_repository_for_non_git_directory(tmp_path: Path):
+    """Distinct from the no-commits case above: a directory that isn't a
+    git repository at all must not be misdiagnosed as "has no commits
+    yet" -- `git rev-parse HEAD` fails identically in both cases, so
+    `_git_head` must check `--is-inside-work-tree` first."""
+    from codeintel.index_cli import NotAGitRepositoryError, _git_head
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    with pytest.raises(NotAGitRepositoryError):
         _git_head(tmp_path)
 
 
@@ -981,6 +997,54 @@ def test_language_override_to_swift_still_gets_xcodebuild(tmp_path: Path, monkey
     assert "--scheme" in cmd and "MyScheme" in cmd
 
 
+def test_index_repo_raises_unsupported_language_for_stale_registry_override(
+    tmp_path: Path, monkeypatch
+):
+    """`argparse`'s `choices=` only guards a fresh `--language` value typed
+    by a user -- it does not guard a value already persisted in
+    `registry.db` from an earlier version (e.g. a language a future release
+    stops supporting, or a hand-edited row). `codeintel reindex` reaches
+    `index_repo` with that stale value; it must raise `UnsupportedLanguageError`
+    (caught at the CLI boundary), not a bare `KeyError`."""
+    import codeintel.index_cli as cli
+
+    (tmp_path / "app.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    data_root = tmp_path / "data"
+    registry = Registry(config.data_dir(data_root) / "registry.db")
+    registry.upsert("stale-lang", str(tmp_path), "cobol", "abc123", "indexed",
+                    language_override="cobol")
+    registry.close()
+
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    with pytest.raises(UnsupportedLanguageError, match="cobol"):
+        cli.index_repo(tmp_path, slug="stale-lang", root=data_root)
+
+
+def test_cmd_reindex_reports_stale_language_override_as_error(tmp_path: Path, monkeypatch, capsys):
+    """Same as above, exercised through the actual `reindex` CLI path."""
+    import argparse
+    import codeintel.index_cli as cli
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+    (tmp_path / "app.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("stale-lang", str(tmp_path), "cobol", "abc123", "indexed",
+                    language_override="cobol")
+    registry.close()
+
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    rc = cli._cmd_reindex(argparse.Namespace(slug="stale-lang"))
+
+    assert rc == 1
+    assert "cobol" in capsys.readouterr().err
+
+
 def test_index_parser_accepts_language_flag():
     from codeintel.index_cli import build_parser
 
@@ -1029,12 +1093,24 @@ def test_reindex_forwards_stored_language_override(tmp_path: Path, monkeypatch):
 
 def test_cmd_index_reports_non_git_directory_as_error(tmp_path: Path, monkeypatch, capsys):
     """NotAGitRepositoryError must be caught at the CLI boundary and printed,
-    not escape as a traceback."""
+    not escape as a traceback.
+
+    Monkeypatches `index_repo` to raise `NotAGitRepositoryError` directly, so
+    this test fails if that exception type were ever removed from
+    `_cmd_index`'s except tuple -- unlike asserting on a real non-git
+    directory's error text, which would keep passing on substring luck even
+    with the type removed (git's own stderr for a plain `IndexingError`
+    happens to contain the same phrase). The real end-to-end path -- that a
+    non-git directory actually raises `NotAGitRepositoryError`, not a
+    misdiagnosed "no commits yet" -- is pinned separately by
+    `test_git_head_raises_not_a_git_repository_for_non_git_directory`."""
     import argparse
     import codeintel.index_cli as cli
 
-    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
-    (tmp_path / "a.py").write_text("x = 1\n")
+    def fake_index_repo(*args, **kwargs):
+        raise cli.NotAGitRepositoryError(f"{tmp_path} is not a git repository (fake)")
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
 
     rc = cli._cmd_index(argparse.Namespace(
         path=str(tmp_path), slug=None, scheme=None, semantic_include=None, language=None,

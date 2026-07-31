@@ -167,9 +167,25 @@ def _git_tracked_files(repo_path: Path) -> list[str]:
 
 
 def _git_head(repo_path: Path) -> str:
-    """Current commit SHA. A repo with no commits has no HEAD -- report
-    that as an IndexingError naming the cause rather than letting a bare
-    CalledProcessError escape."""
+    """Current commit SHA.
+
+    Distinguishes "not a git repository at all" from "git repository with
+    no commits": `git rev-parse HEAD` fails identically in both cases, so
+    a directory that isn't a git repo at all would otherwise be
+    misdiagnosed as "has no commits yet". Checking `--is-inside-work-tree`
+    first raises `NotAGitRepositoryError` for the former; only a real
+    git repo with no commits reaches the `IndexingError` below, naming the
+    cause rather than letting a bare CalledProcessError escape."""
+    check = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode != 0:
+        raise NotAGitRepositoryError(
+            f"{repo_path} is not a git repository "
+            f"(git rev-parse --is-inside-work-tree: {check.stderr.strip()})"
+        )
     result = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
         capture_output=True,
@@ -390,6 +406,11 @@ def index_repo(
     registry = Registry(config.data_dir(root) / "registry.db")
     language_override = _resolve_language(registry, slug, language)
     if language_override is not None:
+        if language_override not in _INDEXER_BY_LANGUAGE:
+            raise UnsupportedLanguageError(
+                f"{slug!r} has a persisted language override {language_override!r} that is no "
+                f"longer supported (expected one of {sorted(_INDEXER_BY_LANGUAGE)})"
+            )
         language, indexer_cmd = language_override, _INDEXER_BY_LANGUAGE[language_override]
     else:
         language, indexer_cmd = detect_language(repo_path)
