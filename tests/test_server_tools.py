@@ -112,7 +112,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
+class Server(socketserver.TCPServer):
+    # See the matching note in tests/test_search.py: without SO_REUSEADDR a
+    # fixed port still in TIME_WAIT from a previous run cannot be rebound, so
+    # this process exits with EADDRINUSE and the test reports the server as
+    # having "exited immediately".
+    allow_reuse_address = True
+
+with Server(("127.0.0.1", port), Handler) as httpd:
     httpd.serve_forever()
 """
 

@@ -78,7 +78,18 @@ _FAKE_ZOEKT_SCRIPT = textwrap.dedent(
         def log_message(self, *args):
             pass
 
-    with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
+    class Server(socketserver.TCPServer):
+        # socketserver.TCPServer leaves SO_REUSEADDR off; the stdlib's own
+        # http.server.HTTPServer turns it on for exactly this reason. Without
+        # it, binding a *fixed* port that is still in TIME_WAIT from a previous
+        # run fails with EADDRINUSE, this process dies, and the caller sees
+        # "exited immediately with code 1". The health check below establishes
+        # and closes a connection, so TIME_WAIT is guaranteed once a test has
+        # run -- which made the suite fail on any re-run within the ~15-60s
+        # window rather than only under load.
+        allow_reuse_address = True
+
+    with Server(("127.0.0.1", port), Handler) as httpd:
         httpd.serve_forever()
     """
 )
