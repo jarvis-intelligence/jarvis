@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from codeintel import config
-from codeintel.index_cli import UnsupportedLanguageError, detect_language, index_repo
+from codeintel.index_cli import PARTIAL_STATUS, UnsupportedLanguageError, detect_language, index_repo
 from codeintel.registry import Registry
 
 FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_py_repo"
@@ -407,6 +407,29 @@ def test_index_repo_preserves_scheme_override_when_not_repassed(tmp_path: Path):
         entry = registry.get(slug)
         assert entry is not None
         assert entry.scheme_override == "some-scheme"
+    finally:
+        registry.close()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_index_repo_preserves_language_override_across_successful_index(tmp_path: Path):
+    """The success path upserts a second time. If that call omits
+    language_override, the override silently resets to NULL and a later
+    reindex falls back to detection."""
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    slug = index_repo(repo_dir, root=data_root, language="python")
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status in ("indexed", PARTIAL_STATUS)
+        assert entry.language_override == "python"
     finally:
         registry.close()
 
@@ -844,3 +867,113 @@ def test_report_prints_prefix_warning(capsys):
     _print_semantic_report(SemanticIndexReport(
         rows=10, files=2, truncated=0, prefix_warning="model X is not in the map"))
     assert "model X is not in the map" in capsys.readouterr().err
+
+
+def test_indexer_by_language_covers_every_supported_language():
+    from codeintel.index_cli import _INDEXER_BY_LANGUAGE
+
+    assert sorted(_INDEXER_BY_LANGUAGE) == ["java", "python", "swift", "typescript"]
+    assert _INDEXER_BY_LANGUAGE["python"] == ["scip-python", "index"]
+    assert _INDEXER_BY_LANGUAGE["swift"] == ["scip-swift"]
+
+
+def test_resolve_language_preserves_stored_override_when_none_given(tmp_path: Path):
+    from codeintel.index_cli import _resolve_language
+
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed",
+                    language_override="python")
+    assert _resolve_language(registry, "my-repo", language=None) == "python"
+    registry.close()
+
+
+def test_resolve_language_prefers_explicit_value_over_stored(tmp_path: Path):
+    from codeintel.index_cli import _resolve_language
+
+    registry = Registry(tmp_path / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed",
+                    language_override="python")
+    assert _resolve_language(registry, "my-repo", language="java") == "java"
+    registry.close()
+
+
+def test_resolve_language_returns_none_for_unknown_slug(tmp_path: Path):
+    from codeintel.index_cli import _resolve_language
+
+    registry = Registry(tmp_path / "registry.db")
+    assert _resolve_language(registry, "nope", language=None) is None
+    registry.close()
+
+
+def test_index_repo_language_override_skips_detection(tmp_path: Path, monkeypatch):
+    """An override means "do not guess" -- detect_language must not run at
+    all, so a repo whose plurality says otherwise still gets the forced
+    language, and the registry records both the effective language and the
+    fact that it was forced."""
+    import codeintel.index_cli as cli
+
+    for i in range(5):
+        (tmp_path / f"f{i}.ts").write_text("export const x = 1;\n")
+    (tmp_path / "app.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    def boom(_repo_path):
+        raise AssertionError("detect_language must not be called when overridden")
+
+    monkeypatch.setattr(cli, "detect_language", boom)
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    captured: dict = {}
+
+    def fake_run(cmd, *, cwd, step):
+        captured.setdefault("cmds", []).append(cmd)
+        raise cli.IndexingError("stop after the indexer command is built")
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    data_root = tmp_path / "data"
+    with pytest.raises(cli.IndexingError):
+        cli.index_repo(tmp_path, slug="forced", root=data_root, language="python")
+
+    assert captured["cmds"][0][0] == "scip-python"
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get("forced")
+        assert entry is not None
+        assert entry.language == "python"
+        assert entry.language_override == "python"
+    finally:
+        registry.close()
+
+
+def test_language_override_to_swift_still_gets_xcodebuild(tmp_path: Path, monkeypatch):
+    """The Swift build-tool selection keys off the *effective* language, so
+    it must fire when swift came from an override just as it does when swift
+    came from detection."""
+    import codeintel.index_cli as cli
+
+    (tmp_path / "app.py").write_text("x = 1\n")
+    (tmp_path / "App.swift").write_text("let x = 1\n")
+    (tmp_path / "App.xcodeproj").mkdir()
+    (tmp_path / "App.xcodeproj" / "project.pbxproj").write_text("// stub\n")
+    _init_git_repo(tmp_path)
+
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    captured: dict = {}
+
+    def fake_run(cmd, *, cwd, step):
+        captured.setdefault("cmds", []).append(cmd)
+        raise cli.IndexingError("stop after the indexer command is built")
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    with pytest.raises(cli.IndexingError):
+        cli.index_repo(tmp_path, slug="forced-swift", root=tmp_path / "data",
+                       language="swift", scheme="MyScheme")
+
+    cmd = captured["cmds"][0]
+    assert cmd[0] == "scip-swift"
+    assert "--build-tool" in cmd and "xcodebuild" in cmd
+    assert "--scheme" in cmd and "MyScheme" in cmd

@@ -47,6 +47,14 @@ _LANGUAGE_INDEXERS: dict[str, tuple[str, list[str]]] = {
 # Priority order for tie-breaking when extension counts are equal.
 _EXT_PRIORITY = [".ts", ".tsx", ".py", ".java", ".kt", ".swift"]
 
+# Reverse of `_LANGUAGE_INDEXERS`, derived from it so the two cannot drift.
+# Several extensions share a language (.ts/.tsx, .java/.kt) and map to the
+# same command, so the collapse is lossless. Its keys are the valid
+# `--language` values.
+_INDEXER_BY_LANGUAGE: dict[str, list[str]] = {
+    language: cmd for language, cmd in _LANGUAGE_INDEXERS.values()
+}
+
 _IGNORED_DIRS = config.IGNORED_DIRS
 
 # `scip expt-convert` below this version cannot read scip.proto's `typed_range`
@@ -273,6 +281,17 @@ def _resolve_scheme(registry: Registry, slug: str, scheme: str | None) -> str | 
     return existing.scheme_override if existing is not None else None
 
 
+def _resolve_language(registry: Registry, slug: str, language: str | None) -> str | None:
+    """`language=None` means "leave the persisted override alone" (a
+    `codeintel watch` reindex never repeats the flag) rather than "clear
+    it" — the same contract as `_resolve_scheme`. Returning None means no
+    override is in force and detection should run."""
+    if language is not None:
+        return language
+    existing = registry.get(slug)
+    return existing.language_override if existing is not None else None
+
+
 def _resolve_semantic_include(
     registry: Registry, slug: str, include: tuple[str, ...] | None
 ) -> tuple[str, ...]:
@@ -342,6 +361,7 @@ def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
 def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None,
     scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
+    language: str | None = None,
 ) -> str:
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
@@ -349,6 +369,12 @@ def index_repo(
     failure, or `PARTIAL_STATUS` ("partial") on success when
     `index_has_navigation_data()` finds symbols published but `chunks` and
     `mentions` both empty.
+
+    An explicit `language` (or one persisted from an earlier `--language`)
+    bypasses `detect_language()` entirely -- an override means "do not
+    guess", not "guess then correct". The registry's `language` column
+    still records the effective language, so `list`/`status` show what was
+    actually indexed.
 
     `zoekt-index` runs BEFORE the pointer swap: if it fails, no repo was
     ever left half-published — the previous version (if any) is still the
@@ -358,11 +384,16 @@ def index_repo(
     live)."""
     repo_path = repo_path.resolve()
     slug = config.repo_slug(slug or repo_path.name)
-    language, indexer_cmd = detect_language(repo_path)
     sha = _git_head(repo_path)
     check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
+    language_override = _resolve_language(registry, slug, language)
+    if language_override is not None:
+        language, indexer_cmd = language_override, _INDEXER_BY_LANGUAGE[language_override]
+    else:
+        language, indexer_cmd = detect_language(repo_path)
+
     scheme = _resolve_scheme(registry, slug, scheme)
     semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
 
@@ -370,7 +401,7 @@ def index_repo(
         indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
 
     registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme,
-                    semantic_include=semantic_include)
+                    semantic_include=semantic_include, language_override=language_override)
 
     try:
         with tempfile.TemporaryDirectory(prefix="codeintel-index-") as scratch:
@@ -420,7 +451,7 @@ def index_repo(
 
         final_status = "indexed" if has_nav else PARTIAL_STATUS
         registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme,
-                        semantic_include=semantic_include)
+                        semantic_include=semantic_include, language_override=language_override)
         if semantic_ok:
             registry.mark_semantic_indexed(slug)
         if not has_nav:
