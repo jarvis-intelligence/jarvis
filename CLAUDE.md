@@ -99,4 +99,4 @@ against fixtures in `tests/fixtures/`.
 - Modern type-hint syntax throughout: `str | None`, `list[T]`, `dict[K, V]`.
 - Env vars are prefixed `CODEINTEL_` (`CODEINTEL_DATA_DIR`, `CODEINTEL_EMBEDDING_MODEL`,
   `CODEINTEL_EMBEDDING_BATCH_SIZE`, `CODEINTEL_EMBEDDING_QUERY_PREFIX`,
-  `CODEINTEL_EMBEDDING_DOC_PREFIX`).
+  `CODEINTEL_EMBEDDING_DOC_PREFIX`, `CODEINTEL_ZOEKT_BIN`).
