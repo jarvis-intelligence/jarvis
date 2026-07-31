@@ -24,8 +24,10 @@ CODEINTEL_REPO="phuongddx/codeintel"
 
 # v0.1.1 is the first release whose binary supports `scip-swift index …`, the
 # form index_cli.py invokes. v0.1.0 predates that subcommand and cannot be
-# driven by codeintel at all.
-SCIP_SWIFT_VERSION="v0.1.1"
+# driven by codeintel at all. v0.1.2 is the first whose xcodebuild backend
+# disables code signing, without which repos containing signed app-extension
+# targets fail during GatherProvisioningInputs before compiling anything.
+SCIP_SWIFT_VERSION="v0.1.2"
 SCIP_SWIFT_REPO="phuongddx/scip-swift"
 
 # ---------------------------------------------------------------- logging ----

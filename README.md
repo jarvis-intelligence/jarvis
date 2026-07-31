@@ -78,6 +78,12 @@ cannot read scip.proto's `typed_range` oneof, which is the only range encoding
 `scip-swift` emits, and silently produce an index with no navigable positions.
 `codeintel index` refuses an older `scip` rather than publishing one.
 
+Indexing a Swift repo with code-signed app-extension targets additionally requires
+`scip-swift >= v0.1.2`: earlier versions pass no code-signing overrides to `xcodebuild`, which
+then fails provisioning for every signed target before compiling anything. Because `setup.sh`
+skips any dependency that is merely *present*, an existing install is **not** upgraded by
+re-running it — use `sh ./setup.sh --only scip-swift --force`.
+
 ## Indexing a repo
 
 ```bash
