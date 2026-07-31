@@ -1,0 +1,87 @@
+# Runs the unit test suite on every push and pull request.
+#
+# Why no paths filter (unlike setup-smoke.yml and build-zoekt.yml): this is the
+# gate that must run on every change. Filtering it is how a repo ends up with
+# pull requests that report no checks at all.
+#
+# Why unit-only: the `integration` marker exercises real scip / scip-python /
+# zoekt binaries, which setup-smoke.yml already installs and verifies on real
+# runners. Excluding them keeps this workflow fast with no external download to
+# flake on, so a red mark points at the code rather than the network.
+#
+# Why the semantic extra: without it, the 23 tests in test_semantic.py skip on
+# `could not import lancedb` -- silently, so the suite still looks green. The
+# extra is the difference between 270 and 328 tests actually running. Its tests
+# use a fake in-process model, so nothing is downloaded from a model hub at run
+# time; only the dependency install cost applies, and setup-uv caches that.
+#
+# Why no lint step: there is no [tool.ruff] config, so ruff would apply its
+# defaults, against which the tree currently has pre-existing violations.
+# Adding that gate here would block unrelated pull requests. Configure ruff
+# first, then add it.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 3.12 is the floor declared by requires-python, and what
+          # .python-version pins for local development.
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          # codeintel is used primarily on macOS -- the only platform where
+          # Swift indexing runs at all -- so one macOS leg guards against
+          # POSIX-but-not-Linux assumptions in path and subprocess handling.
+          - os: macos-latest
+            python-version: "3.13"
+
+    name: unit (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+
+    env:
+      # Set at job level so every uv invocation agrees on the interpreter.
+      # `uv sync --python` is NOT sufficient: .python-version pins 3.12 and
+      # wins over the flag (verified against uv 0.11.19), which would leave
+      # both 3.13 legs quietly testing 3.12. UV_PYTHON does take precedence.
+      UV_PYTHON: ${{ matrix.python-version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the project
+        run: |
+          set -eu
+          uv sync --extra semantic
+
+      - name: Confirm the interpreter under test
+        run: |
+          set -eu
+          # Without this, a resolution change that ignores UV_PYTHON would make
+          # a matrix leg silently redundant rather than failing.
+          actual="$(uv run python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          if [ "$actual" != "${{ matrix.python-version }}" ]; then
+            echo "Expected Python ${{ matrix.python-version }}, got ${actual}" >&2
+            exit 1
+          fi
+          echo "Testing against Python ${actual}"
+
+      - name: Run the unit suite
+        run: |
+          set -eu
+          # -rs surfaces skip reasons, so a dependency silently dropping tests
+          # out of the run is visible in the log instead of passing as green.
+          uv run pytest -m "not integration" -rs
