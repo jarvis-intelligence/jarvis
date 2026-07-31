@@ -112,3 +112,89 @@ def test_count_oversized_counts_texts_past_max_seq_length(monkeypatch):
     short = "a" * 10
     long_text = "a" * (embeddings.MAX_SEQ_LENGTH + 1)
     assert model.count_oversized([short, long_text, long_text]) == 2
+
+
+@pytest.mark.parametrize("model_name,expected", [
+    ("BAAI/bge-m3", ("", "")),
+    ("intfloat/multilingual-e5-large", ("query: ", "passage: ")),
+    ("nomic-ai/nomic-embed-text-v1.5", ("search_query: ", "search_document: ")),
+])
+def test_prefixes_resolve_from_model_map(model_name, expected, monkeypatch):
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", raising=False)
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_DOC_PREFIX", raising=False)
+    from codeintel.embeddings import EmbeddingModel
+    assert EmbeddingModel(model_name=model_name).prefixes() == expected
+
+
+def test_env_override_beats_the_map(monkeypatch):
+    from codeintel.embeddings import EmbeddingModel
+    monkeypatch.setenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", "Q> ")
+    monkeypatch.setenv("CODEINTEL_EMBEDDING_DOC_PREFIX", "D> ")
+    assert EmbeddingModel(model_name="intfloat/multilingual-e5-large").prefixes() == ("Q> ", "D> ")
+
+
+def test_unlisted_model_warns_and_uses_no_prefix(monkeypatch):
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", raising=False)
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_DOC_PREFIX", raising=False)
+    from codeintel.embeddings import EmbeddingModel
+    model = EmbeddingModel(model_name="some-vendor/unknown-model")
+    assert model.prefixes() == ("", "")
+    warning = model.prefix_warning()
+    assert warning is not None and "CODEINTEL_EMBEDDING_QUERY_PREFIX" in warning
+
+
+def test_listed_model_produces_no_warning(monkeypatch):
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", raising=False)
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_DOC_PREFIX", raising=False)
+    from codeintel.embeddings import EmbeddingModel
+    assert EmbeddingModel(model_name="BAAI/bge-m3").prefix_warning() is None
+
+
+def test_query_gets_query_prefix_not_doc_prefix(monkeypatch):
+    """embed_query must not inherit the document prefix by delegating to
+    embed_texts -- that would be the exact bug this feature prevents."""
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", raising=False)
+    monkeypatch.delenv("CODEINTEL_EMBEDDING_DOC_PREFIX", raising=False)
+    from codeintel.embeddings import EmbeddingModel
+    seen: list[str] = []
+
+    class _FakeModel:
+        def encode(self, texts, normalize_embeddings=True):
+            seen.extend(texts)
+            return [[0.0, 1.0] for _ in texts]
+
+    model = EmbeddingModel(model_name="intfloat/multilingual-e5-large")
+    monkeypatch.setattr(model, "_load", lambda: _FakeModel())
+    model.embed_query("auth flow")
+    model.embed_texts(["def f(): pass"])
+    assert seen == ["query: auth flow", "passage: def f(): pass"]
+
+
+def test_explicit_prefixes_win_over_env_and_map(monkeypatch):
+    """Task 4 restores a table's prefixes this way -- it must beat both."""
+    from codeintel.embeddings import EmbeddingModel
+    monkeypatch.setenv("CODEINTEL_EMBEDDING_QUERY_PREFIX", "ENV> ")
+    model = EmbeddingModel(model_name="intfloat/multilingual-e5-large",
+                           query_prefix="TABLE> ", doc_prefix="TDOC> ")
+    assert model.prefixes() == ("TABLE> ", "TDOC> ")
+    assert model.prefix_warning() is None
+
+
+def test_count_oversized_measures_the_prefixed_text(monkeypatch):
+    """The doc prefix is part of what reaches the encoder, so it counts
+    toward the sequence length the model will truncate at."""
+    from codeintel import embeddings
+    from codeintel.embeddings import EmbeddingModel
+
+    class _FakeTokenizer:
+        def __call__(self, texts):
+            return {"input_ids": [list(range(len(t))) for t in texts]}
+
+    class _FakeModel:
+        tokenizer = _FakeTokenizer()
+
+    model = EmbeddingModel(model_name="x", doc_prefix="P" * 20)
+    monkeypatch.setattr(model, "_load", lambda: _FakeModel())
+    # Body alone is under the cap; body + 20-char prefix goes over it.
+    body = "a" * (embeddings.MAX_SEQ_LENGTH - 10)
+    assert model.count_oversized([body]) == 1

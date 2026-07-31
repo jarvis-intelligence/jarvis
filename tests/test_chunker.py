@@ -25,6 +25,88 @@ def beta(y):
 '''
 
 
+def test_every_chunk_starts_with_file_header():
+    source = "def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n"
+    chunks = chunk_file("pkg/mod.py", source, "fh", "python")
+    assert chunks
+    for chunk in chunks:
+        assert chunk.content.startswith("# file: pkg/mod.py\n")
+
+
+def test_top_level_def_header_omits_redundant_symbol_line():
+    """A top-level def's own name is already the first line of its code —
+    the header carries the path only."""
+    source = "def alpha():\n    return 1\n"
+    chunk = chunk_file("pkg/mod.py", source, "fh", "python")[0]
+    assert chunk.content.startswith("# file: pkg/mod.py\n\ndef alpha():")
+    assert "# in class:" not in chunk.content
+
+
+def test_split_method_header_carries_parent_class():
+    body = "\n".join(
+        f"    def method_{i}(self):\n        return {i}  # " + "pad " * 120
+        for i in range(8)
+    )
+    source = f"class Big:\n{body}\n"
+    chunks = chunk_file("big.py", source, "fh", "python")
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.content.startswith("# file: big.py\n# in class: Big\n\n")
+        assert chunk.parent_name == "Big"
+
+
+def test_fixed_window_fallback_chunks_get_the_file_header():
+    """An unparseable file falls back to fixed windows — those chunks have no
+    symbol and no parent, so they carry the file line alone."""
+    source = "x = 1\n" * 400
+    chunks = chunk_file("data.py", source, "fh", "python")
+    assert chunks
+    for chunk in chunks:
+        assert chunk.content.startswith("# file: data.py\n\n")
+        assert chunk.symbol_name is None and chunk.parent_name is None
+
+
+def test_header_not_duplicated_after_merge():
+    source = "def a():\n    return 1\n\n\ndef b():\n    return 2\n"
+    for chunk in chunk_file("m.py", source, "fh", "python"):
+        assert chunk.content.count("# file: m.py") == 1
+
+
+def test_chunks_with_different_parents_do_not_merge():
+    """A class's last method sits adjacent to the next top-level function;
+    merging them would stamp `# in class: Big` on code outside Big."""
+    body = "\n".join(
+        f"    def method_{i}(self):\n        return {i}  # " + "pad " * 120
+        for i in range(8)
+    )
+    source = f"class Big:\n{body}\n\n\ndef loose():\n    return 0\n"
+    chunks = chunk_file("mix.py", source, "fh", "python")
+    for chunk in chunks:
+        if chunk.parent_name == "Big":
+            assert "def loose" not in chunk.content
+
+
+def test_no_chunk_exceeds_max_tokens_including_header():
+    """The HEADER_RESERVE_TOKENS allowance must keep header+body under cap."""
+    body = "\n".join(
+        f"    def method_{i}(self):\n        return {i}  # " + "pad " * 200
+        for i in range(6)
+    )
+    source = f"class Wide:\n{body}\n"
+    for chunk in chunk_file("wide.py", source, "fh", "python"):
+        assert len(chunk.content) // 4 <= MAX_TOKENS
+
+
+def test_imports_are_no_longer_prepended():
+    body = "\n".join(
+        f"    def method_{i}(self):\n        return {i}  # " + "pad " * 120
+        for i in range(8)
+    )
+    source = f"import os\nfrom sys import path\n\n\nclass Big:\n{body}\n"
+    for chunk in chunk_file("big.py", source, "fh", "python"):
+        assert "import os" not in chunk.content
+
+
 def test_functions_become_chunks_with_symbol_names():
     chunks = chunk_file("m.py", PY_TWO_FUNCS, "fh", "python")
     names = [c.symbol_name for c in chunks]
@@ -35,7 +117,7 @@ def test_functions_become_chunks_with_symbol_names():
     assert alpha.file_hash == "fh" and alpha.language == "python"
 
 
-def test_oversized_class_splits_into_methods_with_imports_and_class_header():
+def test_oversized_class_splits_into_methods_with_class_header():
     body = "\n".join(
         f"    def method_{i}(self):\n        return {i}  # " + "pad " * 120
         for i in range(8)
@@ -44,7 +126,7 @@ def test_oversized_class_splits_into_methods_with_imports_and_class_header():
     chunks = chunk_file("big.py", source, "fh", "python")
     assert len(chunks) > 1
     for chunk in chunks:
-        assert chunk.content.startswith("import os\nfrom sys import path\nclass Big:")
+        assert chunk.content.startswith("# file: big.py\n# in class: Big\n")
         assert chunk.symbol_name.startswith("method_")
 
 
@@ -110,9 +192,10 @@ def test_oversized_method_within_oversized_class_is_windowed():
     assert all(_tokens(c.content) <= MAX_TOKENS for c in chunks)
     huge_chunks = [c for c in chunks if c.symbol_name == "huge"]
     assert len(huge_chunks) > 1
-    # Only the first window carries the header -- repeating it on every
-    # window would waste the very budget this split is meant to protect.
-    assert huge_chunks[0].content.startswith("import os\nclass Big:")
+    # Every window carries the header -- it's added in a single final pass
+    # over all chunks (_apply_headers), not attached per-window during the
+    # split itself.
+    assert all(c.content.startswith("# file: c.py\n# in class: Big\n\n") for c in huge_chunks)
 
 
 def test_tiny_siblings_merge():
@@ -181,7 +264,7 @@ def test_kotlin_oversized_class_splits_into_methods_with_symbol_names():
     chunks = chunk_file("big.kt", source, "fh", "kotlin")
     assert len(chunks) > 1
     for chunk in chunks:
-        assert chunk.content.startswith("import kotlin.text.Regex\nclass Big")
+        assert chunk.content.startswith("# file: big.kt\n# in class: Big\n")
         assert chunk.symbol_name.startswith("method_")
 
 
@@ -246,3 +329,91 @@ def test_own_generated_protobuf_is_skipped():
             skipped.append(rel_path)
     assert any(path.endswith("scip_pb2.py") for path in skipped)
     assert not any(path.endswith("chunker.py") for path in skipped)
+
+
+def test_oversized_file_reason_threshold():
+    from codeintel.chunker import MAX_FILE_BYTES, oversized_file_reason
+    assert oversized_file_reason(MAX_FILE_BYTES) is None
+    reason = oversized_file_reason(MAX_FILE_BYTES + 1)
+    assert reason is not None and reason.startswith("too-large:")
+
+
+def test_gitignored_returns_empty_set_for_non_git_dir(tmp_path):
+    """The whole unit-test suite indexes plain tmp_path dirs, not git repos."""
+    from codeintel.chunker import gitignored
+    assert gitignored(tmp_path, ["a.py", "b.py"]) == set()
+
+
+def test_gitignored_degrades_to_nothing_ignored_when_git_is_absent(tmp_path, monkeypatch):
+    import subprocess
+    from codeintel.chunker import gitignored
+
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert gitignored(tmp_path, ["a.py"]) == set()
+
+
+@pytest.mark.integration
+def test_force_include_rescues_gitignored_file(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("thirdparty/\n")
+    (tmp_path / "thirdparty").mkdir()
+    (tmp_path / "thirdparty" / "g.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "keep.py").write_text("def g():\n    return 2\n")
+    files = iter_source_files(tmp_path, include_prefixes=("thirdparty/g.py",))
+    rels = {rel for _, rel in files}
+    assert "thirdparty/g.py" in rels and "keep.py" in rels
+
+
+def test_oversized_class_with_no_methods_is_windowed():
+    """A constants-only class (no methods) has no natural sub-boundary either
+    -- it must be windowed like an oversized top-level def, not shipped whole."""
+    from codeintel.chunker import MAX_TOKENS, _tokens
+    body = "\n".join(
+        f'    FIELD_{i} = "' + "p" * 120 + '"' for i in range(60)
+    )
+    source = f"class Constants:\n{body}\n"
+    chunks = chunk_file("constants.py", source, "fh", "python")
+    assert len(chunks) > 1
+    assert all(_tokens(c.content) <= MAX_TOKENS for c in chunks)
+    assert all(c.symbol_name == "Constants" and c.parent_name == "Constants"
+              for c in chunks)
+
+
+@pytest.mark.integration
+def test_gitignored_reads_real_gitignore(tmp_path):
+    import subprocess
+    from codeintel.chunker import gitignored
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("build/\n")
+    assert gitignored(tmp_path, ["build/out.py", "src/keep.py"]) == {"build/out.py"}
+
+
+@pytest.mark.integration
+def test_gitignored_handles_no_matches(tmp_path):
+    """git check-ignore exits 1 when nothing matches -- that is NOT an error."""
+    import subprocess
+    from codeintel.chunker import gitignored
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("build/\n")
+    assert gitignored(tmp_path, ["src/keep.py"]) == set()
+
+
+@pytest.mark.integration
+def test_own_repo_satisfies_header_invariants():
+    """Acceptance criteria 1 and 2, checked against real source."""
+    from pathlib import Path
+    src = Path(__file__).resolve().parent.parent / "src"
+    checked = 0
+    for abs_path, rel_path in iter_source_files(src):
+        source = abs_path.read_bytes().decode("utf-8", errors="replace")
+        if skip_reason(rel_path, source) is not None:
+            continue
+        for chunk in chunk_file(rel_path, source, "fh", language_for(abs_path)):
+            assert chunk.content.startswith(f"# file: {rel_path}\n")
+            assert len(chunk.content) // 4 <= MAX_TOKENS
+            checked += 1
+    assert checked > 50

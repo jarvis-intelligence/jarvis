@@ -13,7 +13,8 @@ from pathlib import Path
 
 from codeintel import config
 from codeintel.chunker import (
-    Chunk, chunk_file, hash_file, iter_source_files, language_for, skip_reason,
+    CONTENT_FORMAT, Chunk, _force_included, chunk_file, hash_file, iter_source_files,
+    language_for, oversized_file_reason, skip_reason,
 )
 from codeintel.embeddings import EmbeddingModel, default_model
 from codeintel.search import ZoektHit, ZoektUnavailableError, search_zoekt
@@ -86,11 +87,35 @@ class SkippedFile:
 
 
 @dataclass(frozen=True)
+class TableIdentity:
+    """Everything that must match for stored vectors to be reusable. Extends
+    the model-identity rule with the prefixes actually applied at encode time
+    and the format of the stored chunk text."""
+    model_name: str
+    model_revision: str
+    query_prefix: str
+    doc_prefix: str
+    content_format: int
+
+
+@dataclass(frozen=True)
+class TokenStats:
+    """Chunk-size distribution over newly-chunked content. Percentiles beat a
+    bucketed histogram here: one line of CLI output that is directly
+    actionable against MAX_TOKENS."""
+    p50: int
+    p90: int
+    max: int
+
+
+@dataclass(frozen=True)
 class SemanticIndexReport:
     rows: int                                  # chunks written to the table
     files: int                                 # source files admitted
     skipped: tuple[SkippedFile, ...] = ()
     truncated: int | None = None               # None = could not be measured
+    token_stats: TokenStats | None = None
+    prefix_warning: str | None = None
 
 
 class SemanticStore:
@@ -123,14 +148,24 @@ class SemanticStore:
         except ValueError:
             return None
 
-    def table_identity(self, slug: str) -> tuple[str, str] | None:
+    def table_identity(self, slug: str) -> TableIdentity | None:
         table = self._open(slug)
         if table is None:
             return None
         rows = table.head(1).to_pylist()
         if not rows:
             return None
-        return (rows[0]["model_name"], rows[0]["model_revision"])
+        row = rows[0]
+        # .get() with defaults: a table written before these columns existed
+        # reads as content_format 0, which mismatches the current format and
+        # forces a full rebuild instead of raising KeyError.
+        return TableIdentity(
+            model_name=row["model_name"],
+            model_revision=row["model_revision"],
+            query_prefix=row.get("query_prefix", ""),
+            doc_prefix=row.get("doc_prefix", ""),
+            content_format=row.get("content_format", 0),
+        )
 
     def rows_by_path(self, slug: str) -> dict[str, list[dict]]:
         table = self._open(slug)
@@ -168,12 +203,12 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
                    include_prefixes: tuple[str, ...] = ()) -> SemanticIndexReport:
     model = model or default_model()
     store = SemanticStore(config.lancedb_dir(root))
-    model_name, model_revision = model.identity()
+    query_prefix, doc_prefix = model.prefixes()
+    identity = TableIdentity(*model.identity(), query_prefix, doc_prefix, CONTENT_FORMAT)
 
-    # Model-identity rule: the previous table is only a reuse source when
-    # its identity matches — vectors from different models never mix.
-    previous = (store.rows_by_path(slug)
-                if store.table_identity(slug) == (model_name, model_revision) else {})
+    # Reuse rule: the previous table is only a reuse source when its full
+    # identity matches -- model, prefixes, and stored-content format alike.
+    previous = store.rows_by_path(slug) if store.table_identity(slug) == identity else {}
     vector_by_hash = {row["content_hash"]: row["vector"]
                       for rows in previous.values() for row in rows}
 
@@ -181,7 +216,16 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
     pending: list[Chunk] = []
     skipped: list[SkippedFile] = []
     admitted = 0
-    for abs_path, rel_path in iter_source_files(repo_path):
+    for abs_path, rel_path in iter_source_files(repo_path, include_prefixes):
+        # Force-include always admits -- it must override the size cap the
+        # same way it overrides the banner/long-line check below, so an
+        # operator can rescue a huge generated file just as they rescue a
+        # gitignored one.
+        if not _force_included(rel_path, include_prefixes):
+            reason = oversized_file_reason(abs_path.stat().st_size)
+            if reason is not None:
+                skipped.append(SkippedFile(rel_path, reason))
+                continue
         data = abs_path.read_bytes()
         source = data.decode("utf-8", errors="replace")
         # Admission runs BEFORE the carry-forward hash check on purpose: a
@@ -214,18 +258,29 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
         # away a perfectly valid table over a mere counting failure.
         truncated = None
 
+    token_counts = sorted(len(c.content) // 4 for c in pending)
+    stats = TokenStats(
+        p50=token_counts[len(token_counts) // 2],
+        p90=token_counts[min(int(len(token_counts) * 0.9), len(token_counts) - 1)],
+        max=token_counts[-1],
+    ) if token_counts else None
+
     rows = carried + [
         {"chunk_id": uuid.uuid4().hex, "content_hash": c.content_hash,
          "file_hash": c.file_hash, "file_path": c.file_path,
          "start_line": c.start_line, "end_line": c.end_line,
          "symbol_name": c.symbol_name or "", "language": c.language,
          "content": c.content, "vector": vector_by_hash[c.content_hash],
-         "model_name": model_name, "model_revision": model_revision}
+         "model_name": identity.model_name, "model_revision": identity.model_revision,
+         "query_prefix": identity.query_prefix, "doc_prefix": identity.doc_prefix,
+         "content_format": identity.content_format}
         for c in pending
     ]
     store.overwrite(slug, rows)
     return SemanticIndexReport(rows=len(rows), files=admitted,
-                               skipped=tuple(skipped), truncated=truncated)
+                               skipped=tuple(skipped), truncated=truncated,
+                               token_stats=stats,
+                               prefix_warning=model.prefix_warning())
 
 
 def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None = None,
@@ -238,13 +293,24 @@ def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None
 
     model = model or default_model()
     warning: str | None = None
-    if model.identity() != identity:
-        # Query must use the model the table was built with — never the
-        # configured one. Correct results now; the warning nudges a reindex.
-        warning = (f"configured embedding model {model.identity()[0]}@{model.identity()[1]} "
-                   f"differs from the index's {identity[0]}@{identity[1]}; queried with the "
-                   f"index's model — run codeintel reindex {slug} to migrate")
-        model = EmbeddingModel(model_name=identity[0], revision=identity[1])
+    configured = TableIdentity(*model.identity(), *model.prefixes(), CONTENT_FORMAT)
+    if configured != identity:
+        # Query with the model AND prefixes the table was built with, never the
+        # configured ones -- applying a different prefix to the query than the
+        # documents were embedded with is exactly the silent mismatch this
+        # feature exists to prevent.
+        warning = (f"configured embedding model {configured.model_name}@"
+                   f"{configured.model_revision} (prefixes "
+                   f"{configured.query_prefix!r}/{configured.doc_prefix!r}, content format "
+                   f"{configured.content_format}) differs from the index's "
+                   f"{identity.model_name}@{identity.model_revision} (prefixes "
+                   f"{identity.query_prefix!r}/{identity.doc_prefix!r}, content format "
+                   f"{identity.content_format}); queried with the index's — "
+                   f"run codeintel reindex {slug} to migrate")
+        model = EmbeddingModel(model_name=identity.model_name,
+                               revision=identity.model_revision,
+                               query_prefix=identity.query_prefix,
+                               doc_prefix=identity.doc_prefix)
 
     vector_rows = store.search(slug, model.embed_query(query), VECTOR_TOP_K)
 
@@ -266,6 +332,9 @@ def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None
         ],
         "total": len(fused),
     }
+    prefix_note = model.prefix_warning()
+    if prefix_note:
+        warning = f"{warning}; {prefix_note}" if warning else prefix_note
     if warning:
         result["warning"] = warning
     return result

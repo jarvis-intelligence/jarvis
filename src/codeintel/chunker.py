@@ -1,15 +1,17 @@
 """tree-sitter AST chunking for the semantic index.
 
 Splits source files at function/class boundaries (256-512 token target;
-tokens approximated as len(text)//4, no tokenizer dependency). An
-oversized class splits into per-method chunks, each prefixed with the
-file's imports (capped) plus the class definition line — the "context
-re-add" pattern. An oversized function/non-class def (no natural
-sub-boundary to split into) instead falls back to fixed overlapping
-windows over just its own text — without this, a single long function
-ships as one unbounded chunk, which can blow an embedding model's
-sequence-length/memory limits at encode time. Unparseable files fall
-back to fixed overlapping windows over the whole file.
+tokens approximated as len(text)//4, no tokenizer dependency). Every
+chunk gets a `# file: <path>` (plus `# in class: <Parent>` when
+applicable) context header attached as a final pass, after splitting and
+merging. An oversized class splits into per-method chunks, each tagged
+with its enclosing class name so the header can re-add that context. An
+oversized function/non-class def (no natural sub-boundary to split into)
+instead falls back to fixed overlapping windows over just its own text —
+without this, a single long function ships as one unbounded chunk, which
+can blow an embedding model's sequence-length/memory limits at encode
+time. Unparseable files fall back to fixed overlapping windows over the
+whole file.
 tree_sitter_language_pack is imported lazily so a base install never
 needs it.
 """
@@ -17,6 +19,7 @@ needs it.
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,7 +28,20 @@ from codeintel.config import IGNORED_DIRS
 MAX_TOKENS = 512
 MIN_TOKENS = 256
 OVERLAP_TOKENS = 50
-MAX_IMPORT_LINES = 10
+
+# Every chunk gets a context header appended by _apply_headers(). Splitting
+# happens before that header exists, so the sizing paths reserve this
+# allowance -- otherwise a chunk sized exactly at MAX_TOKENS would overflow
+# the cap the moment its header lands.
+HEADER_RESERVE_TOKENS = 32
+_EFFECTIVE_MAX_TOKENS = MAX_TOKENS - HEADER_RESERVE_TOKENS
+
+# Shape of the text stored in Chunk.content. Bump when that shape changes:
+# semantic.py folds this into the table identity, so a bump invalidates every
+# stored vector and forces a full re-chunk. Needed because unchanged files are
+# matched by file_hash, not content_hash -- without a version, a file whose
+# bytes never changed would carry its old-format rows forward forever.
+CONTENT_FORMAT = 1
 
 # Admission policy for the semantic index (the "Layer 4" pre-index filter).
 # Generated and minified files are pure noise once embedded: they dominate
@@ -41,6 +57,7 @@ GENERATED_BANNERS = ("auto" + "-generated", "@" + "generated",
                      "do not modify" + " this file")
 BANNER_SCAN_CHARS = 2048
 MAX_LINE_CHARS = 5000
+MAX_FILE_BYTES = 1_048_576   # 1 MB backstop for files that dodge the other rules
 
 LANGUAGES = {".py": "python", ".ts": "typescript", ".tsx": "tsx",
              ".java": "java", ".kt": "kotlin", ".swift": "swift"}
@@ -58,14 +75,6 @@ _CLASS_NODE_TYPES = {"class_definition", "class_declaration",
 # Kotlin's grammar attaches no "name" field to class_declaration/function_declaration
 # (verified by direct parse); the identifier is a plain positional child instead.
 _IDENTIFIER_NODE_TYPES = {"type_identifier", "simple_identifier"}
-_IMPORT_NODE_TYPES: dict[str, set[str]] = {
-    "python": {"import_statement", "import_from_statement"},
-    "typescript": {"import_statement"},
-    "tsx": {"import_statement"},
-    "java": {"import_declaration"},
-    "kotlin": {"import_list"},
-    "swift": {"import_declaration"},
-}
 
 
 @dataclass(frozen=True)
@@ -78,6 +87,7 @@ class Chunk:
     content_hash: str
     file_hash: str
     language: str
+    parent_name: str | None = None   # enclosing class, for the context header
 
 
 def _tokens(text: str) -> int:
@@ -119,22 +129,87 @@ def skip_reason(rel_path: str, source: str,
     return None
 
 
-def iter_source_files(repo_path: Path) -> list[tuple[Path, str]]:
+def oversized_file_reason(size_bytes: int) -> str | None:
+    """Checked from the file's stat() before read_bytes(), so a huge file is
+    never read into memory just to be rejected. A pure backstop: banner and
+    long-line detection already catch generated and minified content, leaving
+    only the large-file-with-normal-lines shape for this rule."""
+    if size_bytes > MAX_FILE_BYTES:
+        return f"too-large:{size_bytes}"
+    return None
+
+
+def gitignored(repo_path: Path, rel_paths: list[str]) -> set[str]:
+    """Which of `rel_paths` git ignores, via one batched subprocess.
+
+    `git check-ignore` does not use the usual exit-code convention: 0 means
+    some paths matched, 1 means none matched, and anything else is a real
+    error. Treating non-zero as failure would silently disable filtering on
+    every repo that happens to ignore nothing. Any genuine failure -- not a
+    git repo, git absent, a hang -- degrades to "nothing ignored", so the
+    worst case is indexing more, never less."""
+    if not rel_paths:
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "check-ignore", "--stdin"],
+            input="\n".join(rel_paths), capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line for line in result.stdout.splitlines() if line}
+
+
+def iter_source_files(repo_path: Path,
+                      include_prefixes: tuple[str, ...] = ()) -> list[tuple[Path, str]]:
+    """`include_prefixes` rescues a gitignored path the same way it rescues a
+    banner/long-line match in skip_reason() -- --semantic-include is a single
+    escape hatch across every admission check, not just some of them."""
     files: list[tuple[Path, str]] = []
     for path in sorted(repo_path.rglob("*")):
         if any(part in IGNORED_DIRS for part in path.parts):
             continue
         if path.is_file() and path.suffix in LANGUAGES:
             files.append((path, path.relative_to(repo_path).as_posix()))
-    return files
+    ignored = gitignored(repo_path, [rel for _, rel in files])
+    return [(path, rel) for path, rel in files
+            if rel not in ignored or _force_included(rel, include_prefixes)]
 
 
 def _make_chunk(rel_path: str, language: str, file_hash: str, content: str,
-                start_line: int, end_line: int, symbol: str | None) -> Chunk:
+                start_line: int, end_line: int, symbol: str | None,
+                parent: str | None = None) -> Chunk:
     return Chunk(file_path=rel_path, start_line=start_line, end_line=end_line,
                  content=content, symbol_name=symbol,
                  content_hash=hashlib.sha256(content.encode()).hexdigest(),
-                 file_hash=file_hash, language=language)
+                 file_hash=file_hash, language=language, parent_name=parent)
+
+
+def _chunk_header(rel_path: str, chunk: Chunk) -> str:
+    """Path plus enclosing class. The chunk's own symbol name is deliberately
+    omitted -- it is already the first line of the chunk's code, so repeating
+    it spends budget without adding a matchable term. The parent class is a
+    different case: a method split out of an oversized class no longer
+    contains its class name anywhere."""
+    lines = [f"# file: {rel_path}"]
+    if chunk.parent_name:
+        lines.append(f"# in class: {chunk.parent_name}")
+    return "\n".join(lines)
+
+
+def _apply_headers(chunks: list[Chunk], rel_path: str) -> list[Chunk]:
+    """Attach the context header to every chunk, as the last step of
+    chunk_file(). Deliberately a final pass rather than done at construction:
+    _merge_small concatenates chunk contents, so a header attached earlier
+    would appear twice inside a merged chunk."""
+    return [
+        _make_chunk(rel_path, c.language, c.file_hash,
+                    f"{_chunk_header(rel_path, c)}\n\n{c.content}",
+                    c.start_line, c.end_line, c.symbol_name, c.parent_name)
+        for c in chunks
+    ]
 
 
 def _node_name(node) -> str | None:
@@ -171,7 +246,7 @@ def _window_lines(lines: list[str], base_line: int) -> list[tuple[str, int, int]
     pieces, each still tagged with its original source line number -- so the
     greedy accumulation loop below only ever handles pieces already capped
     at the window size, and never has to special-case a line mid-window."""
-    window_chars, overlap_chars = MAX_TOKENS * 4, OVERLAP_TOKENS * 4
+    window_chars, overlap_chars = _EFFECTIVE_MAX_TOKENS * 4, OVERLAP_TOKENS * 4
 
     pieces: list[tuple[str, int]] = []  # (text, source_line_no)
     for idx, line in enumerate(lines):
@@ -227,31 +302,43 @@ def _split_oversized_def(node, text: str, rel_path: str, language: str, file_has
 
 
 def _split_class(node, source: str, rel_path: str, language: str,
-                 file_hash: str, imports: list[str]) -> list[Chunk]:
-    class_line = source[node.start_byte:node.end_byte].splitlines()[0]
-    header = "\n".join([*imports[:MAX_IMPORT_LINES], class_line])
+                 file_hash: str) -> list[Chunk]:
+    """Methods of an oversized class become their own chunks, tagged with the
+    class name so _apply_headers can re-add that context later."""
+    class_name = _node_name(node)
     methods = [n for n in _walk(node)
                if n.type in _DEF_NODE_TYPES[language] and n.type not in _CLASS_NODE_TYPES]
     if not methods:
         text = source[node.start_byte:node.end_byte]
+        if _tokens(text) > _EFFECTIVE_MAX_TOKENS:
+            # A methods-less class (e.g. constants-only) has no natural
+            # sub-boundary either -- window it the same way an oversized
+            # top-level def is windowed, so no chunk ships over the cap.
+            base_line = node.start_point[0] + 1
+            return [
+                _make_chunk(rel_path, language, file_hash, piece, start, end,
+                            class_name, class_name)
+                for piece, start, end in _window_lines(text.splitlines(), base_line)
+            ]
         return [_make_chunk(rel_path, language, file_hash, text,
-                            node.start_point[0] + 1, node.end_point[0] + 1, _node_name(node))]
+                            node.start_point[0] + 1, node.end_point[0] + 1, class_name)]
     chunks: list[Chunk] = []
     for m in methods:
         symbol = _node_name(m)
-        full_text = f"{header}\n{source[m.start_byte:m.end_byte]}"
-        if _tokens(full_text) > MAX_TOKENS:
-            # A single method (plus its context header) can itself exceed
-            # the cap -- window it the same way an oversized top-level def
-            # would be, rather than shipping it whole.
+        text = source[m.start_byte:m.end_byte]
+        if _tokens(text) > _EFFECTIVE_MAX_TOKENS:
+            # A single method can itself exceed the cap -- window it the same
+            # way an oversized top-level def would be.
             base_line = m.start_point[0] + 1
             chunks.extend(
-                _make_chunk(rel_path, language, file_hash, piece, start, end, symbol)
-                for piece, start, end in _window_lines(full_text.splitlines(), base_line)
+                _make_chunk(rel_path, language, file_hash, piece, start, end,
+                            symbol, class_name)
+                for piece, start, end in _window_lines(text.splitlines(), base_line)
             )
         else:
-            chunks.append(_make_chunk(rel_path, language, file_hash, full_text,
-                                      m.start_point[0] + 1, m.end_point[0] + 1, symbol))
+            chunks.append(_make_chunk(rel_path, language, file_hash, text,
+                                      m.start_point[0] + 1, m.end_point[0] + 1,
+                                      symbol, class_name))
     return chunks
 
 
@@ -260,37 +347,24 @@ def _merge_small(chunks: list[Chunk]) -> list[Chunk]:
     for chunk in chunks:
         if (merged and _tokens(merged[-1].content) < MIN_TOKENS
                 and merged[-1].end_line < chunk.start_line
+                # Never merge across a parent boundary: a class's last method
+                # is adjacent to the next top-level def, and merging them would
+                # stamp "# in class: X" onto code that is not in X.
+                and merged[-1].parent_name == chunk.parent_name
                 # MAX_TOKENS is a hard cap; MIN_TOKENS is only a soft
                 # preference -- never merge past the hard cap just to grow
                 # a too-small chunk.
-                and _tokens(merged[-1].content) + _tokens(chunk.content) <= MAX_TOKENS):
+                and _tokens(merged[-1].content) + _tokens(chunk.content)
+                <= _EFFECTIVE_MAX_TOKENS):
             prev = merged.pop()
             merged.append(_make_chunk(chunk.file_path, chunk.language, chunk.file_hash,
                                       f"{prev.content}\n\n{chunk.content}",
                                       prev.start_line, chunk.end_line,
-                                      prev.symbol_name or chunk.symbol_name))
+                                      prev.symbol_name or chunk.symbol_name,
+                                      prev.parent_name))
         else:
             merged.append(chunk)
     return merged
-
-
-def _collect_imports(root, source: str, language: str) -> list[str]:
-    """One string per import statement, so MAX_IMPORT_LINES caps meaningfully.
-
-    Most grammars give each import its own top-level node. Kotlin instead
-    wraps every import in a single top-level `import_list` container node
-    (verified by direct parse), so that container is expanded into its
-    `import_header` children instead of being kept as one opaque blob."""
-    imports: list[str] = []
-    for node in root.children:
-        if node.type not in _IMPORT_NODE_TYPES.get(language, set()):
-            continue
-        if node.type == "import_list":
-            imports.extend(source[c.start_byte:c.end_byte]
-                            for c in node.children if c.type == "import_header")
-        else:
-            imports.append(source[node.start_byte:node.end_byte])
-    return imports
 
 
 def chunk_file(rel_path: str, source: str, file_hash: str, language: str) -> list[Chunk]:
@@ -298,24 +372,23 @@ def chunk_file(rel_path: str, source: str, file_hash: str, language: str) -> lis
         from tree_sitter_language_pack import get_parser
         tree = get_parser(language).parse(source.encode("utf-8"))
     except Exception:
-        return _fixed_windows(rel_path, language, file_hash, source)
+        return _apply_headers(_fixed_windows(rel_path, language, file_hash, source), rel_path)
 
     root = tree.root_node
-    imports = _collect_imports(root, source, language)
     defs = [n for n in root.children if n.type in _DEF_NODE_TYPES.get(language, set())]
     if not defs:
-        return _fixed_windows(rel_path, language, file_hash, source)
+        return _apply_headers(_fixed_windows(rel_path, language, file_hash, source), rel_path)
 
     chunks: list[Chunk] = []
     for node in defs:
         text = source[node.start_byte:node.end_byte]
         target = node.children[-1] if node.type == "decorated_definition" else node
-        if target.type in _CLASS_NODE_TYPES and _tokens(text) > MAX_TOKENS:
-            chunks.extend(_split_class(target, source, rel_path, language, file_hash, imports))
-        elif _tokens(text) > MAX_TOKENS:
+        if target.type in _CLASS_NODE_TYPES and _tokens(text) > _EFFECTIVE_MAX_TOKENS:
+            chunks.extend(_split_class(target, source, rel_path, language, file_hash))
+        elif _tokens(text) > _EFFECTIVE_MAX_TOKENS:
             chunks.extend(_split_oversized_def(node, text, rel_path, language, file_hash))
         else:
             chunks.append(_make_chunk(rel_path, language, file_hash, text,
                                       node.start_point[0] + 1, node.end_point[0] + 1,
                                       _node_name(node)))
-    return _merge_small(chunks)
+    return _apply_headers(_merge_small(chunks), rel_path)

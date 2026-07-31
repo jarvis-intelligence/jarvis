@@ -240,6 +240,12 @@ def _print_semantic_report(report: "SemanticIndexReport") -> None:
     print(f"semantic: {report.rows} chunks from {report.files} files", file=sys.stderr)
     for skipped in report.skipped:
         print(f"semantic: skipped {skipped.file_path} ({skipped.reason})", file=sys.stderr)
+    if report.token_stats is not None:
+        stats = report.token_stats
+        print(f"semantic: chunk tokens p50={stats.p50} p90={stats.p90} "
+              f"max={stats.max}", file=sys.stderr)
+    if report.prefix_warning:
+        print(f"warning: {report.prefix_warning}", file=sys.stderr)
     if report.truncated is None:
         print("semantic: could not measure truncation", file=sys.stderr)
     elif report.truncated > 0:

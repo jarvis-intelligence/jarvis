@@ -717,3 +717,29 @@ def test_semantic_report_notes_unmeasured_truncation(capsys):
 
     _print_semantic_report(SemanticIndexReport(rows=10, files=2, truncated=None))
     assert "could not measure truncation" in capsys.readouterr().err
+
+
+def test_report_prints_token_percentiles(capsys):
+    from codeintel.index_cli import _print_semantic_report
+    from codeintel.semantic import SemanticIndexReport, TokenStats
+
+    _print_semantic_report(SemanticIndexReport(
+        rows=95, files=15, truncated=0, token_stats=TokenStats(180, 410, 498)))
+    assert "chunk tokens p50=180 p90=410 max=498" in capsys.readouterr().err
+
+
+def test_report_omits_percentiles_when_absent(capsys):
+    from codeintel.index_cli import _print_semantic_report
+    from codeintel.semantic import SemanticIndexReport
+
+    _print_semantic_report(SemanticIndexReport(rows=10, files=2, truncated=0))
+    assert "chunk tokens" not in capsys.readouterr().err
+
+
+def test_report_prints_prefix_warning(capsys):
+    from codeintel.index_cli import _print_semantic_report
+    from codeintel.semantic import SemanticIndexReport
+
+    _print_semantic_report(SemanticIndexReport(
+        rows=10, files=2, truncated=0, prefix_warning="model X is not in the map"))
+    assert "model X is not in the map" in capsys.readouterr().err

@@ -66,6 +66,12 @@ class FakeEmbedder:
     def count_oversized(self, texts):
         return 0
 
+    def prefixes(self):
+        return ("", "")
+
+    def prefix_warning(self):
+        return None
+
 
 FUNC = 'def f_{n}():\n    """{pad}"""\n    return {n}\n'
 
@@ -93,13 +99,14 @@ def test_missing_lancedb_raises_install_hint(tmp_path, monkeypatch):
 
 
 def test_index_semantic_writes_rows(tmp_path, lancedb_available):
-    from codeintel.semantic import SemanticStore, index_semantic
+    from codeintel.chunker import CONTENT_FORMAT
+    from codeintel.semantic import SemanticStore, TableIdentity, index_semantic
     repo = _write_repo(tmp_path)
     embedder = FakeEmbedder()
     report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=embedder)
     assert report.rows == 2
     store = SemanticStore((tmp_path / "data") / "lancedb")
-    assert store.table_identity("myrepo") == ("fake-model", "rev1")
+    assert store.table_identity("myrepo") == TableIdentity("fake-model", "rev1", "", "", CONTENT_FORMAT)
     rows = store.rows_by_path("myrepo")
     assert set(rows) == {"mod_0.py", "mod_1.py"}
     assert rows["mod_0.py"][0]["language"] == "python"
@@ -128,17 +135,23 @@ def test_deleted_files_drop_out(tmp_path, lancedb_available):
 
 
 def test_model_change_forces_full_reembed(tmp_path, lancedb_available):
-    from codeintel.semantic import SemanticStore, index_semantic
+    from codeintel.chunker import CONTENT_FORMAT
+    from codeintel.semantic import SemanticStore, TableIdentity, index_semantic
     repo = _write_repo(tmp_path)
     index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
     changed = FakeEmbedder(revision="rev2")
     index_semantic(repo, "myrepo", root=tmp_path / "data", model=changed)
     assert len(changed.embedded) == 2  # nothing reused across revisions
     identity = SemanticStore((tmp_path / "data") / "lancedb").table_identity("myrepo")
-    assert identity == ("fake-model", "rev2")
+    assert identity == TableIdentity("fake-model", "rev2", "", "", CONTENT_FORMAT)
 
 
 def test_duplicate_content_embedded_once(tmp_path, lancedb_available):
+    """Two files with byte-identical bodies still embed separately, because
+    the per-chunk header (`# file: <path>`) differs and content_hash covers
+    the header. Dedup only applies to genuinely identical stored content —
+    e.g. the same file re-chunked, or two chunks within one file that
+    happen to produce identical text."""
     from codeintel.semantic import index_semantic
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -147,7 +160,7 @@ def test_duplicate_content_embedded_once(tmp_path, lancedb_available):
     (repo / "b.py").write_text(same)
     embedder = FakeEmbedder()
     report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=embedder)
-    assert report.rows == 2 and len(embedder.embedded) == 1
+    assert report.rows == 2 and len(embedder.embedded) == 2
 
 
 def _indexed(tmp_path):
@@ -183,11 +196,13 @@ def test_query_model_mismatch_uses_table_model_and_warns(tmp_path, lancedb_avail
     # class so it never tries to download "fake-model" from HuggingFace.
     monkeypatch.setattr(
         semantic, "EmbeddingModel",
-        lambda model_name, revision: FakeEmbedder(name=model_name, revision=revision),
+        lambda model_name, revision, query_prefix, doc_prefix:
+            FakeEmbedder(name=model_name, revision=revision),
     )
     configured = FakeEmbedder(name="other-model", revision="rev9")
     result = semantic.semantic_search("myrepo", "query", root=data, model=configured)
     assert "reindex" in result["warning"]
+    assert "content format" in result["warning"]
     assert configured.embedded == []  # configured model never used for the query
 
 
@@ -226,6 +241,28 @@ def test_force_include_keeps_generated_file(tmp_path, lancedb_available):
     assert report.skipped == ()
     rows = SemanticStore((tmp_path / "data") / "lancedb").rows_by_path("myrepo")
     assert "gen.py" in rows
+
+
+def test_oversized_file_is_skipped_with_reason(tmp_path, lancedb_available, monkeypatch):
+    from codeintel import chunker
+    from codeintel.semantic import index_semantic
+    repo = _write_repo(tmp_path)
+    monkeypatch.setattr(chunker, "MAX_FILE_BYTES", 10)
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert report.rows == 0
+    assert all(s.reason.startswith("too-large:") for s in report.skipped)
+
+
+def test_force_include_rescues_oversized_file(tmp_path, lancedb_available, monkeypatch):
+    from codeintel import chunker
+    from codeintel.semantic import SemanticStore, index_semantic
+    repo = _write_repo(tmp_path)
+    monkeypatch.setattr(chunker, "MAX_FILE_BYTES", 10)
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder(),
+                            include_prefixes=("mod_0.py",))
+    assert not any(s.file_path == "mod_0.py" for s in report.skipped)
+    rows = SemanticStore((tmp_path / "data") / "lancedb").rows_by_path("myrepo")
+    assert "mod_0.py" in rows
 
 
 def test_stale_generated_rows_are_purged_on_reindex(tmp_path, lancedb_available, monkeypatch):
@@ -276,3 +313,94 @@ def test_truncated_is_none_when_counting_fails(tmp_path, lancedb_available):
     report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=_BrokenCounter())
     assert report.truncated is None
     assert report.rows == 2          # the index itself still succeeded
+
+
+def test_token_stats_reported_for_new_chunks(tmp_path, lancedb_available):
+    from codeintel.semantic import index_semantic
+    repo = _write_repo(tmp_path)
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert report.token_stats is not None
+    stats = report.token_stats
+    assert 0 < stats.p50 <= stats.p90 <= stats.max
+
+
+def test_token_stats_is_none_when_nothing_new(tmp_path, lancedb_available):
+    from codeintel.semantic import index_semantic
+    repo = _write_repo(tmp_path)
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    again = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert again.token_stats is None
+
+
+def test_table_identity_round_trips(tmp_path, lancedb_available):
+    from codeintel.chunker import CONTENT_FORMAT
+    from codeintel.semantic import SemanticStore, TableIdentity, index_semantic
+    repo = _write_repo(tmp_path)
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    identity = SemanticStore((tmp_path / "data") / "lancedb").table_identity("myrepo")
+    assert identity == TableIdentity("fake-model", "rev1", "", "", CONTENT_FORMAT)
+
+
+def test_stale_rows_not_carried_after_content_format_bump(tmp_path, lancedb_available, monkeypatch):
+    """Unchanged files are matched by file_hash, not content_hash -- so without
+    a content_format in the identity, a file whose bytes never changed would
+    carry its old-format rows forward forever."""
+    from codeintel import semantic as semantic_module
+    from codeintel.semantic import SemanticStore, index_semantic
+    repo = _write_repo(tmp_path)
+    monkeypatch.setattr(semantic_module, "CONTENT_FORMAT", 0)
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    store = SemanticStore((tmp_path / "data") / "lancedb")
+    assert all(r["content_format"] == 0 for rows in store.rows_by_path("myrepo").values()
+               for r in rows)
+
+    monkeypatch.undo()
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    rows = store.rows_by_path("myrepo")
+    assert rows and all(r["content_format"] != 0 for rs in rows.values() for r in rs)
+
+
+def test_old_table_without_new_columns_forces_rebuild(tmp_path, lancedb_available):
+    """An index written before these columns existed must read cleanly and
+    trigger a full rebuild rather than raising KeyError."""
+    import lancedb
+    from codeintel.semantic import SemanticStore
+    db_dir = (tmp_path / "data") / "lancedb"
+    db_dir.mkdir(parents=True)
+    lancedb.connect(str(db_dir)).create_table("myrepo", data=[{
+        "chunk_id": "x", "content_hash": "h", "file_hash": "fh", "file_path": "a.py",
+        "start_line": 1, "end_line": 2, "symbol_name": "", "language": "python",
+        "content": "def a(): pass", "vector": [0.0, 1.0, 0.0],
+        "model_name": "fake-model", "model_revision": "rev1",
+    }], mode="overwrite")
+    identity = SemanticStore(db_dir).table_identity("myrepo")
+    assert identity is not None and identity.content_format == 0
+
+
+def test_query_uses_the_tables_prefixes_not_the_configured_ones(tmp_path, lancedb_available, monkeypatch):
+    """A prefix mismatch must rebuild the query model from the TABLE's
+    identity. EmbeddingModel is patched because the real one would try to
+    download 'fake-model' from HuggingFace on reconstruction."""
+    from codeintel import semantic as semantic_module
+    from codeintel.semantic import index_semantic, semantic_search
+    repo = _write_repo(tmp_path)
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    monkeypatch.setattr(semantic_module, "search_zoekt", lambda *a, **k: [])
+
+    rebuilt: list[tuple] = []
+
+    def _fake_ctor(model_name=None, revision=None, query_prefix=None, doc_prefix=None, **kw):
+        rebuilt.append((model_name, revision, query_prefix, doc_prefix))
+        return FakeEmbedder(name=model_name, revision=revision)
+
+    monkeypatch.setattr(semantic_module, "EmbeddingModel", _fake_ctor)
+
+    class _PrefixedEmbedder(FakeEmbedder):
+        def prefixes(self):
+            return ("WRONG: ", "WRONG: ")
+
+    result = semantic_search("myrepo", "auth", root=tmp_path / "data",
+                             model=_PrefixedEmbedder())
+    assert "warning" in result and "prefix" in result["warning"].lower()
+    # Rebuilt with the table's empty prefixes, not the configured "WRONG: ".
+    assert rebuilt == [("fake-model", "rev1", "", "")]
