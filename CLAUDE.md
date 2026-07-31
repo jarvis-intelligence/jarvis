@@ -85,8 +85,11 @@ is a real, user-facing identifier.
 `{"error": "..."}` rather than raising — this keeps the stdio server alive across query bugs. Every
 nav tool takes `repo` (the slug from `codeintel index`) plus a tool-specific `symbol` or `path`.
 
-**Known gap:** `scip expt-convert` (SCIP v0.7.0) never populates `relationships`, so `typeHierarchy`
-returns empty results on real indexes — not a bug in codeintel's query logic.
+**Known gap:** `scip expt-convert` (through v0.9.0) declares `global_symbols.relationships` but never
+populates it, so `typeHierarchy` returns an explicit `{"error": ...}` on real indexes — deliberately
+*not* empty arrays, which would wrongly assert "no supertypes". Not a bug in codeintel's query logic;
+reported upstream as [scip#464](https://github.com/scip-code/scip/issues/464) with fix PR
+[scip#465](https://github.com/scip-code/scip/pull/465) open.
 
 **Swift build-tool selection:** `scip-swift`'s own `BuildBackendDetector` picks `swiftpm`
 whenever `Package.swift` exists, even for repos that can't build that way (e.g. a UIKit-only

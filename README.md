@@ -1,15 +1,116 @@
 # codeintel
 
-Personal, local-first code intelligence MCP server. SCIP-backed navigation
-(go-to-definition, find-references, call/type hierarchy, document symbols) +
-Zoekt-backed lexical search, exposed as MCP tools to Claude Code, Cursor, or
-any MCP client — over stdio, no server, no auth, no network.
+<!-- mcp-name: io.github.phuongddx/codeintel -->
 
-Core query/search logic is ported from an internal reference implementation;
-the enterprise shell (FastAPI, Postgres, hosted-git auth, Cloud Build) is
-dropped in favor of a single stdio process reading local SQLite files.
+**Local-first code intelligence for coding agents.** Precomputed SCIP navigation
+(go-to-definition, find-references, call hierarchy, document symbols), Zoekt
+lexical search, cross-repo blast radius, and semantic search — exposed as MCP
+tools to Claude Code, Cursor, or any MCP client.
 
-## Architecture
+Runs as a single stdio process reading local SQLite files. **No server, no auth,
+no network, nothing leaves your machine.**
+
+```bash
+# 1. External indexer binaries (scip, zoekt, per-language indexers)
+curl -fsSL https://raw.githubusercontent.com/phuongddx/codeintel/main/setup.sh | sh
+
+# 2. codeintel itself
+uv tool install codeintel-mcp
+
+# 3. Index a repo (slug defaults to the directory name)
+codeintel index /path/to/your/repo
+
+# 4. Register with Claude Code
+claude mcp add codeintel --scope user -- codeintel-server
+```
+
+That's it — ask your agent "find all references to `AuthService`" and it will
+call `findReferences` instead of grepping.
+
+<details>
+<summary>Other MCP clients (Cursor, Claude Desktop, any stdio client)</summary>
+
+```json
+{
+  "mcpServers": {
+    "codeintel": {
+      "command": "codeintel-server"
+    }
+  }
+}
+```
+
+If your client can't find `codeintel-server` on `PATH` (GUI apps often don't
+inherit your shell's), use the absolute path from `which codeintel-server`.
+</details>
+
+<details>
+<summary>Running from a clone instead</summary>
+
+```bash
+git clone https://github.com/phuongddx/codeintel && cd codeintel
+uv sync
+claude mcp add codeintel --scope user -- uv --directory "$(pwd)" run codeintel-server
+```
+</details>
+
+## MCP tools
+
+| Tool | What it does |
+|------|--------------|
+| `goToDefinition` | Resolve a symbol to its defining file and range |
+| `findReferences` | Every occurrence of a symbol across the indexed repo |
+| `callHierarchy` | Incoming/outgoing calls for a symbol |
+| `documentSymbols` | Outline of every symbol defined in one file |
+| `searchCode` | Zoekt lexical/regex search, optionally filtered to one repo |
+| `semanticSearch` | Natural-language search — vector hits fused with Zoekt via reciprocal rank fusion |
+| `blastRadius` | Which *other* indexed repos depend on a package, up to 2 hops |
+| `getIndexStatus` | Published commit, freshness, staleness vs. a working tree |
+| `typeHierarchy` | Supertypes/subtypes — **currently non-functional**, see [limitations](#known-upstream-limitations) |
+
+Every nav tool takes `repo` (the slug from `codeintel index`) plus a
+tool-specific `symbol` or `path`. All tools report failure the same way — a
+`{"error": "..."}` payload rather than a transport-level error, so a query bug
+never kills the stdio server.
+
+## Requirements and limits
+
+Read this before installing — codeintel is deliberately narrow.
+
+- **macOS and Linux only.** Windows is not supported.
+- **One language per repo.** Language is detected by extension plurality across
+  git-tracked files; a polyglot monorepo gets indexed as whichever language has
+  the most files. Multi-language merge is out of scope. Override with
+  `--language`.
+- **Four language families:** TypeScript/TSX, Python, Java/Kotlin, Swift. **Rust,
+  Go, C/C++, C#, Ruby, and PHP are not supported.**
+- **Navigation and search only — codeintel never edits code.** If you want an
+  agent that can perform semantic renames and refactors, you want
+  [Serena](https://github.com/oraios/serena); the two are complementary.
+- **Indexing is a separate, explicit step.** Nothing is live-analyzed. Run
+  `codeintel index` (or `codeintel watch`) to publish an index before querying.
+- **Requires external binaries** that `setup.sh` installs:
+
+  | Purpose | Binary | Source |
+  |---------|--------|--------|
+  | SCIP → SQLite conversion | `scip` | prebuilt, pinned `v0.9.0` (**minimum** — older versions silently drop occurrence ranges) |
+  | Lexical search | `zoekt-index` · `zoekt-webserver` | cross-compiled by [our CI](.github/workflows/build-zoekt.yml) — upstream publishes no binaries |
+  | TypeScript indexing | `scip-typescript` | `npm install -g` |
+  | Python indexing | `scip-python` | `npm install -g` |
+  | Swift indexing | `scip-swift` | prebuilt, **macOS arm64 only** |
+  | Java/Kotlin indexing | `scip-java` | detect-only — Docker image, asks before pulling |
+
+  Options: `--only <name>` to install one dependency, `--force` to reinstall,
+  `--help` for usage. Re-running is safe: anything already present is skipped.
+
+Optional extras:
+
+```bash
+uv tool install "codeintel-mcp[watch]"      # + watchdog, for `codeintel watch`
+uv tool install "codeintel-mcp[semantic]"   # + lancedb/sentence-transformers/tree-sitter, for semanticSearch
+```
+
+## Why it's built this way
 
 **Overview** — client, server, the 3 engines (Query / Search / Graph), and storage:
 
@@ -39,50 +140,9 @@ Editable sources:
 [`docs/assets/codeintel-architecture.excalidraw`](docs/assets/codeintel-architecture.excalidraw) ·
 [`docs/assets/codeintel-system-architecture.excalidraw`](docs/assets/codeintel-system-architecture.excalidraw)
 
-## Status
-
-All 4 planned phases shipped. See
-[`plans/0724-2316-codeintel-mcp-implementation/plan.md`](plans/0724-2316-codeintel-mcp-implementation/plan.md).
-
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 1 | Scaffold + vendored SCIP core (`scip_pb2`, `scip_decoder`, `index_reader`) | Done |
-| 2 | MCP stdio server + 5 SCIP nav tools + `getIndexStatus` | Done |
-| 3 | Indexer CLI, registry, embedded Zoekt + `searchCode` | Done |
-| 4 | `blastRadius` (package dependency graph) + `codeintel watch` auto-reindex | Done |
-
-## Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/phuongddx/codeintel/main/setup.sh | sh
-uv sync
-```
-
-`setup.sh` installs every external binary codeintel needs into `~/.codeintel/bin`
-and adds it to your shell rc. macOS and Linux; Windows is not supported.
-
-| Purpose | Binary | Source |
-|---------|--------|--------|
-| SCIP → SQLite conversion | `scip` | prebuilt, pinned `v0.9.0` (**minimum** — older versions silently drop occurrence ranges) |
-| Lexical search | `zoekt-index` · `zoekt-webserver` | cross-compiled by [our CI](.github/workflows/build-zoekt.yml) — upstream publishes no binaries |
-| TypeScript indexing | `scip-typescript` | `npm install -g` |
-| Python indexing | `scip-python` | `npm install -g` |
-| Swift indexing | `scip-swift` | prebuilt, macOS arm64 only |
-| Java/Kotlin indexing | `scip-java` | detect-only — Docker image, asks before pulling |
-
-Options: `--only <name>` to install one dependency, `--force` to reinstall,
-`--help` for usage. Re-running is safe: anything already present is skipped.
-
-Swift indexing works end-to-end. It requires `scip >= v0.9.0`: older converters
-cannot read scip.proto's `typed_range` oneof, which is the only range encoding
-`scip-swift` emits, and silently produce an index with no navigable positions.
-`codeintel index` refuses an older `scip` rather than publishing one.
-
-Indexing a Swift repo with code-signed app-extension targets additionally requires
-`scip-swift >= v0.1.2`: earlier versions pass no code-signing overrides to `xcodebuild`, which
-then fails provisioning for every signed target before compiling anything. Because `setup.sh`
-skips any dependency that is merely *present*, an existing install is **not** upgraded by
-re-running it — use `sh ./setup.sh --only scip-swift --force`.
+Core query/search logic is ported from an internal reference implementation;
+the enterprise shell (FastAPI, Postgres, hosted-git auth, Cloud Build) is
+dropped in favor of a single stdio process reading local SQLite files.
 
 ## Indexing a repo
 
@@ -119,8 +179,9 @@ one language per index:
 
 Ties break by fixed priority (`.ts` → `.tsx` → `.py` → `.java` → `.kt` → `.swift`).
 `.git`, `node_modules`, `.venv`, `__pycache__`, `dist`, and `build` are
-skipped. Rust is **not** supported, and a monorepo gets indexed as whichever
-language has the most files — multi-language merge is out of scope. Pass `--language <name>` to override the detected language.
+skipped. Reading git rather than walking the filesystem is deliberate: a walk
+also counts gitignored scratch directories, which can outnumber a repo's own
+code and pick a language it doesn't use.
 
 The pipeline then runs: chosen indexer → `scip expt-convert` → populate the
 package dependency graph (`packages`/`edges` tables in `registry.db`) →
@@ -133,6 +194,17 @@ registry update.
 > [`src/codeintel/config.py`](src/codeintel/config.py)). It is not a user-facing
 > contract — only `<slug>` matters when calling tools.
 
+Swift indexing works end-to-end. It requires `scip >= v0.9.0`: older converters
+cannot read scip.proto's `typed_range` oneof, which is the only range encoding
+`scip-swift` emits, and silently produce an index with no navigable positions.
+`codeintel index` refuses an older `scip` rather than publishing one.
+
+Indexing a Swift repo with code-signed app-extension targets additionally requires
+`scip-swift >= v0.1.2`: earlier versions pass no code-signing overrides to `xcodebuild`, which
+then fails provisioning for every signed target before compiling anything. Because `setup.sh`
+skips any dependency that is merely *present*, an existing install is **not** upgraded by
+re-running it — use `sh ./setup.sh --only scip-swift --force`.
+
 ## Watching a repo (auto-reindex)
 
 ```bash
@@ -142,41 +214,14 @@ codeintel watch /path/to/your/repo --scheme MyScheme
 codeintel watch /path/to/your/repo --language python
 ```
 
-Runs in the foreground (not a daemon) using `watchdog` — install it with
-`uv sync --extra watch`. A burst of file changes (e.g. an editor's atomic
-save touching several files) coalesces into exactly **one** reindex. The
-reindex fires once `--debounce` seconds (default 5) have passed since the
-*last* file change — this prevents thrashing on rapid edits. `.git`,
-`node_modules`, `.venv`, `__pycache__`, `dist`, and `build` are ignored.
+Runs in the foreground (not a daemon) using `watchdog` — install it with the
+`watch` extra. A burst of file changes (e.g. an editor's atomic save touching
+several files) coalesces into exactly **one** reindex. The reindex fires once
+`--debounce` seconds (default 5) have passed since the *last* file change —
+this prevents thrashing on rapid edits. `.git`, `node_modules`, `.venv`,
+`__pycache__`, `dist`, and `build` are ignored.
 
-## Configuration
-
-**Data directory** (default `~/.codeintel`):
-```bash
-CODEINTEL_DATA_DIR=/custom/path codeintel index /path/to/repo
-```
-
-**Environment variables:**
-- `CODEINTEL_DATA_DIR` — override default `~/.codeintel` for all indexes and registry
-- `CODEINTEL_EMBEDDING_QUERY_PREFIX` / `CODEINTEL_EMBEDDING_DOC_PREFIX` — override the
-  query/document instruction prefix applied before embedding. Auto-detected for bge-m3,
-  e5, and nomic-embed; set these if using a different model that needs one — `semanticSearch`
-  warns when an unlisted model has no prefix configured.
-
-## Register with Claude Code
-
-```bash
-claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run codeintel-server
-```
-
-## MCP tools
-
-`documentSymbols` · `goToDefinition` · `findReferences` · `callHierarchy` ·
-`typeHierarchy` · `getIndexStatus` · `searchCode` · `blastRadius` · `semanticSearch`
-
-Every nav tool takes `repo` (the slug from `codeintel index`) plus a
-tool-specific `symbol` or `path`. All tools report failure the same way — a
-`{"error": "..."}` payload rather than a transport-level error.
+## Tool details
 
 - **`getIndexStatus`** takes an optional `repo_path` (the repo's local git
   working directory) to compare the published commit against
@@ -199,15 +244,15 @@ tool-specific `symbol` or `path`. All tools report failure the same way — a
   the graph always reflects each repo's *last* index run, not an
   accumulation of every run it's ever had.
 - **`semanticSearch`** takes `repo` plus a natural-language `query`. Requires the
-  optional `semantic` extra — install it with `uv sync --extra semantic`. Results
-  fuse a LanceDB vector search over tree-sitter-chunked code with `searchCode`'s
-  Zoekt hits via reciprocal rank fusion. Raises a clear error if the repo has
-  never been indexed with the extra installed (`codeintel reindex <slug>` after
-  installing it builds the missing table); indexing itself is non-fatal — a
-  failure there never blocks the rest of `codeintel index`. Semantic indexing
-  also respects `.gitignore` (on top of the hardcoded ignore-directory list)
-  and skips any file over 1 MB, in addition to the existing generated-file
-  banner/long-line detection — `--semantic-include` overrides all three.
+  optional `semantic` extra. Results fuse a LanceDB vector search over
+  tree-sitter-chunked code with `searchCode`'s Zoekt hits via reciprocal rank
+  fusion. Raises a clear error if the repo has never been indexed with the extra
+  installed (`codeintel reindex <slug>` after installing it builds the missing
+  table); indexing itself is non-fatal — a failure there never blocks the rest
+  of `codeintel index`. Semantic indexing also respects `.gitignore` (on top of
+  the hardcoded ignore-directory list) and skips any file over 1 MB, in addition
+  to the existing generated-file banner/long-line detection —
+  `--semantic-include` overrides all three.
 
 ### Known upstream limitations
 
@@ -227,7 +272,21 @@ These are real behaviors of `scip expt-convert` (as of v0.9.0), not codeintel bu
   an older codeintel still carry their old directory-derived name until you
   `codeintel reindex <slug>`.
 
-## Skills
+## Configuration
+
+**Data directory** (default `~/.codeintel`):
+```bash
+CODEINTEL_DATA_DIR=/custom/path codeintel index /path/to/repo
+```
+
+**Environment variables:**
+- `CODEINTEL_DATA_DIR` — override default `~/.codeintel` for all indexes and registry
+- `CODEINTEL_EMBEDDING_QUERY_PREFIX` / `CODEINTEL_EMBEDDING_DOC_PREFIX` — override the
+  query/document instruction prefix applied before embedding. Auto-detected for bge-m3,
+  e5, and nomic-embed; set these if using a different model that needs one — `semanticSearch`
+  warns when an unlisted model has no prefix configured.
+
+## Agent skills
 
 Three agent skills in `.claude/skills/` help onboard and use codeintel:
 
@@ -240,15 +299,6 @@ To load them in a ZCode agent, link them once:
 ```bash
 uv run python scripts/link_skills.py
 ```
-
-## Documentation
-
-For more details, see:
-- [`docs/project-overview-pdr.md`](docs/project-overview-pdr.md) — scope, value prop, out-of-scope items
-- [`docs/system-architecture.md`](docs/system-architecture.md) — architectural guarantees, storage layout, query paths
-- [`docs/codebase-summary.md`](docs/codebase-summary.md) — module map, test coverage
-- [`docs/code-standards.md`](docs/code-standards.md) — code patterns and conventions
-- [`docs/project-roadmap.md`](docs/project-roadmap.md) — all phases complete, future ideas
 
 ## Standards
 
@@ -276,3 +326,18 @@ Integration tests that shell out to the real `scip-python` / `scip` /
 uv run pytest -m "not integration"   # unit only
 uv run pytest -m integration         # real-binary pipeline
 ```
+
+## Documentation
+
+- [`docs/project-overview-pdr.md`](docs/project-overview-pdr.md) — scope, value prop, out-of-scope items
+- [`docs/system-architecture.md`](docs/system-architecture.md) — architectural guarantees, storage layout, query paths
+- [`docs/codebase-summary.md`](docs/codebase-summary.md) — module map, test coverage
+- [`docs/code-standards.md`](docs/code-standards.md) — code patterns and conventions
+- [`docs/project-roadmap.md`](docs/project-roadmap.md) — all phases complete, future ideas
+
+All 4 planned phases are shipped — see
+[`plans/0724-2316-codeintel-mcp-implementation/plan.md`](plans/0724-2316-codeintel-mcp-implementation/plan.md).
+
+## License
+
+[MIT](LICENSE)
