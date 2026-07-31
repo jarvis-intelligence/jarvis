@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- MIT `LICENSE`.
+- PyPI packaging metadata: keywords, classifiers, project URLs, SPDX license
+  expression, and the `mcp-name` marker the official MCP Registry uses to
+  verify package ownership.
+- `publish-pypi` workflow: publishes on a GitHub Release via PyPI trusted
+  publishing (OIDC, no stored API token). Gates the upload on the unit suite,
+  a release-tag/packaged-version match, a wheel that actually ships the
+  `codeintel` import package, and the presence of the registry ownership
+  marker.
+
+### Changed
+
+- The PyPI distribution name is **`codeintel-mcp`** — the plain `codeintel`
+  name is held by an unrelated, abandoned package (Komodo Edit CodeIntel, last
+  released 2018). The import package, both CLIs (`codeintel`,
+  `codeintel-server`), and the MCP server name are unchanged; only the name you
+  `install` differs.
+- README reordered install-first: value proposition, quick start, tool table,
+  and supported-language/platform limits now precede the architecture material.
+
 ## [0.2.0] - 2026-07-31
 
 ### Fixed

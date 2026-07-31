@@ -1,0 +1,130 @@
+# Publishes codeintel-mcp to PyPI on a GitHub Release, via trusted publishing.
+#
+# Why trusted publishing: PyPI mints a short-lived token from this workflow's
+# OIDC identity, so there is no long-lived API token stored as a repo secret to
+# leak or rotate. That requires `permissions: id-token: write` below, and a
+# matching publisher configured on PyPI (see the one-time setup at the bottom).
+#
+# Why the guard steps: the distribution name (`codeintel-mcp`) deliberately
+# differs from the import package (`codeintel`), which only works because of
+# `[tool.uv.build-backend] module-name` in pyproject.toml. Drop that and the
+# build still succeeds -- it just produces a wheel importing nothing. Likewise
+# the official MCP Registry verifies PyPI ownership by finding an `mcp-name`
+# marker in the published README, so losing that line breaks registry publishing
+# long after the fact. Both are cheap to assert here and expensive to discover
+# from a user's bug report.
+name: publish-pypi
+
+on:
+  release:
+    types: [published]
+  # Manual runs are safe: PyPI rejects re-uploading an existing version, so the
+  # worst case is a loud failure rather than a clobbered release.
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    # Must match the environment name on the PyPI trusted publisher, if you set
+    # one. Also the place to require a manual approval before any upload.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/codeintel-mcp
+
+    permissions:
+      # Required for PyPI trusted publishing. Nothing else needs write access.
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Run the unit test suite
+        run: |
+          set -eu
+          # Integration tests are excluded: they shell out to scip/zoekt/
+          # scip-python, which setup-smoke.yml covers on real runners. This job
+          # only needs to know the package itself is not broken.
+          uv sync
+          uv run pytest -m "not integration" -q
+
+      - name: Check the release tag matches the packaged version
+        if: github.event_name == 'release'
+        run: |
+          set -eu
+          packaged="$(uv version --short)"
+          # Accept both `v0.2.0` and `0.2.0` tag styles.
+          tagged="${GITHUB_REF_NAME#v}"
+          if [ "$packaged" != "$tagged" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match pyproject version ${packaged}." >&2
+            echo "Bump the version in pyproject.toml, or retag the release." >&2
+            exit 1
+          fi
+          echo "Version ${packaged} matches tag ${GITHUB_REF_NAME}"
+
+      - name: Build the sdist and wheel
+        run: |
+          set -eu
+          uv build
+          ls -la dist
+
+      - name: Verify the wheel ships the codeintel import package
+        run: |
+          set -eu
+          # `codeintel-mcp` is the distribution name; `codeintel` is the module.
+          # If module-name is ever dropped from pyproject.toml, the backend looks
+          # for src/codeintel_mcp/ instead and emits a wheel with no code.
+          uv run python - <<'PY'
+          import glob, sys, zipfile
+
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          modules = [n for n in names if n.startswith("codeintel/") and n.endswith(".py")]
+          if not modules:
+              tops = sorted({n.split("/")[0] for n in names})
+              sys.exit(f"{wheel} ships no codeintel/ modules; top-level entries: {tops}")
+          print(f"{wheel} ships {len(modules)} codeintel/ modules")
+          PY
+
+      - name: Verify the MCP Registry ownership marker survived
+        run: |
+          set -eu
+          # The official MCP Registry verifies a PyPI package by finding
+          # `mcp-name: <server name>` in the package README (rendered as the
+          # PyPI description). It must match the `name` in server.json.
+          marker='mcp-name: io.github.phuongddx/codeintel'
+          if ! grep -qF "$marker" README.md; then
+            echo "README.md is missing the registry ownership marker:" >&2
+            echo "  <!-- $marker -->" >&2
+            exit 1
+          fi
+          echo "Found the registry ownership marker"
+
+      - name: Publish to PyPI
+        run: |
+          set -eu
+          # No token: --trusted-publishing exchanges this job's OIDC identity
+          # for a short-lived PyPI token. `always` fails loudly rather than
+          # silently falling back to an unauthenticated upload attempt.
+          uv publish --trusted-publishing always
+
+# One-time setup, before the first release:
+#
+# 1. Create the project's trusted publisher at
+#    https://pypi.org/manage/account/publishing/ with:
+#      PyPI project name: codeintel-mcp
+#      Owner:             phuongddx
+#      Repository:        codeintel
+#      Workflow name:     publish-pypi.yml
+#      Environment:       pypi
+#    Use the "pending publisher" form -- it works before the project exists, so
+#    the very first upload can also come from this workflow.
+#
+# 2. Create a `pypi` environment under Settings -> Environments. Optionally add
+#    yourself as a required reviewer so every upload needs an explicit approval.
+#
+# 3. Cut a release: `git tag v0.2.0 && git push origin v0.2.0`, then publish a
+#    GitHub Release for that tag. This workflow does the rest.
