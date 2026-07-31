@@ -652,11 +652,13 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
 
     captured: dict = {}
 
-    def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None):
+    def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
+                        language=None):
         captured["path"] = path
         captured["slug"] = slug
         captured["scheme"] = scheme
         captured["semantic_include"] = semantic_include
+        captured["language"] = language
         return slug
 
     monkeypatch.setattr(cli, "index_repo", fake_index_repo)
@@ -798,7 +800,7 @@ def test_semantic_include_flag_reaches_index_repo_as_a_tuple(tmp_path, monkeypat
     captured = {}
 
     def _fake_index_repo(repo_path, *, slug=None, root=None, scheme=None,
-                         semantic_include=None):
+                         semantic_include=None, language=None):
         captured["semantic_include"] = semantic_include
         return "myrepo"
 
@@ -977,3 +979,66 @@ def test_language_override_to_swift_still_gets_xcodebuild(tmp_path: Path, monkey
     assert cmd[0] == "scip-swift"
     assert "--build-tool" in cmd and "xcodebuild" in cmd
     assert "--scheme" in cmd and "MyScheme" in cmd
+
+
+def test_index_parser_accepts_language_flag():
+    from codeintel.index_cli import build_parser
+
+    args = build_parser().parse_args(["index", "/repos/x", "--language", "python"])
+    assert args.language == "python"
+
+
+def test_watch_parser_accepts_language_flag():
+    from codeintel.index_cli import build_parser
+
+    args = build_parser().parse_args(["watch", "/repos/x", "--language", "swift"])
+    assert args.language == "swift"
+
+
+def test_index_parser_rejects_unknown_language():
+    from codeintel.index_cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["index", "/repos/x", "--language", "cobol"])
+
+
+def test_reindex_forwards_stored_language_override(tmp_path: Path, monkeypatch):
+    import argparse
+    import codeintel.index_cli as cli
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("my-repo", "/repos/my-repo", "python", "abc123", "indexed",
+                    language_override="python")
+    registry.close()
+
+    captured: dict = {}
+
+    def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
+                        language=None):
+        captured["language"] = language
+        return slug
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    rc = cli._cmd_reindex(argparse.Namespace(slug="my-repo"))
+    assert rc == 0
+    assert captured["language"] == "python"
+
+
+def test_cmd_index_reports_non_git_directory_as_error(tmp_path: Path, monkeypatch, capsys):
+    """NotAGitRepositoryError must be caught at the CLI boundary and printed,
+    not escape as a traceback."""
+    import argparse
+    import codeintel.index_cli as cli
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(tmp_path), slug=None, scheme=None, semantic_include=None, language=None,
+    ))
+
+    assert rc == 1
+    assert "not a git repository" in capsys.readouterr().err

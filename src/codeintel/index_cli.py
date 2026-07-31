@@ -476,8 +476,9 @@ def _cmd_index(args: argparse.Namespace) -> int:
         slug = index_repo(
             Path(args.path), slug=args.slug, scheme=getattr(args, "scheme", None),
             semantic_include=tuple(raw_include) if raw_include is not None else None,
+            language=getattr(args, "language", None),
         )
-    except (UnsupportedLanguageError, IndexingError, ValueError) as exc:
+    except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"indexed {slug}")
@@ -532,6 +533,7 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     return _cmd_index(argparse.Namespace(
         path=repo.path, slug=repo.slug, scheme=repo.scheme_override,
         semantic_include=list(repo.semantic_include),
+        language=repo.language_override,
     ))
 
 
@@ -605,7 +607,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     def _reindex() -> None:
         print(f"[watch] change detected, reindexing {slug} ...")
         try:
-            index_repo(repo_path, slug=slug, scheme=args.scheme)
+            index_repo(repo_path, slug=slug, scheme=args.scheme, language=args.language)
             print(f"[watch] {slug} reindexed")
         except Exception as exc:
             # Broad on purpose: index_repo() can raise before its own
@@ -665,6 +667,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="force-include a path prefix the generated-file filter would skip "
              "(repeatable; persisted and reused by reindex/watch)",
     )
+    index_parser.add_argument(
+        "--language",
+        choices=sorted(_INDEXER_BY_LANGUAGE),
+        help="force the indexer language instead of detecting it from git-tracked files "
+             "(persisted and reused by reindex/watch)",
+    )
     index_parser.set_defaults(func=_cmd_index)
 
     list_parser = subparsers.add_parser("list", help="list indexed repos")
@@ -689,6 +697,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--scheme", help="Xcode scheme to build (Swift repos using xcodebuild with more than one scheme)"
     )
     watch_parser.add_argument("--debounce", type=float, default=5.0, help="quiet-period seconds (default: 5.0)")
+    watch_parser.add_argument(
+        "--language",
+        choices=sorted(_INDEXER_BY_LANGUAGE),
+        help="force the indexer language instead of detecting it from git-tracked files "
+             "(persisted and reused by reindex/watch)",
+    )
     watch_parser.set_defaults(func=_cmd_watch)
 
     return parser
