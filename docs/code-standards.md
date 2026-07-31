@@ -196,20 +196,27 @@ when it's missing.
 ### 10. Model-Identity-Locked Vector Store
 
 **Pattern:** A `SemanticStore` LanceDB table (`semantic.py`) only ever holds vectors from one
-embedding model + model revision at a time. The model identity is recorded in the table itself
-(`table_identity()`), not inferred from current config.
+`TableIdentity` at a time — model name, model revision, query prefix, doc prefix, and
+`CONTENT_FORMAT` (chunker.py's version of the stored chunk-text shape) — recorded in the table
+itself (`table_identity()`), not inferred from current config.
 
 **Why:**
 - Embedding spaces from different models (or model revisions) are not comparable — mixing them
   silently would rank results by meaningless distances
-- `index_semantic()` always fully re-embeds every chunk when the configured model changes; the
+- A prefix change or a `CONTENT_FORMAT` bump changes what was actually embedded just as much as a
+  model change does — folding both into the identity means a table is only reused when the whole
+  identity matches, so a file whose bytes never changed can't carry header-less/wrong-prefix rows
+  forward forever (carry-forward keys on `file_hash`, not `content_hash`)
+- `index_semantic()` always fully re-embeds every chunk when any part of the identity changes; the
   old table's vectors are never reused
-- `semantic_search()` embeds the query using the table's *recorded* model identity, and includes
-  a `"warning"` in results if that differs from the currently configured model — nudging a
-  reindex instead of silently returning wrong-space results
+- `semantic_search()` embeds the query using the table's *recorded* identity (model, revision, and
+  prefixes — never the currently configured ones), and includes a `"warning"` in results if that
+  differs from the currently configured identity — nudging a reindex instead of silently returning
+  wrong-space results
 
 **Convention:** Never compare or merge vectors across table identities. Any change to the default
-embedding model is a data-migration event (full reindex), not a config tweak.
+embedding model, its prefixes, or `CONTENT_FORMAT` is a data-migration event (full reindex), not a
+config tweak.
 
 ---
 
@@ -320,12 +327,12 @@ uv run pytest -m integration     # real binaries only
 
 All commands are under `codeintel`:
 ```bash
-codeintel index <path> [--slug name] [--scheme name] [--semantic-include path]
+codeintel index <path> [--slug name] [--scheme name] [--language name] [--semantic-include path]
 codeintel list
 codeintel status <slug>
 codeintel reindex <slug>
 codeintel forget <slug>
-codeintel watch <path> [--slug name] [--scheme name] [--semantic-include path] [--debounce 5]
+codeintel watch <path> [--slug name] [--scheme name] [--language name] [--semantic-include path] [--debounce 5]
 ```
 
 ### Error Handling
@@ -406,7 +413,9 @@ conn = sqlite3.connect(path, uri=True)
 - Prefix with `_`: `_service()`, `_query_service`, `_json_safe()`
 
 ### Environment Variables
-- UPPER_CASE, prefixed with `CODEINTEL_`: `CODEINTEL_DATA_DIR`, `CODEINTEL_ZOEKT_BIN`
+- UPPER_CASE, prefixed with `CODEINTEL_`: `CODEINTEL_DATA_DIR`, `CODEINTEL_ZOEKT_BIN`,
+  `CODEINTEL_EMBEDDING_MODEL`, `CODEINTEL_EMBEDDING_BATCH_SIZE`,
+  `CODEINTEL_EMBEDDING_QUERY_PREFIX`, `CODEINTEL_EMBEDDING_DOC_PREFIX`
 
 ---
 

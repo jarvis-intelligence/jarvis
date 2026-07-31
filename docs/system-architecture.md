@@ -75,9 +75,15 @@ Diagram shows the full indexing lifecycle from file changes → published index:
 ### The Pipeline (index_cli.py)
 
 1. **Language Detection**
-   - Count source files by extension
+   - Count extensions across `git ls-files` (`_git_tracked_files()`), not a filesystem walk — a
+     walk also counts gitignored vendored checkouts, sibling clones, and worktrees, which can
+     outnumber the repo's own code and pick a language it doesn't use
    - Select language with most files (tie-break by priority: .ts → .tsx → .py → .java → .kt → .swift)
-   - Skip: .git, node_modules, .venv, __pycache__, dist, build, DerivedData, .build
+   - Skip: .git, node_modules, .venv, __pycache__, dist, build, DerivedData, .build (`_IGNORED_DIRS`
+     still applies on top, since git does not exclude build output a repo happens to commit)
+   - A non-git `repo_path` raises `NotAGitRepositoryError` before detection runs
+   - `--language <name>` bypasses detection entirely and persists to the registry
+     (`language_override` column, `_resolve_language()`) so `reindex`/`watch` reuse it automatically
 
 2. **Run Language Indexer**
    - Execute `scip-typescript`, `scip-python`, `scip-java`, or `scip-swift` on repo root
@@ -286,34 +292,58 @@ When a user calls `blastRadius(repo, symbol_or_package)`:
 
 When a user calls `semanticSearch(repo, query, limit=10)`:
 
-1. **Chunking (indexing time, `chunker.py`)**
-   - Parse each source file with tree-sitter, splitting at function/class boundaries
-     (256-512 token target); an unparseable language falls back to fixed-window chunks
-   - Each chunk carries a content hash for dedup and the file hash for change detection
+1. **Admission (indexing time, `chunker.py`)**
+   - `iter_source_files()` walks the repo, then drops anything `.gitignore` matches (via one
+     batched `git check-ignore --stdin` call, `gitignored()`) — a subprocess failure degrades to
+     "nothing ignored" rather than disabling filtering repo-wide
+   - `oversized_file_reason()` rejects any file over 1 MB (`MAX_FILE_BYTES`), checked from `stat()`
+     before the file is ever read into memory — a backstop for large-but-not-generated content that
+     the banner/long-line generated-file filter (see roadmap) wouldn't otherwise catch
+   - `--semantic-include <prefix>` is a single escape hatch across all three admission checks
+     (generated-file banner, gitignore, size cap) — a force-included path is always admitted
 
-2. **Embedding (indexing time, `embeddings.py`)**
+2. **Chunking (indexing time, `chunker.py`)**
+   - Parse each source file with tree-sitter, splitting at function/class boundaries
+     (256-512 token target, reserving `HEADER_RESERVE_TOKENS` headroom for the header added below);
+     an unparseable language falls back to fixed-window chunks
+   - As a final pass, every chunk gets a `# file: <path>` context header (plus `# in class: <Name>`
+     when the chunk is a method split out of an oversized class) — this re-adds context that the
+     chunk's own text lost when it was split from its surrounding file
+   - Each chunk carries a content hash (over the header + code, so a header change invalidates the
+     hash) for dedup and the file hash for change detection
+   - `chunk_file()` reports p50/p90/max token-size percentiles (`TokenStats`) over the batch, for
+     CLI visibility into how close chunks are running to `MAX_TOKENS`
+
+3. **Embedding (indexing time, `embeddings.py`)**
    - Lazy-loaded `EmbeddingModel` (default `BAAI/bge-m3`, 1024-dim, pinned revision) embeds
      changed chunks; unchanged files carry over their existing vectors by file hash
+   - A model-aware query/document instruction prefix is applied before encoding — auto-detected by
+     substring match against `MODEL_PREFIXES` (bge-m3, e5, nomic-embed), overridable via
+     `CODEINTEL_EMBEDDING_QUERY_PREFIX`/`CODEINTEL_EMBEDDING_DOC_PREFIX`. An unlisted model with no
+     override surfaces a `prefix_warning()` instead of silently applying no prefix
    - Vectors are L2-normalized for cosine search
 
-3. **Storage (`semantic.py`: `SemanticStore`)**
+4. **Storage (`semantic.py`: `SemanticStore`)**
    - One LanceDB table per repo under `~/.codeintel/lancedb/`, atomically overwritten per index run
-   - The table records the embedding model name + revision used to build it (`table_identity()`)
+   - The table records a full `TableIdentity` used to build it (`table_identity()`): model name,
+     model revision, query prefix, doc prefix, and `CONTENT_FORMAT` (chunker.py's version of the
+     stored chunk-text shape) — a table is only reused as a carry-forward source when every field
+     matches
 
-4. **Query (`semantic.py`: `semantic_search()`)**
-   - Embeds the query using the model identity stored in the table (not whatever's currently
-     configured) and runs a cosine-metric vector search
+5. **Query (`semantic.py`: `semantic_search()`)**
+   - Embeds the query using the full identity stored in the table (model, revision, *and*
+     prefixes — never whatever's currently configured) and runs a cosine-metric vector search
    - Fuses vector hits with `searchCode`'s Zoekt lexical hits via `reciprocal_rank_fusion()` (k=60);
      degrades to vector-only if Zoekt is unavailable
 
-5. **Response to MCP client**
-   - Returns ranked hits; includes a `"warning"` field if the table's recorded model/revision
-     differs from the currently configured one, nudging a reindex
+6. **Response to MCP client**
+   - Returns ranked hits; includes a `"warning"` field if the table's recorded identity differs
+     from the currently configured one, nudging a reindex
 
-**Key invariant:** a LanceDB table only ever holds vectors from one embedding model + revision at
-a time. If the configured model changes, old vectors are never reused — every chunk is fully
-re-embedded on the next `codeintel index`/`reindex`. This is what prevents silently mixing
-incompatible embedding spaces.
+**Key invariant:** a LanceDB table only ever holds vectors from one `TableIdentity` at a time —
+model, revision, prefixes, and content format together. If any part changes, old vectors are never
+reused — every chunk is fully re-embedded on the next `codeintel index`/`reindex`. This is what
+prevents silently mixing incompatible embedding spaces or wrong-prefix/wrong-header text.
 
 ---
 
@@ -337,7 +367,7 @@ incompatible embedding spaces.
 ```
 
 **registry.db schema:**
-- `repos(slug TEXT PRIMARY KEY, path TEXT, language TEXT, commit_sha TEXT, last_indexed TIMESTAMP, status TEXT, scheme_override TEXT, semantic_indexed_at TEXT)`
+- `repos(slug TEXT PRIMARY KEY, path TEXT, language TEXT, commit_sha TEXT, last_indexed TIMESTAMP, status TEXT, scheme_override TEXT, semantic_indexed_at TEXT, semantic_include TEXT, language_override TEXT)`
 - `packages(id, repo_slug, package_name)`
 - `edges(source_repo TEXT, target_package TEXT, ...)`
 
@@ -451,7 +481,9 @@ These are real behaviors of SCIP/Zoekt, not codeintel bugs:
 ### Adding a New Language Indexer
 
 1. Create a new SCIP indexer (e.g., `scip-go` for Go)
-2. Add to language detection in `index_cli.py` (`_LANGUAGE_INDEXERS` + `_EXT_PRIORITY`)
+2. Add to language detection in `index_cli.py` (`_LANGUAGE_INDEXERS` + `_EXT_PRIORITY`) — this also
+   extends `_INDEXER_BY_LANGUAGE`, the derived reverse map that validates `--language` values, so
+   the two cannot drift
 3. Test end-to-end (index repo → query nav tools)
 
 Swift is the worked example of this path — the codeintel-side entry landed in one table,

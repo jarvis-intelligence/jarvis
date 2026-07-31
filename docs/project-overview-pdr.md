@@ -80,7 +80,7 @@ External binaries (must be on `PATH`):
 ## Database Schema
 
 **Indexing:**
-- `registry.db` — repos table (slug/path/language/commit_sha/last_indexed/status/scheme_override/semantic_indexed_at); packages/edges tables (dependency graph)
+- `registry.db` — repos table (slug/path/language/commit_sha/last_indexed/status/scheme_override/semantic_indexed_at/semantic_include/language_override); packages/edges tables (dependency graph)
 - Per-repo: `index-<sha>.db` (from `scip expt-convert`) — documents/chunks/global_symbols/mentions/defn_enclosing_ranges
 - Zoekt shards: `.zoekt/` directory (spawned lazily)
 - `~/.codeintel/lancedb/` — one LanceDB vector table per repo (semantic search), gated behind the `semantic` extra

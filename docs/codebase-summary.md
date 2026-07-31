@@ -35,23 +35,23 @@ codeintel/
 | `scip_decoder.py` | 326 | SCIP blob decoder (zstd+protobuf); isolation seam for protobuf dependency | `scip_range_to_positions()`, `kind_name()`, `parse_symbol_package()`, decode SCIP occurrences + relationships |
 | `query.py` | 462 | QueryService: 5 SCIP nav ops + `getIndexStatus` via raw SQL against `scip expt-convert` schema | `QueryService`, `FreshnessSnapshot`, nav result builders |
 | `search.py` | 183 | `searchCode` backend via real httpx client to zoekt-webserver; `ZoektLifecycle` lazy-spawns `zoekt-webserver -rpc`, pidfile-tracked | `searchCode()`, `ZoektLifecycle` |
-| `chunker.py` | 214 | Tree-sitter AST chunking into function/class-sized chunks (256-512 token target), with fixed-window fallback for unparseable languages; content-hash dedup | `chunk_file()`, `Chunk`, `hash_file()`, `language_for()` |
-| `embeddings.py` | 72 | Lazy-loaded self-hosted embedding model wrapper (`BAAI/bge-m3`, 1024-dim, pinned revision), L2-normalized vectors; `SemanticExtraMissingError` for clean skip when the `semantic` extra isn't installed | `EmbeddingModel`, `default_model()`, `SemanticExtraMissingError` |
-| `semantic.py` | 234 | `SemanticStore` (one LanceDB table per repo), `index_semantic()` (chunk → dedup → embed → carry-over unchanged files → atomic overwrite), `reciprocal_rank_fusion()` (k=60), `semantic_search()` | `SemanticStore`, `index_semantic()`, `semantic_search()`, `reciprocal_rank_fusion()` |
+| `chunker.py` | 394 | Tree-sitter AST chunking into function/class-sized chunks (256-512 token target), fixed-window fallback for unparseable languages, content-hash dedup; admission filters (generated-file banner/long-line, `.gitignore` via batched `git check-ignore`, 1 MB size cap, `--semantic-include` escape hatch); appends a `# file:`/`# in class:` context header to every chunk as a final pass | `chunk_file()`, `Chunk`, `hash_file()`, `language_for()`, `skip_reason()`, `iter_source_files()`, `gitignored()`, `oversized_file_reason()`, `CONTENT_FORMAT` |
+| `embeddings.py` | 149 | Lazy-loaded self-hosted embedding model wrapper (`BAAI/bge-m3`, 1024-dim, pinned revision), L2-normalized vectors; model-aware query/doc instruction prefixes (`MODEL_PREFIXES`, env-overridable); `SemanticExtraMissingError` for clean skip when the `semantic` extra isn't installed | `EmbeddingModel`, `default_model()`, `SemanticExtraMissingError` |
+| `semantic.py` | 340 | `SemanticStore` (one LanceDB table per repo), `index_semantic()` (chunk → dedup → embed → carry-over unchanged files → atomic overwrite), `reciprocal_rank_fusion()` (k=60), `semantic_search()`; `TableIdentity` (model + revision + prefixes + content format) gates carry-forward reuse | `SemanticStore`, `index_semantic()`, `semantic_search()`, `reciprocal_rank_fusion()`, `TableIdentity`, `TokenStats` |
 
 ### Graph & Registry
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
 | `graph.py` | 363 | Package dependency graph: sqlite3 CRUD on `packages`/`edges` tables in registry.db, `populate_graph_for_repo()` (rebuild-not-accumulate), `blast_radius()` 2-hop BFS | `GraphStore`, `extract_package_names()`, `populate_graph_for_repo()`, `blast_radius()` |
-| `registry.py` | 169 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed/partial), plus `scheme_override` column for persisting Xcode scheme across reindex runs and nullable `semantic_indexed_at` column (survives failed semantic reindexes) | `Registry`, repo table operations, `mark_semantic_indexed()`, `_ensure_scheme_override_column()`/`_ensure_semantic_indexed_at_column()` idempotent migrations |
+| `registry.py` | 228 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed/partial), plus `scheme_override`, `semantic_include`, and `language_override` columns for persisting Xcode scheme, force-included semantic paths, and `--language` overrides across reindex runs, and nullable `semantic_indexed_at` column (survives failed semantic reindexes) | `Registry`, repo table operations, `mark_semantic_indexed()`, `_ensure_scheme_override_column()`/`_ensure_semantic_indexed_at_column()`/`_ensure_semantic_include_column()`/`_ensure_language_override_column()` idempotent migrations |
 
 ### Server & CLI
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
 | `server.py` | 231 | MCP stdio server entry (`FastMCP("codeintel")`), registers 9 tools with thin wrappers around QueryService/ZoektLifecycle/GraphStore/semantic, uniform `{"error": ...}` error payload | MCP tool handlers: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius` |
-| `index_cli.py` | 561 | The `codeintel` CLI: `index_repo()` pipeline (language detection → language indexer → scip expt-convert → populate graph → zoekt-index → non-fatal semantic indexing stage (`_run_semantic_stage()`) → atomic pointer swap → registry update), with xcodebuild build-tool selection for Swift repos with checked-in Xcode projects (`_prefers_xcodebuild()`, `_swift_indexer_cmd()`) and Xcode scheme persistence via registry (`_resolve_scheme()`); `_cmd_watch` wires Debouncer to watchdog.Observer; `forget` also drops the repo's LanceDB table | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` (with `--scheme` flag support on index/watch) |
+| `index_cli.py` | 739 | The `codeintel` CLI: `index_repo()` pipeline (language detection from git-tracked files (`detect_language()`, `_git_tracked_files()`) or a persisted `--language` override (`_resolve_language()`) → language indexer → scip expt-convert → populate graph → zoekt-index → non-fatal semantic indexing stage (`_run_semantic_stage()`) → atomic pointer swap → registry update), with xcodebuild build-tool selection for Swift repos with checked-in Xcode projects (`_prefers_xcodebuild()`, `_swift_indexer_cmd()`) and Xcode scheme persistence via registry (`_resolve_scheme()`); `_git_head()`/`_git_tracked_files()` raise `NotAGitRepositoryError` for non-git paths; `_cmd_watch` wires Debouncer to watchdog.Observer; `forget` also drops the repo's LanceDB table | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` (with `--scheme`/`--language` flag support on index/watch) |
 | `watch.py` | 55 | `Debouncer` (pure, thread-free, injectable clock) + `should_ignore_path` (.git/node_modules/.venv/__pycache__/dist/build) | `Debouncer`, `should_ignore_path()` |
 
 ### Root-Level Files
@@ -139,7 +139,7 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 ## Module Call Graph (Key Paths)
 
 **Indexing pipeline (`index_cli.py`):**
-1. Language detection (count extensions)
+1. Language detection (count extensions across git-tracked files, or use a persisted `--language` override)
 2. Run language indexer (scip-python, scip-typescript, scip-java, scip-swift)
 3. `scip expt-convert` → SQLite
 4. `populate_graph_for_repo()` — extract package names, store edges
@@ -169,16 +169,17 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 4. Return list with hop distances
 
 **Semantic path (`server.py` → `semantic.py`):**
-1. `semanticSearch(repo, query, limit=10)` → embed query with the table's recorded model identity
+1. `semanticSearch(repo, query, limit=10)` → embed query with the table's recorded `TableIdentity` (model, revision, and prefixes)
 2. Vector search the repo's LanceDB table (cosine metric)
 3. `reciprocal_rank_fusion()` merges vector hits with `searchCode`'s Zoekt lexical hits (k=60)
-4. Return ranked hits; include a `"warning"` if the table's model/revision differs from the currently configured one
+4. Return ranked hits; include a `"warning"` if the table's identity (model/revision/prefixes/content format) differs from the currently configured one
 
 ## Size Profile
 
-- **Total LOC (src):** 3,162 LOC (excluding generated scip_pb2.py); 3,281 LOC including it — up from
-  2,544/2,663 with this merge's ~520 new lines (`chunker.py`, `embeddings.py`, `semantic.py`) plus
-  growth in `config.py`/`registry.py`/`index_cli.py`/`server.py`
-- **Total LOC (tests):** 3,422 LOC (across 17 test files; excluding fixtures)
-- **Largest module:** `index_cli.py` (561 LOC)
+- **Total LOC (src):** 3,762 LOC (excluding generated scip_pb2.py); 3,881 LOC including it — up
+  from 3,162/3,281, mostly `chunker.py` growth (context headers, gitignore/size-cap admission,
+  chunk-size percentiles), `embeddings.py` growth (model-aware prefixes), and `index_cli.py`/
+  `registry.py` growth (git-tracked-file language detection, `--language` override)
+- **Total LOC (tests):** 4,534 LOC (across 15 test files; excluding fixtures)
+- **Largest module:** `index_cli.py` (739 LOC)
 - **Smallest module:** `__init__.py` (2 LOC)

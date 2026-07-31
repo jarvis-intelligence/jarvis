@@ -194,6 +194,93 @@ New features:
 - `semantic_include` column in registry.db — persists the force-include prefixes across `reindex` and `watch` runs; `_resolve_semantic_include()` manages the None-preserves / explicit-overwrites semantics (same contract as `_resolve_scheme`)
 - `_ensure_semantic_include_column()` idempotent migration — adds the new column to existing databases
 
+### Post-Phase-Semantic: Chunk Context Enrichment & Model-Aware Prefixes (Landed, July 31, PR #3)
+
+Bundled two changes that both invalidate every stored vector, so they cost one full re-embed
+instead of two: static per-chunk context headers, and model-aware embedding instruction prefixes.
+Also closed two gaps found along the way — no `.gitignore` support, and no backstop for large
+non-generated files — and added chunk-size visibility.
+
+**Context headers (`chunker.py`):** every chunk now gets a `# file: <path>` header (plus
+`# in class: <Parent>` when the chunk is a method split out of an oversized class), applied as a
+final pass after splitting/merging so `_merge_small`'s concatenation never duplicates a header.
+Replaces the old per-class import-line prefix (`_collect_imports`/`MAX_IMPORT_LINES`), which is
+now removed. `MAX_TOKENS` sizing reserves `HEADER_RESERVE_TOKENS` so a chunk sized to the cap
+doesn't overflow once its header lands.
+
+**Model-aware prefixes (`embeddings.py`):** `EmbeddingModel` now applies a query/document
+instruction prefix before encoding, auto-detected by substring match against `MODEL_PREFIXES`
+(bge-m3, e5, nomic-embed — longest-pattern-first for determinism), overridable via
+`CODEINTEL_EMBEDDING_QUERY_PREFIX`/`CODEINTEL_EMBEDDING_DOC_PREFIX`. An unlisted model with no
+override produces a `prefix_warning()` instead of silently shipping no prefix; `index_cli.py`
+surfaces it as `warning: ...` on stderr, `semantic_search()` folds it into the result's
+`"warning"` field.
+
+**Table identity extended (`semantic.py`):** `table_identity()` now returns a `TableIdentity`
+(model name, model revision, query prefix, doc prefix, `CONTENT_FORMAT` — chunker.py's version of
+the stored chunk-text shape) instead of a bare `(model, revision)` tuple. A table is only reused
+as a carry-forward source when every field matches, so a content-format bump (or a prefix change)
+can't leave old-format rows on a file whose bytes never changed (carry-forward keys on
+`file_hash`, not `content_hash`). Query-time reconstruction of the embedding model restores the
+table's *stored* prefixes explicitly, never the currently configured ones.
+
+**Admission gaps closed (`chunker.py`):** `iter_source_files()` now drops `.gitignore`-matched
+paths via one batched `git check-ignore --stdin` call (`gitignored()`; a subprocess failure
+degrades to "nothing ignored", never to over-filtering); `oversized_file_reason()` adds a 1 MB
+size backstop (`MAX_FILE_BYTES`), checked from `stat()` before the file is read. `--semantic-include`
+was extended to override both new checks, the same way it already overrode the generated-file
+filter — a single escape hatch across all three, not three separate ones.
+
+**Visibility:** `chunk_file()` reports chunk-size percentiles (`TokenStats`: p50/p90/max) over
+each indexing run; `index_cli.py` prints them alongside the existing skip/truncation report.
+
+Also fixed along the way: a methods-less oversized class (e.g. constants-only) now windows like
+an oversized top-level def instead of shipping as one unbounded chunk.
+
+New/updated tests: `test_chunker.py` (headers, gitignore, size cap, no-methods windowing),
+`test_embeddings.py` (prefix resolution and precedence), `test_index_cli.py` (percentile/warning
+output). Design docs: [`docs/superpowers/specs/2026-07-30-chunk-context-enrichment-design.md`](superpowers/specs/2026-07-30-chunk-context-enrichment-design.md),
+[`docs/superpowers/plans/2026-07-30-chunk-context-enrichment.md`](superpowers/plans/2026-07-30-chunk-context-enrichment.md).
+
+### Post-Phase-4: Git-Aware Language Detection & --language Override (Landed, July 31, PR #4)
+
+`detect_language()` previously walked the filesystem (`repo_path.rglob("*")`), which also counts
+gitignored scratch directories — vendored checkouts, sibling clones, `.worktrees/` — that can
+outnumber a repo's own tracked code and flip detection to a language the repo doesn't use (real
+case: a repo with 81 tracked `.py` files and a gitignored `.local-checkouts/` of 4782 `.ts`/`.tsx`
+files was detected as TypeScript). Detection now counts extensions across `git ls-files` instead
+(`_git_tracked_files()`, `-z`/NUL-delimited to avoid git quoting non-ASCII names and corrupting
+suffix parsing); `_IGNORED_DIRS` still applies on top, since git does not exclude build output a
+repo happens to commit.
+
+New features:
+- `_git_tracked_files(repo_path)` — repo-relative tracked paths via `git ls-files -z`; raises
+  `NotAGitRepositoryError` (new exception) if `repo_path` isn't a git working tree
+- `_git_head()` now distinguishes "not a git repository" from "git repository with no commits" —
+  both fail identically on a bare `git rev-parse HEAD`, so it checks
+  `git rev-parse --is-inside-work-tree` first and raises `NotAGitRepositoryError` for the former,
+  leaving `IndexingError("has no commits yet")` for the latter
+- `--language <name>` CLI flag on both `codeintel index` and `codeintel watch` — bypasses
+  `detect_language()` entirely instead of guessing then correcting; choices are validated against
+  `_INDEXER_BY_LANGUAGE`, a reverse map derived from `_LANGUAGE_INDEXERS` so the two cannot drift
+- `language_override` column in registry.db — persists the override across `reindex` and `watch`
+  runs; `_resolve_language()` manages the None-preserves / explicit-overwrites semantics (same
+  contract as `_resolve_scheme`/`_resolve_semantic_include`); the registry's plain `language`
+  column still records the effective language actually indexed, so `list`/`status` stay accurate
+- `_ensure_language_override_column()` idempotent migration — adds the new column to existing
+  databases
+
+This is a heuristic with known edge cases, documented rather than solved: git shows duplicate
+entries for unmerged paths, sparse-checkout entries absent from disk still count, and repos with
+code entirely in git submodules won't be counted — `--language` is the escape hatch for all of
+these.
+
+New/updated tests: `test_index_cli.py` (git-tracked detection, override precedence, non-git-repo
+and no-commits error paths), `test_registry.py` (`language_override` column persistence and
+migration). Design docs:
+[`docs/superpowers/specs/2026-07-31-git-aware-language-detection-design.md`](superpowers/specs/2026-07-31-git-aware-language-detection-design.md),
+[`docs/superpowers/plans/2026-07-31-git-aware-language-detection.md`](superpowers/plans/2026-07-31-git-aware-language-detection.md).
+
 ---
 
 ## Explicitly Out of Scope (Not Planned)
