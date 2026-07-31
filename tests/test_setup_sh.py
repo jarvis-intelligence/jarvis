@@ -621,19 +621,20 @@ def test_scip_swift_asset_name_uses_macos_not_darwin():
     """The asset says "macos", not "darwin" — unlike scip's own assets."""
     result = run_func('scip_swift_asset_name')
     name = result.stdout.strip()
-    assert name == "scip-swift-v0.1.1-macos-arm64.tar.gz"
+    assert name == "scip-swift-v0.1.2-macos-arm64.tar.gz"
 
 
-def test_scip_swift_pin_is_at_least_v0_1_1():
-    """v0.1.0's binary lacks the `index` subcommand index_cli.py invokes.
+def test_scip_swift_pin_is_at_least_v0_1_2():
+    """Two independent reasons the pin must never slip backwards.
 
-    Pinning back to v0.1.0 would install a scip-swift that codeintel cannot
-    drive at all, so guard the floor explicitly.
+    v0.1.0's binary lacks the `index` subcommand `index_cli.py` invokes, so
+    codeintel cannot drive it at all. v0.1.1's xcodebuild backend passes no
+    code-signing overrides, so any repo with signed app-extension targets fails
+    during GatherProvisioningInputs before compiling anything.
     """
     version = run_func('echo "$SCIP_SWIFT_VERSION"').stdout.strip()
-    assert version != "v0.1.0", "v0.1.0 cannot be invoked as `scip-swift index`"
     parts = version.lstrip("v").split(".")
-    assert tuple(int(p) for p in parts) >= (0, 1, 1), f"too old: {version}"
+    assert tuple(int(p) for p in parts) >= (0, 1, 2), f"too old: {version}"
 
 
 def test_install_scip_swift_skips_when_present(tmp_path):

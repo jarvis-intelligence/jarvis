@@ -53,7 +53,8 @@ v0.1.0 binary parses `index` as the repo path and fails with "Could not detect a
 bare form works on every version — old binaries default the repo path to the working directory,
 newer ones dispatch to `index` as their default subcommand. Verified against both v0.1.0 and
 v0.1.1. `scip-swift v0.1.1` was cut to make the released binary match committed behavior (both
-earlier builds reported `0.1.0` despite differing), and `setup.sh` pins `v0.1.1` as the floor.
+earlier builds reported `0.1.0` despite differing), and `setup.sh` pinned `v0.1.1` as the floor at
+the time. The floor is now `v0.1.2` — see "Swift Index-Safe Code-Signing Defaults" below.
 
 **`typeHierarchy` is unavailable, and now says so.** `scip expt-convert` declares
 `global_symbols.relationships` in its schema but never writes it —
@@ -89,6 +90,51 @@ New features:
 - `_ensure_scheme_override_column()` idempotent migration — adds the new column to existing databases
 
 Verified: End-to-end indexing works on real Swift repos with Xcode projects; all 8 MCP nav tools return correct results.
+
+---
+
+### Post-Phase-4: Swift Index-Safe Code-Signing Defaults (Landed, July 31)
+
+Swift repos containing signed app-extension targets could not be indexed: `scip-swift`'s
+xcodebuild backend passed no `-destination`, so xcodebuild auto-selected `My Mac`, then failed
+provisioning for every signed target during `GatherProvisioningInputs` — before compiling
+anything. Reproduced against `luz_epost_ios` (5 failing targets: `ePostDev`,
+`notification_service`, `luz_epost_siri_intent`, `import_files_action`, `import_files_share`).
+
+Fixed upstream in `scip-swift` v0.1.2, not in codeintel: the failing arguments are constructed
+inside `XcodebuildBuildRunner` and are unreachable from any existing flag. Its `xcodebuild`
+invocation now always passes `CODE_SIGNING_ALLOWED=NO`, `CODE_SIGNING_REQUIRED=NO`,
+`CODE_SIGN_IDENTITY=`, and `CODE_SIGN_ENTITLEMENTS=` — an index build never runs or ships the
+product, so signing is always dead weight on that path.
+
+codeintel's only behavioral change is the `SCIP_SWIFT_VERSION` pin in `setup.sh`. No new CLI flag, no
+registry column, and `_swift_indexer_cmd()` is unchanged.
+
+`-destination` was deliberately not added: disabling signing alone was verified sufficient, and
+forcing an iOS destination would break macOS-only repos, which `_prefers_xcodebuild()` also
+routes down the xcodebuild path.
+
+**Verification status (July 31): fix confirmed, full-repo gate blocked by an unrelated defect.**
+Re-running `codeintel index` on `luz_epost_ios` with v0.1.2 installed produces **zero**
+provisioning errors (previously five): `GatherProvisioningInputs` passes, and the build proceeds
+into Swift compilation for `Debug-iphoneos`. The provisioning barrier is gone.
+
+That build then fails for a pre-existing reason unrelated to signing or codeintel — the Xcode
+project references `epost-app/luz_ios_login/Sources/luz_ios_login/Utilities/LoginResponseParser.swift`,
+which is absent from that package's checkout and from its git history. `codeintel status
+luz-epost-ios` therefore reports `failed` with no commit, and no index is published — the atomic
+publish behaving as designed. A full end-to-end index of this repo remains unverified until that
+missing source file is resolved; the signing fix itself is verified on its own terms.
+
+The `xcodebuild: WARNING: Using the first of multiple matching destinations … name:My Mac` line
+still appears, as expected since `-destination` is deliberately not passed. It is now only a
+warning, not a failure.
+
+**Known related gap:** `scip-swift` hardcodes `-configuration Debug`. Repos whose schemes use
+custom configuration names (`luz_epost_ios` has `Debug Development`, `Debug TEST`, `Debug PROD`)
+get `Debug` forced regardless of the scheme's own selection. Not yet addressed.
+
+See `docs/superpowers/specs/2026-07-31-scip-swift-signing-defaults-design.md`.
 
 ---
 
