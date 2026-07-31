@@ -90,6 +90,7 @@ re-running it — use `sh ./setup.sh --only scip-swift --force`.
 codeintel index /path/to/your/repo            # slug defaults to the directory name
 codeintel index /path/to/your/repo --slug foo # or pick one explicitly
 codeintel index /path/to/your/repo --scheme MyScheme # Swift repo with an ambiguous Xcode scheme
+codeintel index /path/to/your/repo --language python # force the language instead of detecting it from git-tracked files
 codeintel index /path/to/your/repo --semantic-include vendor/generated # force-include a path the generated-file filter would otherwise skip
 codeintel list
 codeintel status foo
@@ -103,10 +104,10 @@ navigable positions (an indexer/converter bug) — check the stderr warning
 from `codeintel index` for details.
 
 `--semantic-include` is repeatable — pass it once per path prefix to
-force-include several. Like `--scheme`, once set there is no flag to clear
+force-include several. Like `--scheme` and `--language`, once set there is no flag to clear
 it; change it by re-running `codeintel index` with the new value(s).
 
-**Language detection** counts source files by extension and picks the winner —
+**Language detection** counts source files by extension **across git-tracked files** and picks the winner —
 one language per index:
 
 | Extensions | Indexer |
@@ -119,7 +120,7 @@ one language per index:
 Ties break by fixed priority (`.ts` → `.tsx` → `.py` → `.java` → `.kt` → `.swift`).
 `.git`, `node_modules`, `.venv`, `__pycache__`, `dist`, and `build` are
 skipped. Rust is **not** supported, and a monorepo gets indexed as whichever
-language has the most files — multi-language merge is out of scope.
+language has the most files — multi-language merge is out of scope. Pass `--language <name>` to override the detected language.
 
 The pipeline then runs: chosen indexer → `scip expt-convert` → populate the
 package dependency graph (`packages`/`edges` tables in `registry.db`) →
@@ -138,6 +139,7 @@ registry update.
 codeintel watch /path/to/your/repo             # debounce defaults to 5s
 codeintel watch /path/to/your/repo --debounce 3
 codeintel watch /path/to/your/repo --scheme MyScheme
+codeintel watch /path/to/your/repo --language python
 ```
 
 Runs in the foreground (not a daemon) using `watchdog` — install it with
