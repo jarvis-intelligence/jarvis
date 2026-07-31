@@ -1,10 +1,38 @@
 [project]
-name = "codeintel"
+# Distribution name is `codeintel-mcp`; the plain `codeintel` name on PyPI is
+# taken by an unrelated, abandoned package (Komodo Edit CodeIntel, last
+# released 2018). The import package, CLI, and MCP server are all still
+# `codeintel` — only the PyPI distribution name differs.
+name = "codeintel-mcp"
 version = "0.2.0"
-description = "Personal, local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
+description = "Local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "phuongddx", email = "95doanphuong@gmail.com" }
+]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "code-intelligence",
+    "code-search",
+    "scip",
+    "zoekt",
+    "claude-code",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
 ]
 requires-python = ">=3.12"
 dependencies = [
@@ -31,6 +59,12 @@ dev = [
     "pytest>=8.3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/phuongddx/codeintel"
+Repository = "https://github.com/phuongddx/codeintel"
+Issues = "https://github.com/phuongddx/codeintel/issues"
+Changelog = "https://github.com/phuongddx/codeintel/blob/main/CHANGELOG.md"
+
 [project.scripts]
 codeintel = "codeintel.index_cli:main"
 codeintel-server = "codeintel.server:main"
@@ -38,6 +72,11 @@ codeintel-server = "codeintel.server:main"
 [build-system]
 requires = ["uv_build>=0.11.19,<0.12.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# The distribution is `codeintel-mcp`, which would otherwise make the backend
+# look for `src/codeintel_mcp/`. The import package is and stays `codeintel`.
+module-name = "codeintel"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
