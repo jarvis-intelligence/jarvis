@@ -26,6 +26,56 @@ _SWIFT_REQUIRED_BINARIES = ["scip-swift", "scip", "zoekt-index"]
 _missing_swift = [b for b in _SWIFT_REQUIRED_BINARIES if shutil.which(b) is None]
 
 
+def _init_git_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True)
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=path, check=True)
+
+
+def test_git_tracked_files_lists_committed_paths(tmp_path: Path):
+    from codeintel.index_cli import _git_tracked_files
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "b.py").write_text("y = 2\n")
+    _init_git_repo(tmp_path)
+
+    assert sorted(_git_tracked_files(tmp_path)) == ["a.py", "b.py"]
+
+
+def test_git_tracked_files_handles_paths_with_spaces(tmp_path: Path):
+    """`-z` is required: with a newline separator git quotes unusual names,
+    which would corrupt suffix parsing in detect_language()."""
+    from codeintel.index_cli import _git_tracked_files
+
+    (tmp_path / "my module.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    assert _git_tracked_files(tmp_path) == ["my module.py"]
+
+
+def test_git_tracked_files_raises_for_non_git_directory(tmp_path: Path):
+    from codeintel.index_cli import NotAGitRepositoryError, _git_tracked_files
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    with pytest.raises(NotAGitRepositoryError):
+        _git_tracked_files(tmp_path)
+
+
+def test_git_head_raises_indexing_error_for_repo_with_no_commits(tmp_path: Path):
+    """A freshly `git init`-ed repo has no HEAD. Previously this surfaced as
+    a bare CalledProcessError with no explanation of what was wrong."""
+    from codeintel.index_cli import IndexingError, _git_head
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    with pytest.raises(IndexingError, match="no commits"):
+        _git_head(tmp_path)
+
+
 def test_detect_language_picks_python_for_py_files(tmp_path: Path):
     (tmp_path / "a.py").write_text("x = 1\n")
     (tmp_path / "b.py").write_text("y = 2\n")
@@ -181,14 +231,6 @@ def test_forget_rejects_dotdot_slug(tmp_path: Path, monkeypatch, capsys):
     rc = _cmd_forget(argparse.Namespace(slug=".."))
     assert rc == 1
     assert "error" in capsys.readouterr().err
-
-
-def _init_git_repo(path: Path) -> None:
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True)
-    subprocess.run(["git", "add", "."], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=path, check=True)
 
 
 @pytest.mark.integration

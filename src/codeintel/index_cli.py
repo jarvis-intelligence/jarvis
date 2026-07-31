@@ -71,6 +71,14 @@ class IndexingError(Exception):
     """Raised when an indexing pipeline step (indexer/convert/zoekt) fails."""
 
 
+class NotAGitRepositoryError(Exception):
+    """Raised when a repo path is not a git working tree.
+
+    Indexing already required git -- `_git_head()` reads the commit SHA --
+    so this is not a new restriction, just an early and explicit one.
+    """
+
+
 def detect_language(repo_path: Path) -> tuple[str, list[str]]:
     """Scan `repo_path` for supported source extensions; return
     `(language, indexer_command)` for whichever extension has the most
@@ -115,10 +123,44 @@ def _swift_indexer_cmd(base_cmd: list[str], repo_path: Path, scheme: str | None)
     return cmd
 
 
-def _git_head(repo_path: Path) -> str:
+def _git_tracked_files(repo_path: Path) -> list[str]:
+    """Repo-relative paths of git-tracked files.
+
+    Git is the source of truth for "what belongs to this repo". A
+    filesystem walk also counts gitignored scratch directories -- vendored
+    checkouts, sibling clones, worktrees -- which can outnumber the repo's
+    own code and flip language detection to a language the repo does not
+    actually use.
+
+    `-z` (NUL-delimited) is required, not stylistic: with the default
+    newline separator git quotes non-ASCII names, which would corrupt
+    suffix parsing downstream.
+    """
     result = subprocess.run(
-        ["git", "-C", str(repo_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ["git", "-C", str(repo_path), "ls-files", "-z"],
+        capture_output=True,
+        text=True,
     )
+    if result.returncode != 0:
+        raise NotAGitRepositoryError(
+            f"{repo_path} is not a git repository (git ls-files: {result.stderr.strip()})"
+        )
+    return [name for name in result.stdout.split("\0") if name]
+
+
+def _git_head(repo_path: Path) -> str:
+    """Current commit SHA. A repo with no commits has no HEAD -- report
+    that as an IndexingError naming the cause rather than letting a bare
+    CalledProcessError escape."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise IndexingError(
+            f"{repo_path} has no commits yet (git rev-parse HEAD: {result.stderr.strip()})"
+        )
     return result.stdout.strip()
 
 
