@@ -79,6 +79,7 @@ def test_git_head_raises_indexing_error_for_repo_with_no_commits(tmp_path: Path)
 def test_detect_language_picks_python_for_py_files(tmp_path: Path):
     (tmp_path / "a.py").write_text("x = 1\n")
     (tmp_path / "b.py").write_text("y = 2\n")
+    _init_git_repo(tmp_path)
     language, cmd = detect_language(tmp_path)
     assert language == "python"
     assert cmd[0] == "scip-python"
@@ -88,21 +89,26 @@ def test_detect_language_picks_majority_extension(tmp_path: Path):
     for i in range(3):
         (tmp_path / f"f{i}.ts").write_text("export const x = 1;\n")
     (tmp_path / "g.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
     language, _ = detect_language(tmp_path)
     assert language == "typescript"
 
 
-def test_detect_language_ignores_node_modules_and_git(tmp_path: Path):
+def test_detect_language_ignores_committed_node_modules(tmp_path: Path):
+    """Git alone does not save us here -- these files ARE tracked. The
+    retained _IGNORED_DIRS pass is what excludes them."""
     (tmp_path / "src.py").write_text("x = 1\n")
     ignored = tmp_path / "node_modules" / "pkg"
     ignored.mkdir(parents=True)
     for i in range(5):
         (ignored / f"f{i}.ts").write_text("export const x = 1;\n")
+    _init_git_repo(tmp_path)
     language, _ = detect_language(tmp_path)
     assert language == "python"
 
 
-def test_detect_language_ignores_derived_data_and_dot_build(tmp_path: Path):
+def test_detect_language_ignores_committed_derived_data_and_dot_build(tmp_path: Path):
+    """Same as above for Swift build output that a repo happens to commit."""
     (tmp_path / "src.swift").write_text("let x = 1\n")
     derived_data = tmp_path / "DerivedData" / "SourcePackages" / "checkouts" / "SomeDep"
     derived_data.mkdir(parents=True)
@@ -111,6 +117,7 @@ def test_detect_language_ignores_derived_data_and_dot_build(tmp_path: Path):
     for i in range(5):
         (derived_data / f"f{i}.py").write_text("x = 1\n")
         (dot_build / f"g{i}.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
     language, _ = detect_language(tmp_path)
     assert language == "swift"
 
@@ -118,6 +125,7 @@ def test_detect_language_ignores_derived_data_and_dot_build(tmp_path: Path):
 def test_detect_language_picks_swift_for_swift_files(tmp_path: Path):
     (tmp_path / "a.swift").write_text("let x = 1\n")
     (tmp_path / "b.swift").write_text("let y = 2\n")
+    _init_git_repo(tmp_path)
     language, cmd = detect_language(tmp_path)
     assert language == "swift"
     assert cmd[0] == "scip-swift"
@@ -131,8 +139,64 @@ def test_swift_invocation_omits_index_subcommand(tmp_path: Path):
     parses "index" as the repo path. The bare form works on every version.
     """
     (tmp_path / "a.swift").write_text("let x = 1\n")
+    _init_git_repo(tmp_path)
     _, cmd = detect_language(tmp_path)
     assert cmd == ["scip-swift"], f"must stay bare for version tolerance, got {cmd}"
+
+
+def test_detect_language_tie_break_prefers_earlier_priority_over_swift(tmp_path: Path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "b.swift").write_text("let x = 1\n")
+    _init_git_repo(tmp_path)
+    language, _ = detect_language(tmp_path)
+    assert language == "python"
+
+
+def test_detect_language_raises_for_no_supported_files(tmp_path: Path):
+    (tmp_path / "README.md").write_text("# hi\n")
+    _init_git_repo(tmp_path)
+    with pytest.raises(UnsupportedLanguageError):
+        detect_language(tmp_path)
+
+
+def test_detect_language_ignores_gitignored_checkout_directory(tmp_path: Path):
+    """Direct regression test for the polaris-code-intelligence failure: a
+    gitignored `.local-checkouts/` of cloned sibling repos held 4782 .ts/.tsx
+    files against the repo's own 81 tracked .py files, and detection picked
+    typescript. Nothing in _IGNORED_DIRS covered it, and nothing could --
+    the directory name is arbitrary and per-project."""
+    (tmp_path / "app.py").write_text("x = 1\n")
+    (tmp_path / ".gitignore").write_text(".local-checkouts/\n")
+    checkouts = tmp_path / ".local-checkouts" / "vendored-repo"
+    checkouts.mkdir(parents=True)
+    for i in range(50):
+        (checkouts / f"f{i}.ts").write_text("export const x = 1;\n")
+
+    _init_git_repo(tmp_path)  # `git add .` honors .gitignore
+
+    language, _ = detect_language(tmp_path)
+    assert language == "python"
+
+
+def test_detect_language_ignores_untracked_files(tmp_path: Path):
+    """Tracked-only by design. Uncommitted scratch files do not vote."""
+    (tmp_path / "app.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    for i in range(50):
+        (tmp_path / f"scratch{i}.ts").write_text("export const x = 1;\n")
+
+    language, _ = detect_language(tmp_path)
+    assert language == "python"
+
+
+def test_detect_language_raises_for_non_git_directory(tmp_path: Path):
+    from codeintel.index_cli import NotAGitRepositoryError
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    with pytest.raises(NotAGitRepositoryError):
+        detect_language(tmp_path)
 
 
 def test_prefers_xcodebuild_false_for_bare_spm_package(tmp_path: Path):
@@ -195,19 +259,14 @@ def test_swift_indexer_cmd_ignores_scheme_without_xcodeproj(tmp_path: Path):
     assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme="ios_theme_ui") == ["scip-swift"]
 
 
-def test_detect_language_tie_break_prefers_earlier_priority_over_swift(tmp_path: Path):
+def test_detect_language_tie_break_prefers_java_over_swift(tmp_path: Path):
     (tmp_path / "a.java").write_text("class A {}\n")
     (tmp_path / "b.java").write_text("class B {}\n")
     (tmp_path / "a.swift").write_text("let x = 1\n")
     (tmp_path / "b.swift").write_text("let y = 2\n")
+    _init_git_repo(tmp_path)
     language, _ = detect_language(tmp_path)
     assert language == "java"
-
-
-def test_detect_language_raises_for_no_supported_files(tmp_path: Path):
-    (tmp_path / "README.md").write_text("hello\n")
-    with pytest.raises(UnsupportedLanguageError):
-        detect_language(tmp_path)
 
 
 def test_index_repo_rejects_dotdot_slug_before_touching_disk(tmp_path: Path):

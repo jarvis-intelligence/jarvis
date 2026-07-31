@@ -80,20 +80,30 @@ class NotAGitRepositoryError(Exception):
 
 
 def detect_language(repo_path: Path) -> tuple[str, list[str]]:
-    """Scan `repo_path` for supported source extensions; return
-    `(language, indexer_command)` for whichever extension has the most
-    files, ties broken by `_EXT_PRIORITY` order."""
+    """Scan `repo_path`'s git-tracked files for supported source
+    extensions; return `(language, indexer_command)` for whichever
+    extension has the most files, ties broken by `_EXT_PRIORITY` order.
+
+    Git-tracked, not a filesystem walk: a walk also counts gitignored
+    vendored checkouts and sibling clones, which can outnumber the repo's
+    own code and pick a language the repo does not use.
+
+    `_IGNORED_DIRS` is still applied on top, because git does not exclude
+    build output a repo happens to commit (a checked-in `dist/` or a
+    vendored `node_modules`).
+    """
     counts: Counter[str] = Counter()
-    for path in repo_path.rglob("*"):
+    for name in _git_tracked_files(repo_path):
+        path = Path(name)
         if any(part in _IGNORED_DIRS for part in path.parts):
             continue
-        if path.is_file() and path.suffix in _LANGUAGE_INDEXERS:
+        if path.suffix in _LANGUAGE_INDEXERS:
             counts[path.suffix] += 1
 
     present = [ext for ext in _EXT_PRIORITY if counts[ext] > 0]
     if not present:
         raise UnsupportedLanguageError(
-            f"no supported source files (.ts/.tsx/.py/.java/.kt/.swift) found under {repo_path}"
+            f"no supported source files (.ts/.tsx/.py/.java/.kt/.swift) tracked under {repo_path}"
         )
     best_ext = max(present, key=lambda ext: (counts[ext], -_EXT_PRIORITY.index(ext)))
     return _LANGUAGE_INDEXERS[best_ext]
