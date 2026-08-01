@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## [0.2.0] - 2026-08-01
 
-First release published to PyPI, as `codeintel-mcp`. Earlier versions existed
+First release published to PyPI, as `codeintel-navigation-mcp`. Earlier versions existed
 only as git tags' worth of history in this repo — there is no published 0.1.x.
 
 ### Added
@@ -21,7 +21,7 @@ only as git tags' worth of history in this repo — there is no published 0.1.x.
 
 ### Changed
 
-- The PyPI distribution name is **`codeintel-mcp`** — the plain `codeintel`
+- The PyPI distribution name is **`codeintel-navigation-mcp`** — the plain `codeintel`
   name is held by an unrelated, abandoned package (Komodo Edit CodeIntel, last
   released 2018). The import package, both CLIs (`codeintel`,
   `codeintel-server`), and the MCP server name are unchanged; only the name you

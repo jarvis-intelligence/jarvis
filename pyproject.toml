@@ -1,9 +1,14 @@
 [project]
-# Distribution name is `codeintel-mcp`; the plain `codeintel` name on PyPI is
-# taken by an unrelated, abandoned package (Komodo Edit CodeIntel, last
-# released 2018). The import package, CLI, and MCP server are all still
-# `codeintel` — only the PyPI distribution name differs.
-name = "codeintel-mcp"
+# The plain `codeintel` name on PyPI is taken by an unrelated, abandoned
+# package (Komodo Edit CodeIntel, last released 2018), so the distribution
+# is published as `codeintel-navigation-mcp`. This MUST stay in sync with the
+# project name on the PyPI trusted publisher: if the two disagree, uploads
+# fail with "Non-user identities cannot create new projects" rather than
+# anything that names the real problem.
+#
+# The import package, both CLIs, and the MCP server are all still `codeintel`
+# — only the name you install differs.
+name = "codeintel-navigation-mcp"
 version = "0.2.0"
 description = "Local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
 readme = "README.md"
@@ -74,8 +79,8 @@ requires = ["uv_build>=0.11.19,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-# The distribution is `codeintel-mcp`, which would otherwise make the backend
-# look for `src/codeintel_mcp/`. The import package is and stays `codeintel`.
+# The distribution is `codeintel-navigation-mcp`, which would otherwise make the backend
+# look for `src/codeintel_navigation_mcp/`. The import package is and stays `codeintel`.
 module-name = "codeintel"
 
 [tool.pytest.ini_options]
