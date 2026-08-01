@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `server.json` and a `publish-mcp-registry` workflow, listing codeintel in the
+  official MCP Registry as `io.github.phuongddx/codeintel`. Authentication uses
+  GitHub Actions OIDC, so releases do not block on anyone pasting a device code,
+  and no token is stored. A guard fails the run when `server.json`'s versions
+  drift from `pyproject.toml` — the registry cannot amend a published version,
+  so a stale one is unrecoverable without a version bump.
+
 ## [0.2.1] - 2026-08-01
 
 ### Fixed
