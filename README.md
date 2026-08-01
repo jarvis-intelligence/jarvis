@@ -15,7 +15,7 @@ no network, nothing leaves your machine.**
 curl -fsSL https://raw.githubusercontent.com/phuongddx/codeintel/main/setup.sh | sh
 
 # 2. codeintel itself
-uv tool install codeintel-mcp
+uv tool install codeintel-navigation-mcp
 
 # 3. Index a repo (slug defaults to the directory name)
 codeintel index /path/to/your/repo
@@ -106,8 +106,8 @@ Read this before installing — codeintel is deliberately narrow.
 Optional extras:
 
 ```bash
-uv tool install "codeintel-mcp[watch]"      # + watchdog, for `codeintel watch`
-uv tool install "codeintel-mcp[semantic]"   # + lancedb/sentence-transformers/tree-sitter, for semanticSearch
+uv tool install "codeintel-navigation-mcp[watch]"      # + watchdog, for `codeintel watch`
+uv tool install "codeintel-navigation-mcp[semantic]"   # + lancedb/sentence-transformers/tree-sitter, for semanticSearch
 ```
 
 ## Why it's built this way

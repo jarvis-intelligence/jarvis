@@ -1,11 +1,11 @@
-# Publishes codeintel-mcp to PyPI on a GitHub Release, via trusted publishing.
+# Publishes codeintel-navigation-mcp to PyPI on a GitHub Release, via trusted publishing.
 #
 # Why trusted publishing: PyPI mints a short-lived token from this workflow's
 # OIDC identity, so there is no long-lived API token stored as a repo secret to
 # leak or rotate. That requires `permissions: id-token: write` below, and a
 # matching publisher configured on PyPI (see the one-time setup at the bottom).
 #
-# Why the guard steps: the distribution name (`codeintel-mcp`) deliberately
+# Why the guard steps: the distribution name (`codeintel-navigation-mcp`) deliberately
 # differs from the import package (`codeintel`), which only works because of
 # `[tool.uv.build-backend] module-name` in pyproject.toml. Drop that and the
 # build still succeeds -- it just produces a wheel importing nothing. Likewise
@@ -30,7 +30,7 @@ jobs:
     # one. Also the place to require a manual approval before any upload.
     environment:
       name: pypi
-      url: https://pypi.org/p/codeintel-mcp
+      url: https://pypi.org/p/codeintel-navigation-mcp
 
     permissions:
       # Required for PyPI trusted publishing. Nothing else needs write access.
@@ -74,9 +74,9 @@ jobs:
       - name: Verify the wheel ships the codeintel import package
         run: |
           set -eu
-          # `codeintel-mcp` is the distribution name; `codeintel` is the module.
+          # `codeintel-navigation-mcp` is the distribution name; `codeintel` is the module.
           # If module-name is ever dropped from pyproject.toml, the backend looks
-          # for src/codeintel_mcp/ instead and emits a wheel with no code.
+          # for src/codeintel_navigation_mcp/ instead and emits a wheel with no code.
           uv run python - <<'PY'
           import glob, sys, zipfile
 
@@ -115,7 +115,7 @@ jobs:
 #
 # 1. Create the project's trusted publisher at
 #    https://pypi.org/manage/account/publishing/ with:
-#      PyPI project name: codeintel-mcp
+#      PyPI project name: codeintel-navigation-mcp
 #      Owner:             phuongddx
 #      Repository:        codeintel
 #      Workflow name:     publish-pypi.yml

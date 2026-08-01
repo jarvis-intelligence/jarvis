@@ -155,7 +155,7 @@ wheels = [
 ]
 
 [[package]]
-name = "codeintel-mcp"
+name = "codeintel-navigation-mcp"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
