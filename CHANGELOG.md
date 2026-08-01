@@ -2,7 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-01
+
+First release published to PyPI, as `codeintel-mcp`. Earlier versions existed
+only as git tags' worth of history in this repo — there is no published 0.1.x.
 
 ### Added
 
@@ -25,8 +28,6 @@ All notable changes to this project are documented in this file.
   `install` differs.
 - README reordered install-first: value proposition, quick start, tool table,
   and supported-language/platform limits now precede the architecture material.
-
-## [0.2.0] - 2026-07-31
 
 ### Fixed
 
