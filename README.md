@@ -288,17 +288,21 @@ CODEINTEL_DATA_DIR=/custom/path codeintel index /path/to/repo
 
 ## Agent skills
 
-Three agent skills in `.claude/skills/` help onboard and use codeintel:
+Three agent skills ship in the Claude Code plugin, under `plugin/skills/`:
 
 - `codeintel-setup` — install, register, index, verify.
 - `codeintel-use` — prefer codeintel for structural queries (find references, go-to-definition, hierarchy).
 - `codeintel-issues` — file codeintel bugs/features via `gh`.
 
-To load them in a ZCode agent, link them once:
+Install them, and register the MCP server, with:
 
 ```bash
-uv run python scripts/link_skills.py
+/plugin marketplace add phuongddx/codeintel
+/plugin install codeintel@codeintel
 ```
+
+The plugin registers the `codeintel` MCP server itself, so the `claude mcp add`
+step above is only needed if you are not using the plugin.
 
 ## Standards
 
