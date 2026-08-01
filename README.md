@@ -10,6 +10,8 @@ tools to Claude Code, Cursor, or any MCP client.
 Runs as a single stdio process reading local SQLite files. **No server, no auth,
 no network, nothing leaves your machine.**
 
+## Quick Start
+
 ```bash
 # 1. External indexer binaries (scip, zoekt, per-language indexers)
 curl -fsSL https://raw.githubusercontent.com/phuongddx/codeintel/main/setup.sh | sh
@@ -19,8 +21,19 @@ uv tool install codeintel-navigation-mcp
 
 # 3. Index a repo (slug defaults to the directory name)
 codeintel index /path/to/your/repo
+```
 
-# 4. Register with Claude Code
+**4. Register the MCP server.** Using Claude Code, install the plugin and it
+registers itself:
+
+```
+/plugin marketplace add phuongddx/codeintel
+/plugin install codeintel@codeintel
+```
+
+Any other MCP client (or Claude Code without the plugin) registers manually:
+
+```bash
 claude mcp add codeintel --scope user -- codeintel-server
 ```
 
@@ -296,13 +309,12 @@ Three agent skills ship in the Claude Code plugin, under `plugin/skills/`:
 
 Install them, and register the MCP server, with:
 
-```bash
+```
 /plugin marketplace add phuongddx/codeintel
 /plugin install codeintel@codeintel
 ```
 
-The plugin registers the `codeintel` MCP server itself, so the `claude mcp add`
-step above is only needed if you are not using the plugin.
+See [Quick Start](#quick-start) above for the manual registration alternative.
 
 ## Standards
 
