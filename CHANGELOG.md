@@ -2,7 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.3.0] - 2026-08-01
+
+Minor rather than patch: Java/Kotlin repos are indexable for the first time,
+`--search-only` is a new mode, and ten more languages reach semantic search.
 
 ### Added
 
