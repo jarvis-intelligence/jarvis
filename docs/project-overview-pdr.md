@@ -29,7 +29,9 @@
 | 4 | `blastRadius` (package dependency graph) + `codeintel watch` (auto-reindex) | ✓ Done |
 | Post-Phase-4 | Semantic/vector search (`semanticSearch`): tree-sitter chunking, self-hosted embeddings, per-repo LanceDB store, fused with Zoekt via reciprocal rank fusion. Gated behind the optional `semantic` extra | ✓ Done |
 
-**Language support:** TypeScript, Python, Java, plus Swift — `.swift` repos are recognized by `detect_language()` and routed to [`scip-swift`](https://github.com/phuongddx/scip-swift), which builds and indexes end-to-end. All 9 nav tools return correct results on real Swift repos: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy` all work. Requires a macOS host (Xcode + iOS SDK) for repos importing Apple-platform frameworks. One language per index; language detection by file-extension plurality across git-tracked files. Pass `--language <name>` to override detection.
+**Language support:** TypeScript, Python, Java/Kotlin, and Swift — `.swift` repos are recognized by `detect_language()` and routed to [`scip-swift`](https://github.com/phuongddx/scip-swift), which builds and indexes end-to-end. All 9 nav tools return correct results on real Swift repos. Requires a macOS host (Xcode + iOS SDK) for repos importing Apple-platform frameworks. One language per index; language detection by file-extension plurality across git-tracked files. Pass `--language <name>` to override detection.
+
+**Java/Kotlin caveat:** SCIP navigation is supported for plain JVM Gradle/Maven repos with `scip-java`, but two cases fall back to `--search-only` (lexical search + semantic search only, no navigation): Android/AGP projects (scip-java's Gradle plugin relies on standard source sets that AGP replaces with variants, producing zero SCIP shards upstream scip-java#177); and Kotlin versions other than the pinned release (scip-kotlinc is compiled against exactly one Kotlin version — others fail with AbstractMethodError/NoSuchMethodError). The `--search-only` fallback is applied automatically on these detected failures, or can be requested explicitly on `codeintel index` to skip SCIP indexing entirely, publishing Zoekt + semantic search for 10 additional languages (Go, Ruby, Rust, C, C++, C#, PHP, Scala, shell, SQL).
 
 **9 MCP tools:** `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius`
 
@@ -77,6 +79,18 @@ External binaries (must be on `PATH`):
 | `codeintel` | `index_cli.py` | Indexing, registry, watch |
 | `codeintel-server` | `server.py` | MCP stdio server |
 
+## Distribution
+
+codeintel is available through three discovery and installation channels:
+
+**PyPI package:** `codeintel-navigation-mcp` — Install via `pip install codeintel-navigation-mcp` or `uv sync` from source. Published on every release via GitHub Actions OIDC auth.
+
+**Claude Code plugin:** Available via `/plugin marketplace add phuongddx/codeintel` (plugin marketplace discovery) then `/plugin install codeintel@codeintel` (auto-registers the MCP server, alternative to manual `claude mcp add`). Plugin manifest and MCP registration live under `plugin/.claude-plugin/` and `plugin/.mcp.json`; skills are under `plugin/skills/`.
+
+**MCP Registry:** Official listing at [`io.github.phuongddx/codeintel`](https://modelcontextprotocol.io/registry) — published via `server.json` (MCP Registry server descriptor) on every release, gated on PyPI publish success to ensure availability. Allows MCP clients (beyond Claude Code) to discover and install codeintel.
+
+**Version consistency:** All four version fields (pyproject.toml, server.json, plugin manifest, MCP registration floor) are asserted identical by `scripts/check_versions.py`, run automatically in CI and as a test (`tests/test_check_versions.py`), preventing version drift across distribution channels.
+
 ## Database Schema
 
 **Indexing:**
@@ -100,6 +114,7 @@ External binaries (must be on `PATH`):
 - `typeHierarchy` returns empty (`scip expt-convert` v0.9.0 never populates `global_symbols.relationships` — upstream issue [scip-code/scip#464](https://github.com/scip-code/scip/issues/464), fixed by [PR #465](https://github.com/scip-code/scip/pull/465))
 - `displayName` / `kind` often null for the same reason
 - Zoekt `repo` filter matches directory basename, not codeintel slug — may diverge if `--slug` was passed
+- **Java/Kotlin gaps** (see "Language support" above): Android/AGP projects produce no SCIP shards (upstream scip-java#177), and Kotlin versions other than the pinned release fail to compile with scip-kotlinc (compiler-plugin API is internal/unstable) — both trigger automatic fallback to `--search-only` with lexical+semantic search only
 
 **By design:**
 - No per-node timestamp on the package graph → `blastRadius` always reports `freshness: "unknown"`

@@ -20,57 +20,28 @@ See [`plans/0724-2316-codeintel-mcp-implementation/`](../plans/0724-2316-codeint
 `detect_language()` now recognizes `.swift` and routes majority-Swift repos to `scip-swift`,
 and `DerivedData`/`.build` are excluded from the extension-majority scan.
 
-**Update (July 26) — Swift navigation works; the earlier diagnosis was wrong.**
-An earlier note here claimed `scip-swift` emitted no occurrence ranges. That was
-incorrect. `scip-swift` sets `single_line_range`, the `typed_range` oneof
-introduced in scip.proto (`SingleLineRange single_line_range = 8`), and does not
-set the deprecated repeated-int32 `range` field — which is exactly what the
-current spec tells producers to do.
-
-The ranges were being dropped by two consumers:
-
-1. **`scip expt-convert` v0.7.0** predates `bindings/go/scip/occurrence_range.go`
-   and cannot read `typed_range`, so it silently produced a schema-valid database
-   with `chunks=0, mentions=0`. Verified: the same `.scip` file yields
-   `chunks=0/mentions=0` under v0.7.0 and `chunks=1/mentions=14` under v0.9.0.
-   `setup.sh` pins v0.9.0, and `index_repo()` now refuses anything older.
-2. **codeintel's vendored `scip_pb2.py`** was generated from scip.proto v0.7.0 and
-   had no `typed_range` field, so even a v0.9.0-produced index decoded 0/16
-   occurrence ranges. Regenerated from v0.9.0; `scip_decoder.py` now reads
-   `typed_range` first with a deprecated-`range` fallback, mirroring upstream
-   Go's `Occurrence.SourceRange()`.
-
-Verified end-to-end against a real 21-file Swift repo: `codeintel index` completes
-without error, `getIndexStatus` reports `language: swift` / `indexed`, and both
-`global_symbols` and `chunks`/`mentions` populate — `documentSymbols`,
-`goToDefinition`, `findReferences`, and `callHierarchy` all return real results
-on Swift repos.
+**Update (July 26) — Swift navigation works; the earlier diagnosis was wrong.** An earlier note
+claimed `scip-swift` emitted no occurrence ranges; incorrect. `scip-swift` correctly sets
+`single_line_range` (the `typed_range` oneof, scip.proto's current spec), but two consumers were
+dropping it: `scip expt-convert` v0.7.0 predates the code that reads `typed_range` and silently
+produced `chunks=0, mentions=0` (fixed by pinning v0.9.0, `index_repo()` now refuses older); and
+codeintel's vendored `scip_pb2.py` was generated from scip.proto v0.7.0 with no `typed_range` field
+(regenerated from v0.9.0; `scip_decoder.py` reads `typed_range` first with a deprecated-`range`
+fallback). Verified end-to-end on a real 21-file Swift repo: all of `documentSymbols`,
+`goToDefinition`, `findReferences`, `callHierarchy` return real results.
 
 **Invocation compatibility (July 26):** `scip-swift` is invoked in its *bare* form
-(`scip-swift --output <path>`, no `index` subcommand token) — unlike the other indexers, which all
-take `index`. Reason: `scip-swift`'s `index` subcommand landed *after* its `v0.1.0` release, so the
-v0.1.0 binary parses `index` as the repo path and fails with "Could not detect a build system". The
-bare form works on every version — old binaries default the repo path to the working directory,
-newer ones dispatch to `index` as their default subcommand. Verified against both v0.1.0 and
-v0.1.1. `scip-swift v0.1.1` was cut to make the released binary match committed behavior (both
-earlier builds reported `0.1.0` despite differing), and `setup.sh` pinned `v0.1.1` as the floor at
-the time. The floor is now `v0.1.2` — see "Swift Index-Safe Code-Signing Defaults" below.
+(`scip-swift --output <path>`, no `index` subcommand) since its `index` subcommand landed after
+`v0.1.0` and the old binary parses `index` as the repo path otherwise. Works on every version —
+old binaries default the repo path to cwd, newer ones dispatch to `index` as their default. Floor
+is now `v0.1.2` — see "Swift Index-Safe Code-Signing Defaults" below.
 
 **`typeHierarchy` is unavailable, and now says so.** `scip expt-convert` declares
-`global_symbols.relationships` in its schema but never writes it —
-`insertGlobalSymbols()` in `cmd/scip/convert.go` (v0.9.0) binds only symbol,
-display_name, kind, documentation and enclosing_symbol. The tool therefore
-returns an explicit `{"error": ...}` rather than empty arrays, because an empty
-result would assert "this type has no supertypes" when the truth is "cannot
-tell". `query.py`'s logic is complete and self-heals if a future converter
-populates the column.
-
-Reported upstream: [scip-code/scip#464](https://github.com/scip-code/scip/issues/464),
-fixed by [scip-code/scip#465](https://github.com/scip-code/scip/pull/465) (open, CI
-green). `global_symbols.signature` is left unpopulated there deliberately — the
-column name and the proto field (`signature_documentation`) diverge. Once #465
-lands, `typeHierarchy` starts working with no change here beyond installing the
-newer `scip`.
+`global_symbols.relationships` in its schema but never writes it, so the tool returns an explicit
+`{"error": ...}` rather than empty arrays (an empty result would wrongly assert "no supertypes").
+Reported upstream: [scip-code/scip#464](https://github.com/scip-code/scip/issues/464), fixed by
+[scip-code/scip#465](https://github.com/scip-code/scip/pull/465) (open). `query.py`'s logic
+self-heals once a future converter populates the column.
 
 **Acceptance criteria met:**
 - ✓ All 9 MCP tools return correct results on real TypeScript/Python repos
@@ -95,44 +66,28 @@ Verified: End-to-end indexing works on real Swift repos with Xcode projects; all
 
 ### Post-Phase-4: Swift Index-Safe Code-Signing Defaults (Landed, July 31)
 
-Swift repos containing signed app-extension targets could not be indexed: `scip-swift`'s
-xcodebuild backend passed no `-destination`, so xcodebuild auto-selected `My Mac`, then failed
-provisioning for every signed target during `GatherProvisioningInputs` — before compiling
-anything. Reproduced against `luz_epost_ios` (5 failing targets: `ePostDev`,
-`notification_service`, `luz_epost_siri_intent`, `import_files_action`, `import_files_share`).
+Swift repos with signed app-extension targets could not be indexed: `scip-swift`'s xcodebuild
+backend passed no `-destination`, so xcodebuild auto-selected `My Mac`, then failed provisioning
+for every signed target during `GatherProvisioningInputs` before compiling anything. Reproduced
+against a 5-target real repo (`luz_epost_ios`).
 
-Fixed upstream in `scip-swift` v0.1.2, not in codeintel: the failing arguments are constructed
-inside `XcodebuildBuildRunner` and are unreachable from any existing flag. Its `xcodebuild`
+Fixed upstream in `scip-swift` v0.1.2, not in codeintel: `XcodebuildBuildRunner`'s `xcodebuild`
 invocation now always passes `CODE_SIGNING_ALLOWED=NO`, `CODE_SIGNING_REQUIRED=NO`,
-`CODE_SIGN_IDENTITY=`, and `CODE_SIGN_ENTITLEMENTS=` — an index build never runs or ships the
-product, so signing is always dead weight on that path.
+`CODE_SIGN_IDENTITY=`, and `CODE_SIGN_ENTITLEMENTS=` — an index build never ships the product, so
+signing is dead weight on that path. codeintel's only change is the `SCIP_SWIFT_VERSION` pin in
+`setup.sh`; no new CLI flag, registry column, or `_swift_indexer_cmd()` change. `-destination` was
+deliberately not added: disabling signing alone was sufficient, and forcing an iOS destination
+would break the macOS-only repos that also route through xcodebuild.
 
-codeintel's only behavioral change is the `SCIP_SWIFT_VERSION` pin in `setup.sh`. No new CLI flag, no
-registry column, and `_swift_indexer_cmd()` is unchanged.
+**Verified:** re-indexing the reproduction repo with v0.1.2 produces zero provisioning errors
+(previously five) and reaches Swift compilation. That repo's build still fails afterward for an
+unrelated pre-existing reason (a source file referenced by the Xcode project is missing from the
+checkout) — `codeintel status` correctly reports `failed`, no index published, atomic publish
+behaving as designed. The `xcodebuild: WARNING: … name:My Mac` line still appears as an expected
+warning, not a failure, since `-destination` is deliberately not passed.
 
-`-destination` was deliberately not added: disabling signing alone was verified sufficient, and
-forcing an iOS destination would break macOS-only repos, which `_prefers_xcodebuild()` also
-routes down the xcodebuild path.
-
-**Verification status (July 31): fix confirmed, full-repo gate blocked by an unrelated defect.**
-Re-running `codeintel index` on `luz_epost_ios` with v0.1.2 installed produces **zero**
-provisioning errors (previously five): `GatherProvisioningInputs` passes, and the build proceeds
-into Swift compilation for `Debug-iphoneos`. The provisioning barrier is gone.
-
-That build then fails for a pre-existing reason unrelated to signing or codeintel — the Xcode
-project references `epost-app/luz_ios_login/Sources/luz_ios_login/Utilities/LoginResponseParser.swift`,
-which is absent from that package's checkout and from its git history. `codeintel status
-luz-epost-ios` therefore reports `failed` with no commit, and no index is published — the atomic
-publish behaving as designed. A full end-to-end index of this repo remains unverified until that
-missing source file is resolved; the signing fix itself is verified on its own terms.
-
-The `xcodebuild: WARNING: Using the first of multiple matching destinations … name:My Mac` line
-still appears, as expected since `-destination` is deliberately not passed. It is now only a
-warning, not a failure.
-
-**Known related gap:** `scip-swift` hardcodes `-configuration Debug`. Repos whose schemes use
-custom configuration names (`luz_epost_ios` has `Debug Development`, `Debug TEST`, `Debug PROD`)
-get `Debug` forced regardless of the scheme's own selection. Not yet addressed.
+**Known related gap:** `scip-swift` hardcodes `-configuration Debug`; schemes with custom
+configuration names (e.g. `Debug Development`) get `Debug` forced regardless. Not yet addressed.
 
 See `docs/superpowers/specs/2026-07-31-scip-swift-signing-defaults-design.md`.
 
@@ -280,6 +235,40 @@ and no-commits error paths), `test_registry.py` (`language_override` column pers
 migration). Design docs:
 [`docs/superpowers/specs/2026-07-31-git-aware-language-detection-design.md`](superpowers/specs/2026-07-31-git-aware-language-detection-design.md),
 [`docs/superpowers/plans/2026-07-31-git-aware-language-detection.md`](superpowers/plans/2026-07-31-git-aware-language-detection.md).
+
+### Post-Phase-4: Java/Kotlin Indexing & Automatic Search-Only Fallback (Landed, August 1)
+
+Added SCIP navigation support for Java/Kotlin repos via `scip-java`. Recognized two cases where SCIP indexing cannot succeed and implemented automatic `--search-only` fallback:
+
+- **Android/AGP:** scip-java's Gradle plugin relies on standard source sets that AGP replaces with variants, producing zero SCIP shards (upstream scip-java#177). Detected by matching stderr: "No SCIP shards found".
+- **Kotlin version mismatch:** scip-kotlinc is compiled against exactly one pinned Kotlin release. Other versions fail with AbstractMethodError or NoSuchMethodError. Detected by matching stderr for "fir" + (AbstractMethodError | NoSuchMethodError).
+
+**New features:**
+- `_SEARCH_ONLY_SIGNATURES` tuple in `index_cli.py`: pairs of (required-substrings, human-reason) matched against indexer output; unrecognized failures still hard-fail
+- `_search_only_reason()` and `_publish_search_only()`: detect recognized failures and publish Zoekt + semantic search only
+- `--search-only` CLI flag on `codeintel index` and `codeintel watch`: explicit upfront choice to skip SCIP indexing
+- `SEARCH_ONLY_STATUS = "search-only"` constant in `registry.py`; status column values now include "search-only"
+- Navigation tools report search-only repos explicitly (server.py change)
+
+**Verified:** Full pipeline runs; Zoekt and semantic search work on Java/Kotlin repos; navigation tools gracefully report search-only status.
+
+### Post-Phase-4: Claude Code Plugin & MCP Registry Distribution (Landed, August 1)
+
+Published codeintel as a Claude Code plugin (marketplace discovery) and to the official MCP Registry, enabling installation via three channels: PyPI, plugin marketplace, and MCP Registry direct listing.
+
+**New structure:**
+- `plugin/` directory: plugin manifest (`.claude-plugin/plugin.json`), MCP server registration (`.mcp.json`), and plugin skills (under `plugin/skills/`)
+- `.claude-plugin/marketplace.json` (root): declares this repo as a plugin marketplace
+- `server.json` (root): MCP Registry server descriptor (`io.github.phuongddx/codeintel`)
+- `.github/workflows/publish-mcp-registry.yml`: publishes `server.json` to official MCP Registry after PyPI publish succeeds; retries up to 6x for eventual consistency
+- `scripts/check_versions.py`: asserts `pyproject.toml`, `server.json`, plugin manifest, and MCP registration floor all declare the same version (run via test + CI to prevent drift)
+
+**Install flows:**
+- PyPI: `pip install codeintel-navigation-mcp` or `uv sync`
+- Plugin: `/plugin marketplace add phuongddx/codeintel` → `/plugin install codeintel@codeintel`
+- MCP Registry: Claude Code directly discovers `io.github.phuongddx/codeintel`
+
+**Version consistency:** Four version fields (pyproject.toml [project].version, server.json.version, server.json.packages[0].version, plugin/.claude-plugin/plugin.json.version) are asserted identical. `.claude-plugin/marketplace.json` deliberately omits a version field to avoid a fifth place drift could occur.
 
 ---
 

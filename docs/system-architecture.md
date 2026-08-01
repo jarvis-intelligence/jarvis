@@ -105,14 +105,20 @@ Diagram shows the full indexing lifecycle from file changes → published index:
    - Creates Zoekt shards in `.zoekt/` directory
    - Files are searchable by keyword, filename, content
 
-6. **Semantic Indexing (non-fatal, `_run_semantic_stage()`)**
+6. **Automatic Search-Only Fallback (on recognized indexer failures)**
+   - If the language indexer stderr/stdout matches a recognized signature (Kotlin version mismatch, Android/AGP no-shards), `_search_only_reason()` returns a human-readable reason
+   - On detection, publishes Zoekt + semantic search only via `_publish_search_only()` instead of hard-failing; persists `search-only` status to registry
+   - Explicit `--search-only` flag enables this code path upfront, skipping SCIP indexing entirely
+   - Any unrecognized indexer failure is still a hard failure
+
+7. **Semantic Indexing (non-fatal, `_run_semantic_stage()`)**
    - Chunk source files (`chunker.py`), embed chunks (`embeddings.py`), write to a per-repo
      LanceDB table (`semantic.index_semantic()`)
    - Skips cleanly if the `semantic` extra isn't installed (`SemanticExtraMissingError`); any
      other failure is caught and logged — neither case blocks the SCIP/Zoekt publish
    - On success, `Registry.mark_semantic_indexed()` records `semantic_indexed_at`
 
-7. **Atomic Publishing**
+8. **Atomic Publishing**
    - Copy SCIP index to final location: `~/.codeintel/scip/_/<slug>/_/index-<sha>.db`
    - Update `current` pointer file (small text file, atomic `os.replace()`)
    - Update registry.db: mark repo as indexed, record commit SHA, timestamp
@@ -422,13 +428,10 @@ Indexing is exclusive — only one reindex can run at a time per slug (enforced 
 - **Language indexers** (pick one or more):
   - `scip-typescript` — TypeScript/JavaScript indexing
   - `scip-python` — Python indexing
-  - `scip-java` — Java/Kotlin indexing
+  - `scip-java` — Java/Kotlin indexing. **Known limitations:** Android/AGP projects produce zero SCIP shards because scip-java's Gradle plugin relies on standard source sets that AGP replaces with variants (upstream scip-java#177); Kotlin versions other than the pinned release fail with AbstractMethodError or NoSuchMethodError because scip-kotlinc is compiled against exactly one Kotlin version and the compiler-plugin API is internal/unstable. Both trigger automatic fallback to `--search-only` (lexical search + semantic search only).
   - `scip-swift` — Swift indexing ([phuongddx/scip-swift](https://github.com/phuongddx/scip-swift)).
     Exists, builds, and runs end-to-end via `codeintel index` without error, populating the
-    symbol table. **Known gap:** its occurrences carry no `Range` data, so `chunks`/`mentions`
-    stay empty and per-file nav (`documentSymbols`/`goToDefinition`/`findReferences`/
-    `callHierarchy`) returns empty on real repos — a `scip-swift` limitation, not codeintel's.
-    Requires a macOS host (Xcode + iOS SDK) for any repo importing Apple-platform frameworks.
+    symbol table. Requires a macOS host (Xcode + iOS SDK) for any repo importing Apple-platform frameworks.
 - **SCIP converter:**
   - `scip` (uses `scip expt-convert` subcommand)
 - **Search indexer & server:**

@@ -180,7 +180,22 @@ when it's missing.
 
 ---
 
-### 9. Single-Tenant Hardcoding
+### 9. Version-Consistency Guard Pattern
+
+**Pattern:** Multiple configuration files declare the same release version (pyproject.toml, server.json, plugin manifest). A dedicated script (`scripts/check_versions.py`) asserts they all match, run via an automated test (`tests/test_check_versions.py`) and CI, preventing manual discipline from drifting.
+
+**Why:**
+- Four version sources (PyPI, MCP Registry descriptor, plugin manifest, MCP floor version) across three distribution channels can drift independently
+- Manual updates are error-prone; automation catches drift before release
+- Test gates all CI pipelines — version mismatch fails the release
+
+**Implementation:** `check_versions.py` loads all four files, asserts version fields match, validates that the MCP floor version is <= current release (a floor ahead of the release would make the plugin uninstallable). Test wraps the script and runs on every CI push/PR.
+
+**Convention:** When adding a new file that declares version information, add its path to the version-consistency guard. Treat version consistency as an invariant, not a todo.
+
+---
+
+### 11. Single-Tenant Hardcoding
 
 **Pattern:** `PROJECT = "_"` and `BRANCH = "_"` are pinned constants in `config.py`; the vendored `IndexConnectionCache` keys on `(project, repo, branch)`, but codeintel uses only `repo`.
 
@@ -193,7 +208,7 @@ when it's missing.
 
 ---
 
-### 10. Model-Identity-Locked Vector Store
+### 12. Model-Identity-Locked Vector Store
 
 **Pattern:** A `SemanticStore` LanceDB table (`semantic.py`) only ever holds vectors from one
 `TableIdentity` at a time — model name, model revision, query prefix, doc prefix, and

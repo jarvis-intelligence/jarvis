@@ -9,7 +9,16 @@ codeintel/
 ├── docs/                    # Documentation
 ├── docs/assets/             # Architecture diagrams
 ├── plans/                   # Implementation plans
-├── .github/workflows/       # CI: build-zoekt.yml, setup-smoke.yml
+├── plugin/                  # Claude Code plugin (marketplace + MCP registration)
+│   ├── .claude-plugin/
+│   │   └── plugin.json      # Plugin manifest (name, version, description)
+│   ├── .mcp.json            # MCP server registration for plugin installs
+│   └── skills/              # Plugin skills (codeintel-setup, codeintel-use, codeintel-issues)
+├── .claude-plugin/
+│   └── marketplace.json     # Plugin marketplace declaration (root)
+├── .github/workflows/       # CI: build-zoekt.yml, publish-pypi.yml, publish-mcp-registry.yml, setup-smoke.yml, test.yml
+├── scripts/                 # Utilities
+│   └── check_versions.py    # Version consistency guard (4 files kept in sync)
 ├── setup.sh                 # Dependency bootstrapper (scip, zoekt, indexers)
 ├── ZOEKT_COMMIT             # Pinned upstream sourcegraph/zoekt commit
 ├── pyproject.toml           # uv-managed project config
@@ -44,14 +53,14 @@ codeintel/
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
 | `graph.py` | 363 | Package dependency graph: sqlite3 CRUD on `packages`/`edges` tables in registry.db, `populate_graph_for_repo()` (rebuild-not-accumulate), `blast_radius()` 2-hop BFS | `GraphStore`, `extract_package_names()`, `populate_graph_for_repo()`, `blast_radius()` |
-| `registry.py` | 228 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed/partial), plus `scheme_override`, `semantic_include`, and `language_override` columns for persisting Xcode scheme, force-included semantic paths, and `--language` overrides across reindex runs, and nullable `semantic_indexed_at` column (survives failed semantic reindexes) | `Registry`, repo table operations, `mark_semantic_indexed()`, `_ensure_scheme_override_column()`/`_ensure_semantic_indexed_at_column()`/`_ensure_semantic_include_column()`/`_ensure_language_override_column()` idempotent migrations |
+| `registry.py` | 256 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed/partial/search-only), plus `scheme_override`, `semantic_include`, and `language_override` columns for persisting Xcode scheme, force-included semantic paths, and `--language` overrides across reindex runs, and nullable `semantic_indexed_at` column (survives failed semantic reindexes); `SEARCH_ONLY_STATUS` constant for the new search-only status value | `Registry`, repo table operations, `mark_semantic_indexed()`, `SEARCH_ONLY_STATUS`, idempotent migrations |
 
 ### Server & CLI
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
-| `server.py` | 231 | MCP stdio server entry (`FastMCP("codeintel")`), registers 9 tools with thin wrappers around QueryService/ZoektLifecycle/GraphStore/semantic, uniform `{"error": ...}` error payload | MCP tool handlers: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius` |
-| `index_cli.py` | 739 | The `codeintel` CLI: `index_repo()` pipeline (language detection from git-tracked files (`detect_language()`, `_git_tracked_files()`) or a persisted `--language` override (`_resolve_language()`) → language indexer → scip expt-convert → populate graph → zoekt-index → non-fatal semantic indexing stage (`_run_semantic_stage()`) → atomic pointer swap → registry update), with xcodebuild build-tool selection for Swift repos with checked-in Xcode projects (`_prefers_xcodebuild()`, `_swift_indexer_cmd()`) and Xcode scheme persistence via registry (`_resolve_scheme()`); `_git_head()`/`_git_tracked_files()` raise `NotAGitRepositoryError` for non-git paths; `_cmd_watch` wires Debouncer to watchdog.Observer; `forget` also drops the repo's LanceDB table | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` (with `--scheme`/`--language` flag support on index/watch) |
+| `server.py` | 267 | MCP stdio server entry (`FastMCP("codeintel")`), registers 9 tools with thin wrappers around QueryService/ZoektLifecycle/GraphStore/semantic, uniform `{"error": ...}` error payload; reports search-only status explicitly to clients | MCP tool handlers: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius` |
+| `index_cli.py` | 932 | The `codeintel` CLI: `index_repo()` pipeline (language detection from git-tracked files (`detect_language()`, `_git_tracked_files()`) or a persisted `--language` override (`_resolve_language()`) → language indexer → scip expt-convert → populate graph → zoekt-index → non-fatal semantic indexing stage (`_run_semantic_stage()`) → automatic search-only fallback on recognized indexer failures (`_SEARCH_ONLY_SIGNATURES`, `_search_only_reason()`, `_publish_search_only()`) → atomic pointer swap → registry update), with xcodebuild build-tool selection for Swift repos with checked-in Xcode projects (`_prefers_xcodebuild()`, `_swift_indexer_cmd()`) and Xcode scheme persistence via registry (`_resolve_scheme()`); `_git_head()`/`_git_tracked_files()` raise `NotAGitRepositoryError` for non-git paths; `--search-only` flag enables upfront search-only publish; `_cmd_watch` wires Debouncer to watchdog.Observer; `forget` also drops the repo's LanceDB table | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` (with `--scheme`/`--language`/`--semantic-include` flag support on index/watch; `--search-only` on both) |
 | `watch.py` | 55 | `Debouncer` (pure, thread-free, injectable clock) + `should_ignore_path` (.git/node_modules/.venv/__pycache__/dist/build) | `Debouncer`, `should_ignore_path()` |
 
 ### Root-Level Files
@@ -82,6 +91,7 @@ codeintel/
 | `test_index_cli.py` | index_cli.py | Full pipeline (e-2-e); marked `@pytest.mark.integration` — calls real scip-python/scip/zoekt binaries |
 | `test_index_status.py` | index_cli.py + query.py | Freshness snapshot, staleness detection |
 | `test_setup_sh.py` | setup.sh | Sources the script under `dash` (not `sh` — macOS `/bin/sh` accepts bashisms) and tests each function in isolation |
+| `test_check_versions.py` | scripts/check_versions.py | Version consistency across `pyproject.toml`, `server.json`, `plugin/.claude-plugin/plugin.json`; MCP Registry floor version check |
 
 ### Fixtures (`tests/fixtures/`)
 
@@ -127,7 +137,10 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
 | `.github/workflows/build-zoekt.yml` | `ZOEKT_COMMIT` change or manual dispatch | Cross-compiles `zoekt-index`/`zoekt-webserver` for macOS+Linux (arm64/amd64) and publishes them to this repo's releases — upstream `sourcegraph/zoekt` ships no binaries at all |
-| `.github/workflows/setup-smoke.yml` | `setup.sh`/test changes, PRs, manual | Runs `setup.sh` on `ubuntu-latest` (where `/bin/sh` is dash) and `macos-latest`: parse check, install, idempotency, full unit suite |
+| `.github/workflows/publish-pypi.yml` | `release` event | Publishes versioned release to PyPI (`codeintel-navigation-mcp` package); uses GitHub Actions OIDC for auth |
+| `.github/workflows/publish-mcp-registry.yml` | `workflow_run` on publish-pypi completion | Publishes `server.json` to official MCP Registry (`io.github.phuongddx/codeintel`); runs after PyPI publish succeeds; retries publish up to 6x for eventual consistency |
+| `.github/workflows/setup-smoke.yml` | `setup.sh`/test changes, PRs, manual | Runs `setup.sh` on `ubuntu-latest` (where `/bin/sh` is dash) and `macos-latest`: parse check, install, idempotency, full unit suite; path-filtered |
+| `.github/workflows/test.yml` | Every push/PR | Runs unit test suite (`pytest -m "not integration"`); installs `semantic` extra so `test_semantic.py` tests actually run; no path filter (runs on every change) |
 
 ## Dependencies & Imports
 
@@ -176,10 +189,7 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 
 ## Size Profile
 
-- **Total LOC (src):** 3,762 LOC (excluding generated scip_pb2.py); 3,881 LOC including it — up
-  from 3,162/3,281, mostly `chunker.py` growth (context headers, gitignore/size-cap admission,
-  chunk-size percentiles), `embeddings.py` growth (model-aware prefixes), and `index_cli.py`/
-  `registry.py` growth (git-tracked-file language detection, `--language` override)
-- **Total LOC (tests):** 4,534 LOC (across 15 test files; excluding fixtures)
-- **Largest module:** `index_cli.py` (739 LOC)
+- **Total LOC (src):** ~4,050 LOC (excluding generated scip_pb2.py, which adds ~119 LOC) — up from 3,762, mostly `index_cli.py` growth (search-only fallback signatures and publish path, explicit `--search-only` flag) and `registry.py` growth (`SEARCH_ONLY_STATUS` constant and search-only status value)
+- **Total LOC (tests):** ~5,220 LOC (across 16 test files; excluding fixtures) — up from 4,534 with addition of `test_check_versions.py`
+- **Largest module:** `index_cli.py` (932 LOC)
 - **Smallest module:** `__init__.py` (2 LOC)
