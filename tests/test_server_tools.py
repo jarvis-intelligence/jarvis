@@ -33,6 +33,10 @@ EXPECTED_TOOLS = {
 
 @pytest.fixture(autouse=True)
 def _wired_query_service(tmp_path: Path, monkeypatch):
+    # Isolates config.data_dir() to tmp_path so _error_payload's registry
+    # lookup (added for search-only explanations) never touches the real
+    # ~/.codeintel/registry.db when a test's repo raises IndexNotFoundError.
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
     build_published_index(tmp_path, config.PROJECT, REPO, config.BRANCH)
     service = query.QueryService(config.new_connection_cache(tmp_path))
     monkeypatch.setattr(server, "_query_service", service)
@@ -59,10 +63,14 @@ async def test_document_symbols_roundtrip():
 
 @pytest.mark.anyio
 async def test_go_to_definition_missing_repo_returns_error_payload():
+    """A repo that was never registered at all is a plain "index not found"
+    -- distinct from the search-only explanation, which only applies when
+    the registry records status == SEARCH_ONLY_STATUS for that repo."""
     async with create_connected_server_and_client_session(server.mcp) as client:
         result = await client.call_tool("goToDefinition", {"repo": "never-published", "symbol": "x"})
         payload = json.loads(result.content[0].text)
         assert "error" in payload
+        assert "search-only" not in payload["error"]
 
 
 @pytest.mark.anyio
@@ -244,3 +252,51 @@ def test_semantic_search_tool_wraps_errors(monkeypatch):
     monkeypatch.setattr("codeintel.semantic.semantic_search", _boom)
     result = server.semantic_search_tool(repo="r", query="q")
     assert "no semantic index" in result["error"]
+
+
+def test_error_payload_explains_a_search_only_repo(tmp_path: Path, monkeypatch):
+    from codeintel import config, server
+    from codeintel.index_reader import IndexNotFoundError
+    from codeintel.registry import Registry
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
+    finally:
+        registry.close()
+
+    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
+    assert "search-only" in payload["error"]
+    assert "searchCode" in payload["error"]
+
+
+def test_error_payload_passes_through_other_errors(tmp_path: Path, monkeypatch):
+    from codeintel import server
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    payload = server._error_payload("absent", RuntimeError("boom"))
+    assert payload == {"error": "boom"}
+
+
+def test_get_index_status_reports_search_only_status():
+    """The MCP tool itself (not QueryService.get_index_status directly)
+    must surface the registry's status so a caller can distinguish
+    "search-only" from "never indexed" -- both report indexed=False."""
+    from codeintel.registry import Registry
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
+    finally:
+        registry.close()
+
+    result = server.get_index_status(repo="gorepo")
+    assert result["status"] == "search-only"
+    assert result["indexed"] is False
+
+
+def test_get_index_status_reports_none_status_when_never_registered():
+    result = server.get_index_status(repo="never-registered-anywhere")
+    assert result["status"] is None
+    assert result["indexed"] is False

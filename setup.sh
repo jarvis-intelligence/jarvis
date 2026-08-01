@@ -30,6 +30,18 @@ CODEINTEL_REPO="phuongddx/codeintel"
 SCIP_SWIFT_VERSION="v0.1.2"
 SCIP_SWIFT_REPO="phuongddx/scip-swift"
 
+# scip-java ships one self-contained launcher asset per release: a POSIX sh
+# script with an embedded JAR. It runs on any JVM, so unlike scip-swift there
+# is no os/arch gating.
+#
+# The scip-kotlinc plugin inside it is compiled against Kotlin 2.2.0 EXACTLY.
+# Kotlin's compiler-plugin API is internal and unstable: 2.1.21 and 2.3.20 fail
+# with AbstractMethodError, and even 2.2.20 fails with NoSuchMethodError. If
+# this version is bumped, re-check which Kotlin the new release targets.
+SCIP_JAVA_VERSION="v0.13.1"
+SCIP_JAVA_REPO="scip-code/scip-java"
+SCIP_JAVA_KOTLIN="2.2.0"
+
 # ---------------------------------------------------------------- logging ----
 
 log_info() {
@@ -258,6 +270,53 @@ install_tarball_binary() {
 	trap - EXIT
 }
 
+# Download a bare (non-archive) binary plus its .sha256 sidecar, verify it, and
+# install it into bin_dir() under dest_name. Separate from
+# install_tarball_binary rather than a refactor of it: the only difference is
+# the missing extraction step, and four callers already depend on the tarball
+# helper's behavior.
+#
+#   install_raw_binary <url> <sha_url> <dest_name>
+install_raw_binary() {
+	_url=$1
+	_sha_url=$2
+	_dest_name=$3
+
+	_tmp=$(mktemp -d)
+	# Clean up the temp dir on every exit path, including failure.
+	# shellcheck disable=SC2064
+	trap "rm -rf '$_tmp'" EXIT
+
+	if ! download_to "$_url" "${_tmp}/binary"; then
+		log_error "download failed: ${_url}"
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	if ! download_to "$_sha_url" "${_tmp}/binary.sha256"; then
+		log_error "checksum download failed: ${_sha_url}"
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	# Sidecar format is "<digest>  <filename>"; take the first field.
+	_expected=$(cut -d' ' -f1 <"${_tmp}/binary.sha256")
+	if ! verify_sha256 "${_tmp}/binary" "$_expected"; then
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	ensure_bin_dir
+	mv "${_tmp}/binary" "$(bin_dir)/${_dest_name}"
+	chmod +x "$(bin_dir)/${_dest_name}"
+
+	rm -rf "$_tmp"
+	trap - EXIT
+}
+
 # ------------------------------------------------------------ installers -----
 
 scip_asset_name() {
@@ -408,47 +467,35 @@ install_scip_python() {
 	install_npm_indexer scip-python @sourcegraph/scip-python
 }
 
-SCIP_JAVA_IMAGE="ghcr.io/scip-code/scip-java:latest"
-
-# Detect-only by design. Upstream ships scip-java as a Docker image or a
-# JVM launcher — not a standalone binary — so auto-provisioning a container
-# runtime or JDK is deliberately out of scope. Always returns 0: neither a
-# missing runtime nor a declined prompt is a failure.
+# Installs upstream's single-file launcher. Unattended, like scip/zoekt/
+# scip-swift: the old confirm() prompt existed because the docker image is
+# 6.75GB, and confirm() returns false without a TTY, which would make
+# `curl | sh` silently skip scip-java.
 install_scip_java() {
 	if [ "${FORCE:-0}" != "1" ] && already_installed scip-java; then
 		log_info "scip-java: already installed, skipping"
 		return 0
 	fi
 
-	# Use `if`, not `have_cmd docker && _has_docker=1`. The && form happens to
-	# survive `set -e` on both dash and bash-posix, but the intent is clearer
-	# and the exit-status semantics are unambiguous this way.
-	_has_docker="no"
-	_has_jvm="no"
-	if have_cmd docker; then _has_docker="yes"; fi
-	if have_cmd java; then _has_jvm="yes"; fi
-
-	log_info "scip-java: detect-only (upstream ships a Docker image or JVM launcher, not a binary)"
-	log_info "scip-java:   docker present: ${_has_docker}"
-	log_info "scip-java:   java present:   ${_has_jvm}"
-
-	if [ "$_has_docker" != "yes" ]; then
-		log_info "scip-java: no docker — to index Java/Kotlin later, install Docker then run:"
-		log_info "scip-java:   docker pull ${SCIP_JAVA_IMAGE}"
+	# The launcher is a JAR bootstrap: without a JVM it cannot run at all.
+	# A soft skip with instructions, matching install_npm_indexer's missing-npm
+	# branch — not a hard failure that would abort the whole setup run.
+	if ! have_cmd java; then
+		log_warn "scip-java: java not found — skipping. Install a JDK, then: ./setup.sh --only scip-java"
 		return 0
 	fi
 
-	log_info "scip-java: the image is large (bundles JDK 17, 21, and 25)"
-	if confirm "scip-java: pull ${SCIP_JAVA_IMAGE} now?"; then
-		if docker pull "$SCIP_JAVA_IMAGE"; then
-			log_info "scip-java: image pulled"
-		else
-			log_warn "scip-java: docker pull failed — pull it manually when needed"
-		fi
+	_asset="scip-java-${SCIP_JAVA_VERSION}"
+	_base="https://github.com/${SCIP_JAVA_REPO}/releases/download/${SCIP_JAVA_VERSION}"
+
+	log_info "scip-java: installing ${SCIP_JAVA_VERSION} (~86MB launcher)"
+	if install_raw_binary "${_base}/${_asset}" "${_base}/${_asset}.sha256" scip-java; then
+		log_info "scip-java: installed"
+		log_info "scip-java: Kotlin repos must use Kotlin ${SCIP_JAVA_KOTLIN} exactly; Java is unrestricted"
 	else
-		log_info "scip-java: skipped — pull it later with: docker pull ${SCIP_JAVA_IMAGE}"
+		log_error "scip-java: install failed — see https://github.com/${SCIP_JAVA_REPO}"
+		return 1
 	fi
-	return 0
 }
 
 # ------------------------------------------------------------ orchestration --

@@ -25,7 +25,11 @@ uv tool install codeintel-navigation-mcp
 
 `setup.sh` installs every binary codeintel needs into `~/.codeintel/bin` and appends it to the shell rc. It is idempotent — re-running skips what's present. Options: `--only <name>` (one dependency), `--force` (reinstall), `--help`.
 
-Binaries installed: `scip` (≥ v0.9.0, SQLite conversion), `zoekt-index` / `zoekt-webserver` (search), and one indexer per language: `scip-typescript`, `scip-python`, `scip-swift` (macOS arm64 only), `scip-java` (detect-only).
+Binaries installed: `scip` (≥ v0.9.0, SQLite conversion), `zoekt-index` / `zoekt-webserver` (search), and one indexer per language: `scip-typescript`, `scip-python`, `scip-swift` (macOS arm64 only), `scip-java` (a JVM launcher; needs `java` on `PATH`).
+
+Java/Kotlin repos have real limits: Android/Gradle projects and Kotlin repos not on the pinned
+Kotlin version cannot produce a SCIP index, and are published search-only instead (lexical and
+semantic search work; navigation does not). See CLAUDE.md for the detail.
 
 `uv tool install` puts `codeintel` (the CLI) and `codeintel-server` (the MCP server) on `PATH`. Optional extras: `uv tool install "codeintel-navigation-mcp[semantic]"` for `semanticSearch`, `[watch]` for `codeintel watch`.
 

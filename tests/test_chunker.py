@@ -417,3 +417,37 @@ def test_own_repo_satisfies_header_invariants():
             assert len(chunk.content) // 4 <= MAX_TOKENS
             checked += 1
     assert checked > 50
+
+
+def test_newly_allowlisted_language_falls_back_to_fixed_windows():
+    """Go has a tree-sitter parser but no _DEF_NODE_TYPES entry, so it must
+    window rather than crash or return nothing."""
+    from codeintel.chunker import chunk_file
+
+    source = (
+        "package main\n\n"
+        "import \"fmt\"\n\n"
+        "func Greet(name string) string {\n\treturn \"hi \" + name\n}\n\n"
+        "func main() {\n\tfmt.Println(Greet(\"x\"))\n}\n"
+    )
+    chunks = chunk_file("demo.go", source, "filehash", "go")
+    assert chunks
+    assert all(c.symbol_name is None for c in chunks), "expected fixed-window chunks"
+
+
+def test_go_and_ruby_are_allowlisted():
+    from pathlib import Path
+
+    from codeintel.chunker import language_for
+
+    assert language_for(Path("main.go")) == "go"
+    assert language_for(Path("app.rb")) == "ruby"
+
+
+def test_existing_languages_still_chunk_by_symbol():
+    """The wider allowlist must not regress symbol-aware chunking."""
+    from codeintel.chunker import chunk_file
+
+    source = "def greet(name):\n    return f'hi {name}'\n"
+    chunks = chunk_file("demo.py", source, "filehash", "python")
+    assert [c.symbol_name for c in chunks] == ["greet"]

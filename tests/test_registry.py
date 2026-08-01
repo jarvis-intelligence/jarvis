@@ -4,7 +4,12 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import Mock
 
-from codeintel.registry import Registry, _ensure_scheme_override_column, _ensure_language_override_column
+from codeintel.registry import (
+    Registry,
+    _ensure_language_override_column,
+    _ensure_scheme_override_column,
+    _ensure_search_only_column,
+)
 
 
 def test_upsert_then_get_roundtrips(tmp_path: Path):
@@ -254,3 +259,83 @@ def test_ensure_language_override_column_swallows_duplicate_column_error():
     )
 
     _ensure_language_override_column(mock_conn)  # must not raise
+
+
+def test_upsert_round_trips_search_only(tmp_path):
+    from codeintel.registry import Registry
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("r", "/p", "java", None, "search-only", search_only=True)
+        entry = registry.get("r")
+        assert entry is not None
+        assert entry.search_only is True
+    finally:
+        registry.close()
+
+
+def test_search_only_defaults_false(tmp_path):
+    from codeintel.registry import Registry
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("r", "/p", "python", None, "indexed")
+        entry = registry.get("r")
+        assert entry is not None
+        assert entry.search_only is False
+    finally:
+        registry.close()
+
+
+def test_search_only_column_migrates_onto_an_existing_database(tmp_path):
+    """A registry created before this column must gain it without data loss."""
+    import sqlite3
+
+    from codeintel.registry import Registry
+
+    db = tmp_path / "registry.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE repos (slug TEXT PRIMARY KEY, path TEXT NOT NULL, "
+        "language TEXT NOT NULL, commit_sha TEXT, last_indexed TEXT NOT NULL, "
+        "status TEXT NOT NULL, scheme_override TEXT, semantic_indexed_at TEXT, "
+        "semantic_include TEXT, language_override TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO repos VALUES ('old', '/p', 'python', NULL, "
+        "'2026-01-01T00:00:00+00:00', 'indexed', NULL, NULL, NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    registry = Registry(db)
+    try:
+        entry = registry.get("old")
+        assert entry is not None
+        assert entry.search_only is False
+    finally:
+        registry.close()
+
+
+def test_ensure_search_only_column_re_raises_non_duplicate_errors():
+    """Only "duplicate column name" is idempotent-safe to swallow. A
+    "database is locked" from a concurrent `codeintel watch` reindex must
+    propagate -- swallowing it would leave the column missing while looking
+    like a successful migration."""
+    mock_conn = Mock(spec=sqlite3.Connection)
+    mock_conn.execute.side_effect = sqlite3.OperationalError("database is locked")
+
+    try:
+        _ensure_search_only_column(mock_conn)
+        assert False, "Expected OperationalError to be re-raised"
+    except sqlite3.OperationalError as exc:
+        assert str(exc) == "database is locked"
+
+
+def test_ensure_search_only_column_swallows_duplicate_column_error():
+    mock_conn = Mock(spec=sqlite3.Connection)
+    mock_conn.execute.side_effect = sqlite3.OperationalError(
+        "duplicate column name: search_only"
+    )
+
+    _ensure_search_only_column(mock_conn)  # must not raise

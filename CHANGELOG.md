@@ -6,12 +6,28 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `--search-only` on `codeintel index`: publishes Zoekt and semantic search without a SCIP index,
+  for repos whose indexer cannot build them. Persisted, so `reindex`/`watch` reuse it. Navigation
+  tools report the repo as search-only rather than "index not found".
+- Automatic search-only fallback when the indexer fails with a recognized, unfixable signature —
+  an Android/Gradle build that emits no SCIP shards, or a `scip-kotlinc` ABI mismatch. Any other
+  failure is still a hard failure.
+- Semantic indexing now covers Go, Ruby, Rust, C, C++, C#, PHP, Scala, shell, and SQL via the
+  chunker's existing fixed-window fallback.
 - `server.json` and a `publish-mcp-registry` workflow, listing codeintel in the
   official MCP Registry as `io.github.phuongddx/codeintel`. Authentication uses
   GitHub Actions OIDC, so releases do not block on anyone pasting a device code,
   and no token is stored. A guard fails the run when `server.json`'s versions
   drift from `pyproject.toml` — the registry cannot amend a published version,
   so a stale one is unrecoverable without a version bump.
+
+### Fixed
+
+- Java and Kotlin repos were un-indexable: `setup.sh` only ever probed for Docker and never put a
+  `scip-java` executable on `PATH`, so every index failed with
+  `No such file or directory: 'scip-java'`. It now installs upstream's launcher into
+  `~/.codeintel/bin`. Gradle also runs single-threaded for Java, working around a
+  `ConcurrentModificationException` in scip-java's own Gradle plugin on multi-module builds.
 
 ## [0.2.1] - 2026-08-01
 

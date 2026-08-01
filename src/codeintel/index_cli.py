@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from codeintel import config
 from codeintel.graph import GraphStore, populate_graph_for_repo
-from codeintel.registry import Registry
+from codeintel.registry import SEARCH_ONLY_STATUS, Registry
 from codeintel.watch import Debouncer, should_ignore_path
 
 if TYPE_CHECKING:
@@ -69,6 +69,47 @@ MIN_SCIP_VERSION = (0, 9, 0)
 # occurrence range. Publishing still proceeds (the symbol table is useful),
 # but the status must not claim unqualified success.
 PARTIAL_STATUS = "partial"
+
+# Recorded as the language when a search-only repo has no SCIP-indexable
+# source at all (a Go or Ruby repo). `registry.language` is NOT NULL, so this
+# has to be a value rather than NULL.
+UNKNOWN_LANGUAGE = "unknown"
+
+# Indexer failures that are known to be unfixable from here, and so degrade to
+# a search-only publish instead of a hard failure. Each entry is
+# (required substrings, human reason) — EVERY substring must be present, which
+# is what keeps a generic AbstractMethodError from some unrelated library out.
+#
+# Deliberately narrow. This is not "fall back on any failure": a transient
+# Gradle break or a missing binary must still fail loudly rather than be
+# laundered into an apparent success.
+_SEARCH_ONLY_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("AbstractMethodError", "org.jetbrains.kotlin.fir"),
+        "scip-kotlinc is compiled against one exact Kotlin version and this repo uses another "
+        "(the compiler-plugin API is internal and unstable)",
+    ),
+    (
+        ("NoSuchMethodError", "org.jetbrains.kotlin.fir"),
+        "scip-kotlinc is compiled against one exact Kotlin version and this repo uses another "
+        "(the compiler-plugin API is internal and unstable)",
+    ),
+    (
+        ("No SCIP shards found",),
+        "the build produced no SCIP shards — for Android/AGP this is expected, because "
+        "scip-java's Gradle plugin keys off standard source sets that AGP replaces with "
+        "variants (upstream scip-java#177)",
+    ),
+)
+
+
+def _search_only_reason(output: str) -> str | None:
+    """Match indexer output against `_SEARCH_ONLY_SIGNATURES`; None means the
+    failure is not recognized and must propagate."""
+    for required, reason in _SEARCH_ONLY_SIGNATURES:
+        if all(token in output for token in required):
+            return reason
+    return None
 
 
 class UnsupportedLanguageError(Exception):
@@ -141,6 +182,18 @@ def _swift_indexer_cmd(base_cmd: list[str], repo_path: Path, scheme: str | None)
     return cmd
 
 
+def _java_indexer_env() -> dict[str, str]:
+    """scip-java's Gradle plugin races against itself when Gradle runs tasks in
+    parallel: two modules' `scipPrintDependencies` mutate shared state and the
+    build dies with java.util.ConcurrentModificationException. Forcing
+    single-threaded execution avoids it.
+
+    Appended to any existing GRADLE_OPTS rather than replacing it, so a user's
+    heap settings survive. Reported upstream."""
+    existing = os.environ.get("GRADLE_OPTS", "")
+    return {"GRADLE_OPTS": f"{existing} -Dorg.gradle.parallel=false".strip()}
+
+
 def _git_tracked_files(repo_path: Path) -> list[str]:
     """Repo-relative paths of git-tracked files.
 
@@ -198,8 +251,12 @@ def _git_head(repo_path: Path) -> str:
     return result.stdout.strip()
 
 
-def _run(cmd: list[str], *, cwd: Path, step: str) -> None:
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+def _run(cmd: list[str], *, cwd: Path, step: str, env: dict[str, str] | None = None) -> None:
+    """`env`, when given, is merged OVER a copy of `os.environ` rather than
+    replacing it — a bare replacement would drop PATH and break the very
+    subprocess lookup that finds the indexer."""
+    merged = {**os.environ, **env} if env else None
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=merged)
     if result.returncode != 0:
         raise IndexingError(f"{step} failed ({' '.join(cmd)}):\n{result.stdout}\n{result.stderr}")
 
@@ -308,6 +365,17 @@ def _resolve_language(registry: Registry, slug: str, language: str | None) -> st
     return existing.language_override if existing is not None else None
 
 
+def _resolve_search_only(registry: Registry, slug: str, search_only: bool | None) -> bool:
+    """`search_only=None` means "leave the persisted value alone" (a `codeintel
+    watch` reindex never repeats the flag) rather than "clear it" — the same
+    contract as `_resolve_scheme`. This is what stops a repo that already
+    proved un-indexable from re-running a doomed multi-minute build."""
+    if search_only is not None:
+        return search_only
+    existing = registry.get(slug)
+    return existing.search_only if existing is not None else False
+
+
 def _resolve_semantic_include(
     registry: Registry, slug: str, include: tuple[str, ...] | None
 ) -> tuple[str, ...]:
@@ -374,10 +442,77 @@ def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
     return True
 
 
+def _retire_scip_artifacts(slug: str, root: Path | None) -> None:
+    """Tear down a previously published SCIP index for `slug` before a
+    search-only publish, so a repo that once had real navigation doesn't
+    keep silently serving it once it degrades to search-only (explicit
+    `--search-only`, or the automatic ABI-mismatch/no-shards fallback).
+
+    Without this, `_publish_search_only` writes no `current` pointer but
+    also never touches an OLD one left by an earlier successful index —
+    navigation tools would keep answering from stale data instead of
+    raising IndexNotFoundError, and `getIndexStatus` would report the
+    self-contradictory `{"indexed": true, "status": "search-only"}`.
+
+    Mirrors `_cmd_forget`'s own teardown for the SCIP-specific artifacts
+    only: the pointer directory (`config.index_dir` holds nothing but the
+    `current` pointer plus versioned `.db`/`.metadata.json` files) and this
+    repo's outgoing graph edges (cleared via the same store method
+    `populate_graph_for_repo` uses to make a reindex rebuild-not-accumulate,
+    package rows themselves stay so a later real reindex still resolves by
+    name). Zoekt shards and the semantic LanceDB table are deliberately left
+    alone — this same publish republishes both further down, `_cmd_forget`'s
+    full deletion of those does not apply here."""
+    index_dir = config.index_dir(slug, root)
+    if index_dir.exists():
+        shutil.rmtree(index_dir)
+
+    graph_store = GraphStore(config.data_dir(root) / "registry.db")
+    try:
+        for package in graph_store.list_packages(repo=slug):
+            graph_store.clear_outgoing_edges(package.id)
+    finally:
+        graph_store.close()
+
+
+def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
+                         semantic_include: tuple[str, ...]) -> bool:
+    """Zoekt + semantic only: no SCIP indexer, no `scip expt-convert`, no graph
+    population, and deliberately no `current` pointer. Without a pointer,
+    `read_pointer` raises IndexNotFoundError and every navigation tool fails
+    safely — server.py turns that into an explanation.
+
+    First retires any previously published SCIP index for this repo (see
+    `_retire_scip_artifacts`) — this function is reachable not just from an
+    explicit `--search-only` but from the automatic signature-based
+    fallback, which can trigger on a repo that indexed fine before (e.g. a
+    Kotlin version bump hitting the ABI-mismatch signature on reindex).
+
+    Returns whether the semantic stage succeeded, matching
+    `_run_semantic_stage`'s contract; the caller records the registry row."""
+    _retire_scip_artifacts(slug, root)
+    with tempfile.TemporaryDirectory(prefix="codeintel-index-") as scratch:
+        zoekt_dir = config.data_dir(root) / ".zoekt"
+        zoekt_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = _write_zoekt_meta(Path(scratch), slug)
+        _run(
+            ["zoekt-index", "-index", str(zoekt_dir), "-meta", str(meta_path), str(repo_path)],
+            cwd=repo_path,
+            step="zoekt-index",
+        )
+    semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
+    print(
+        f"note: {slug} published search-only — searchCode and semanticSearch work, "
+        "navigation tools do not (no SCIP index).",
+        file=sys.stderr,
+    )
+    return semantic_ok
+
+
 def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None,
     scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
-    language: str | None = None,
+    language: str | None = None, search_only: bool | None = None,
 ) -> str:
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
@@ -404,6 +539,12 @@ def index_repo(
     check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
+    # Resolved before language detection (not after, alongside scheme/
+    # semantic_include) because the except branch below reads it: a
+    # `codeintel reindex`/`watch` of a persisted search-only repo never
+    # re-passes `--search-only`, so this must already reflect the persisted
+    # value by the time detect_language() can raise.
+    search_only = _resolve_search_only(registry, slug, search_only)
     language_override = _resolve_language(registry, slug, language)
     if language_override is not None:
         if language_override not in _INDEXER_BY_LANGUAGE:
@@ -413,13 +554,36 @@ def index_repo(
             )
         language, indexer_cmd = language_override, _INDEXER_BY_LANGUAGE[language_override]
     else:
-        language, indexer_cmd = detect_language(repo_path)
+        try:
+            language, indexer_cmd = detect_language(repo_path)
+        except UnsupportedLanguageError:
+            if not search_only:
+                raise
+            language, indexer_cmd = UNKNOWN_LANGUAGE, []
 
     scheme = _resolve_scheme(registry, slug, scheme)
     semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
 
     if language == "swift":
         indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
+
+    if search_only:
+        registry.upsert(slug, str(repo_path), language, None, "indexing",
+                        scheme_override=scheme, semantic_include=semantic_include,
+                        language_override=language_override, search_only=True)
+        try:
+            semantic_ok = _publish_search_only(repo_path, slug, root, semantic_include)
+            registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
+                            scheme_override=scheme, semantic_include=semantic_include,
+                            language_override=language_override, search_only=True)
+            if semantic_ok:
+                registry.mark_semantic_indexed(slug)
+        except Exception as exc:
+            registry.mark_status(slug, "failed")
+            raise IndexingError(str(exc)) from exc
+        finally:
+            registry.close()
+        return slug
 
     registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme,
                     semantic_include=semantic_include, language_override=language_override)
@@ -429,7 +593,27 @@ def index_repo(
             scip_path = Path(scratch) / "index.scip"
             db_path = Path(scratch) / "index.db"
 
-            _run([*indexer_cmd, "--output", str(scip_path)], cwd=repo_path, step=f"{indexer_cmd[0]} index")
+            try:
+                _run([*indexer_cmd, "--output", str(scip_path)], cwd=repo_path,
+                     step=f"{indexer_cmd[0]} index",
+                     env=_java_indexer_env() if language == "java" else None)
+            except IndexingError as exc:
+                reason = _search_only_reason(str(exc))
+                if reason is None:
+                    raise
+                print(
+                    f"note: {slug} cannot be SCIP-indexed — {reason}. "
+                    "Falling back to search-only; this is remembered, so reindex/watch "
+                    "will not repeat the build.",
+                    file=sys.stderr,
+                )
+                semantic_ok = _publish_search_only(repo_path, slug, root, semantic_include)
+                registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
+                                scheme_override=scheme, semantic_include=semantic_include,
+                                language_override=language_override, search_only=True)
+                if semantic_ok:
+                    registry.mark_semantic_indexed(slug)
+                return slug
             _run(
                 ["scip", "expt-convert", "--output", str(db_path), str(scip_path)],
                 cwd=repo_path,
@@ -498,6 +682,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
             Path(args.path), slug=args.slug, scheme=getattr(args, "scheme", None),
             semantic_include=tuple(raw_include) if raw_include is not None else None,
             language=getattr(args, "language", None),
+            search_only=getattr(args, "search_only", None),
         )
     except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -692,6 +877,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--language",
         choices=sorted(_INDEXER_BY_LANGUAGE),
         help="force the indexer language instead of detecting it from git-tracked files "
+             "(persisted and reused by reindex/watch)",
+    )
+    index_parser.add_argument(
+        "--search-only",
+        action="store_true",
+        default=None,
+        help="skip SCIP indexing and publish only Zoekt + semantic search "
              "(persisted and reused by reindex/watch)",
     )
     index_parser.set_defaults(func=_cmd_index)

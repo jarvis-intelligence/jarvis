@@ -269,6 +269,41 @@ def test_install_tarball_binary_refuses_on_checksum_mismatch(tmp_path):
     assert not (bin_path / "mytool").exists(), "must not install an unverified binary"
 
 
+def test_install_raw_binary_installs_and_marks_executable(tmp_path):
+    """scip-java ships a bare launcher, not a tarball — no extraction step."""
+    payload = tmp_path / "launcher"
+    payload.write_text("#!/bin/sh\necho hello-from-launcher\n")
+    sha_path = tmp_path / "launcher.sha256"
+    digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+    sha_path.write_text(f"{digest}  launcher\n")
+
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        f'install_raw_binary file://{payload} file://{sha_path} mytool',
+        env={"CODEINTEL_BIN_DIR": str(bin_path), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    assert result.returncode == 0, result.stderr
+    installed = bin_path / "mytool"
+    assert installed.is_file()
+    assert installed.stat().st_mode & 0o111, "must be executable"
+    assert "hello-from-launcher" in installed.read_text()
+
+
+def test_install_raw_binary_refuses_on_checksum_mismatch(tmp_path):
+    payload = tmp_path / "launcher"
+    payload.write_text("#!/bin/sh\ntrue\n")
+    sha_path = tmp_path / "launcher.sha256"
+    sha_path.write_text(f"{'0' * 64}  launcher\n")
+
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        f'install_raw_binary file://{payload} file://{sha_path} mytool',
+        env={"CODEINTEL_BIN_DIR": str(bin_path), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    assert result.returncode != 0
+    assert not (bin_path / "mytool").exists(), "must not install an unverified binary"
+
+
 # ------------------------------------------------------------ scip installer ----
 
 
@@ -427,39 +462,31 @@ def test_confirm_does_not_read_from_stdin(tmp_path):
     assert "NO" in result.stdout, "confirm() must ignore stdin and use /dev/tty"
 
 
-def test_install_scip_java_reports_and_returns_zero_without_docker(tmp_path):
+def test_install_scip_java_warns_and_returns_zero_without_java(tmp_path):
+    """The launcher is inert without a JVM, so a missing `java` is a soft skip."""
     empty_bin = tmp_path / "empty"
     empty_bin.mkdir()
     result = subprocess.run(
         [POSIX_SH, "-c", f'. {SETUP_SH}\ninstall_scip_java'],
         capture_output=True,
         text=True,
-        env={"CODEINTEL_SETUP_SOURCED": "1", "PATH": f"{empty_bin}:/usr/bin:/bin"},
+        env={
+            "CODEINTEL_SETUP_SOURCED": "1",
+            "PATH": f"{empty_bin}",
+            "CODEINTEL_BIN_DIR": str(tmp_path / "bin"),
+        },
         stdin=subprocess.DEVNULL,
     )
     assert result.returncode == 0
     combined = (result.stdout + result.stderr).lower()
     assert "scip-java" in combined
-    assert "docker" in combined or "jvm" in combined
+    assert "java" in combined
 
 
-def test_install_scip_java_never_pulls_without_confirmation(tmp_path):
-    """With docker present but no tty, it must NOT pull the image."""
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    log = tmp_path / "docker-called.txt"
-    docker_stub = fake_bin / "docker"
-    docker_stub.write_text(f'#!/bin/sh\necho "$@" >> {log}\n')
-    docker_stub.chmod(0o755)
-    result = subprocess.run(
-        [POSIX_SH, "-c", f'. {SETUP_SH}\ninstall_scip_java'],
-        capture_output=True,
-        text=True,
-        env={"CODEINTEL_SETUP_SOURCED": "1", "PATH": f"{fake_bin}:/usr/bin:/bin"},
-        stdin=subprocess.DEVNULL,
-    )
-    assert result.returncode == 0
-    assert not log.exists(), "must not run docker pull without explicit confirmation"
+def test_install_scip_java_never_mentions_docker(tmp_path):
+    """Docker was never the install path — the image entrypoint is jshell."""
+    assert "SCIP_JAVA_IMAGE" not in SETUP_SH.read_text()
+    assert "docker pull" not in SETUP_SH.read_text()
 
 
 # --------------------------------------------------------- npm-based indexers ----
