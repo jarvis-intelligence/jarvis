@@ -59,7 +59,7 @@ Then call a tool through the MCP client, e.g. `goToDefinition(repo: "<slug>", sy
 
 | Symptom | Fix |
 |---|---|
-| `command not found: scip` / `zoekt-index` | `~/.codeintel/bin` not on `PATH`. Open a new shell, or `source ~/.zshrc` (or `~/.bashrc`). |
+| `command not found: scip` / `zoekt-index` | `~/.codeintel/bin` not on `PATH`. Open a new shell, or `source ~/.zshrc` (or `~/.bashrc`). Still missing after that? Re-run `setup.sh --only zoekt --force` — the flag value is `zoekt` (not `zoekt-index`); it installs both `zoekt-index` and `zoekt-webserver` from the same tarball. |
 | `scip` version < v0.9.0 | Re-run `setup.sh --only scip --force`. Older converters silently drop occurrence ranges; `codeintel index` refuses them. |
 | Swift: "multiple schemes" / wrong build | Pass `--scheme <name>` on the first `codeintel index`. It's stored in the registry and reused by `reindex`/`watch`. |
 | `status: partial` | The index published symbols but no navigable positions (indexer/converter bug). Re-read the stderr from `codeintel index`; reindex after fixing. |
