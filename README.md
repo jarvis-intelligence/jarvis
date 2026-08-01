@@ -95,8 +95,11 @@ Read this before installing — codeintel is deliberately narrow.
   git-tracked files; a polyglot monorepo gets indexed as whichever language has
   the most files. Multi-language merge is out of scope. Override with
   `--language`.
-- **Four language families:** TypeScript/TSX, Python, Java/Kotlin, Swift. **Rust,
-  Go, C/C++, C#, Ruby, and PHP are not supported.**
+- **SCIP navigation (`goToDefinition`, `findReferences`, etc.) covers four
+  language families:** TypeScript/TSX, Python, Java/Kotlin, Swift.
+  `codeintel index --search-only` additionally covers Go, Ruby, Rust, C,
+  C++, C#, PHP, Scala, shell, and SQL for `searchCode`/`semanticSearch`
+  only — no navigation.
 - **Navigation and search only — codeintel never edits code.** If you want an
   agent that can perform semantic renames and refactors, you want
   [Serena](https://github.com/oraios/serena); the two are complementary.
@@ -165,6 +168,7 @@ codeintel index /path/to/your/repo --slug foo # or pick one explicitly
 codeintel index /path/to/your/repo --scheme MyScheme # Swift repo with an ambiguous Xcode scheme
 codeintel index /path/to/your/repo --language python # force the language instead of detecting it from git-tracked files
 codeintel index /path/to/your/repo --semantic-include vendor/generated # force-include a path the generated-file filter would otherwise skip
+codeintel index /path/to/your/repo --search-only # skip SCIP indexing; publish only Zoekt + semantic search
 codeintel list
 codeintel status foo
 codeintel reindex foo
@@ -269,7 +273,8 @@ this prevents thrashing on rapid edits. `.git`, `node_modules`, `.venv`,
 
 ### Known upstream limitations
 
-These are real behaviors of `scip expt-convert` (as of v0.9.0), not codeintel bugs:
+These are real behaviors of the underlying SCIP tooling (`scip expt-convert`
+as of v0.9.0, `scip-java`, `scip-kotlinc`), not codeintel bugs:
 
 - **`typeHierarchy` returns an explicit `{"error": ...}`**, not empty arrays, on
   every real-world index — the converter declares `global_symbols.relationships`
@@ -284,6 +289,16 @@ These are real behaviors of `scip expt-convert` (as of v0.9.0), not codeintel bu
   no longer diverges for repos indexed with current code. Shards published by
   an older codeintel still carry their old directory-derived name until you
   `codeintel reindex <slug>`.
+- **`scip-java` can't index Android/Gradle repos at all** — its Gradle plugin
+  keys off Gradle's standard source sets, which AGP replaces with its variant
+  model, so the build emits zero SCIP shards
+  ([scip-java#177](https://github.com/scip-code/scip-java/issues/177)).
+- **Kotlin indexing requires an exact Kotlin version match** — `scip-kotlinc`
+  is compiled against one pinned Kotlin release (`SCIP_JAVA_KOTLIN` in
+  `setup.sh`, currently `2.2.0`); its compiler-plugin API is internal and
+  unstable even across patch releases, so any other version fails.
+  Both cases are detected automatically from the indexer's own failure output
+  and degrade to `--search-only` rather than failing outright.
 
 ## Configuration
 

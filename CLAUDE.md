@@ -91,6 +91,25 @@ populates it, so `typeHierarchy` returns an explicit `{"error": ...}` on real in
 reported upstream as [scip#464](https://github.com/scip-code/scip/issues/464) with fix PR
 [scip#465](https://github.com/scip-code/scip/pull/465) open.
 
+**Java/Kotlin reach is narrower than "supported" suggests.** `scip-java` indexes plain JVM
+Gradle/Maven repos, and codeintel forces `-Dorg.gradle.parallel=false` for them because scip-java's
+Gradle plugin races against itself across modules. Two cases cannot work at all and degrade to a
+search-only publish instead:
+
+- **Android/AGP** — scip-java's plugin keys off Gradle's standard `SourceSetContainer`, which AGP
+  replaces with its variant model, so the build succeeds and emits zero SCIP shards
+  ([scip-java#177](https://github.com/scip-code/scip-java/issues/177)).
+- **Kotlin other than the pinned version** — `scip-kotlinc` is compiled against exactly one Kotlin
+  release (`SCIP_JAVA_KOTLIN` in `setup.sh`, currently 2.2.0). Kotlin's compiler-plugin API is
+  internal and unstable: 2.1.21 and 2.3.20 fail with `AbstractMethodError`, and even 2.2.20 fails
+  with `NoSuchMethodError`. Java is unaffected — `scip-javac` uses javac's stable plugin API.
+
+Both are detected from the indexer's own error output (`_SEARCH_ONLY_SIGNATURES` in
+`index_cli.py`), never from parsing build files, and the decision is persisted so `reindex`/`watch`
+skip the doomed build. `--search-only` requests the same publish up front: Zoekt and semantic search
+work, navigation tools return an explanation. Only listed signatures trigger it — any other indexer
+failure is still a hard failure.
+
 **Swift build-tool selection:** `scip-swift`'s own `BuildBackendDetector` picks `swiftpm`
 whenever `Package.swift` exists, even for repos that can't build that way (e.g. a UIKit-only
 iOS package with no macOS platform support). `index_cli.py`'s `_prefers_xcodebuild()` overrides

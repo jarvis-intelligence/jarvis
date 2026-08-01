@@ -59,8 +59,23 @@ BANNER_SCAN_CHARS = 2048
 MAX_LINE_CHARS = 5000
 MAX_FILE_BYTES = 1_048_576   # 1 MB backstop for files that dodge the other rules
 
+# Extensions admitted to semantic indexing. Two tiers, by design:
+#
+#   * entries with a `_DEF_NODE_TYPES` mapping below get symbol-aware chunks
+#   * everything else falls through `chunk_file`'s existing guard to
+#     `_fixed_windows` — verified: a parser with no def-node mapping yields
+#     windowed chunks, it does not error
+#
+# Adding a `_DEF_NODE_TYPES` entry for one of the second-tier languages
+# upgrades it in place, with no change needed here.
+#
+# Kept as an ALLOWLIST rather than "everything that is not binary": this is
+# what keeps images, lockfiles, and vendored blobs out of the embedding table.
 LANGUAGES = {".py": "python", ".ts": "typescript", ".tsx": "tsx",
-             ".java": "java", ".kt": "kotlin", ".swift": "swift"}
+             ".java": "java", ".kt": "kotlin", ".swift": "swift",
+             ".go": "go", ".rb": "ruby", ".rs": "rust",
+             ".c": "c", ".h": "c", ".cpp": "cpp", ".cs": "csharp",
+             ".php": "php", ".scala": "scala", ".sh": "bash", ".sql": "sql"}
 
 _DEF_NODE_TYPES: dict[str, set[str]] = {
     "python": {"function_definition", "class_definition", "decorated_definition"},

@@ -15,7 +15,9 @@ from mcp.server.fastmcp import FastMCP
 
 from codeintel import config
 from codeintel.graph import GraphStore, blast_radius
+from codeintel.index_reader import IndexNotFoundError
 from codeintel.query import FreshnessSnapshot, QueryService
+from codeintel.registry import SEARCH_ONLY_STATUS
 from codeintel.search import ZoektLifecycle, search_zoekt
 
 mcp = FastMCP("codeintel")
@@ -60,6 +62,39 @@ def _freshness_fields(snapshot: FreshnessSnapshot) -> dict[str, Any]:
     return _json_safe(asdict(snapshot))
 
 
+def _registry_status(repo: str) -> str | None:
+    """Best-effort registry lookup for error messaging only. Any failure
+    returns None so a broken registry degrades the message rather than
+    replacing one error with another."""
+    try:
+        from codeintel.registry import Registry
+
+        registry = Registry(config.data_dir() / "registry.db")
+        try:
+            entry = registry.get(repo)
+        finally:
+            registry.close()
+    except Exception:
+        return None
+    return entry.status if entry is not None else None
+
+
+def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
+    """Turn a missing SCIP index into an explanation when the repo was
+    deliberately published search-only. Every other error passes through
+    unchanged, so this never hides a real fault."""
+    if isinstance(exc, IndexNotFoundError) and _registry_status(repo) == SEARCH_ONLY_STATUS:
+        return {
+            "error": (
+                f"{repo} is indexed search-only: it has no SCIP index, so navigation "
+                "tools cannot answer. searchCode and semanticSearch do work on it. "
+                "This happens when the language's indexer cannot build the repo — "
+                "for example an Android/Gradle project."
+            )
+        }
+    return {"error": str(exc)}
+
+
 @mcp.tool(name="documentSymbols")
 def document_symbols(repo: str, path: str) -> dict[str, Any]:
     """List every top-level symbol (with its range) defined in `path` within `repo`."""
@@ -67,7 +102,7 @@ def document_symbols(repo: str, path: str) -> dict[str, Any]:
         entries, freshness = _service().get_document_symbols(repo, path)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
-        return {"error": str(exc)}
+        return _error_payload(repo, exc)
     return {"path": path, "symbols": [_json_safe(asdict(e)) for e in entries], **_freshness_fields(freshness)}
 
 
@@ -78,7 +113,7 @@ def go_to_definition(repo: str, symbol: str) -> dict[str, Any]:
         locations, freshness = _service().get_definitions(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
-        return {"error": str(exc)}
+        return _error_payload(repo, exc)
     return {"symbol": symbol, "definitions": [_json_safe(asdict(loc)) for loc in locations], **_freshness_fields(freshness)}
 
 
@@ -89,7 +124,7 @@ def find_references(repo: str, symbol: str) -> dict[str, Any]:
         locations, freshness = _service().find_references(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
-        return {"error": str(exc)}
+        return _error_payload(repo, exc)
     return {"symbol": symbol, "references": [_json_safe(asdict(loc)) for loc in locations], **_freshness_fields(freshness)}
 
 
@@ -100,7 +135,7 @@ def call_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
         incoming, outgoing, freshness = _service().call_hierarchy(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
-        return {"error": str(exc)}
+        return _error_payload(repo, exc)
     return {
         "symbol": symbol,
         "incomingCalls": [_json_safe(asdict(e)) for e in incoming],
@@ -120,7 +155,7 @@ def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
         supertypes, subtypes, freshness, available = _service().type_hierarchy(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
-        return {"error": str(exc)}
+        return _error_payload(repo, exc)
     if not available:
         return {
             "error": (
@@ -151,7 +186,8 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
         indexed, freshness = _service().get_index_status(repo, repo_path)
     except Exception as exc:
         return {"error": str(exc)}
-    return {"repo": repo, "indexed": indexed, **_freshness_fields(freshness)}
+    return {"repo": repo, "indexed": indexed, "status": _registry_status(repo),
+            **_freshness_fields(freshness)}
 
 
 @mcp.tool(name="searchCode")

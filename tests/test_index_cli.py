@@ -18,12 +18,15 @@ from codeintel.registry import Registry
 
 FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_py_repo"
 SWIFT_FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_swift_repo"
+JAVA_FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_java_repo"
 
 _REQUIRED_BINARIES = ["scip-python", "scip", "zoekt-index"]
 _missing = [b for b in _REQUIRED_BINARIES if shutil.which(b) is None]
 
 _SWIFT_REQUIRED_BINARIES = ["scip-swift", "scip", "zoekt-index"]
 _missing_swift = [b for b in _SWIFT_REQUIRED_BINARIES if shutil.which(b) is None]
+
+_missing_java = [b for b in ("scip-java", "scip", "zoekt-index") if shutil.which(b) is None]
 
 
 def _init_git_repo(path: Path) -> None:
@@ -296,6 +299,38 @@ def test_index_repo_rejects_dotdot_slug_before_touching_disk(tmp_path: Path):
         index_repo(repo_dir, slug="..", root=tmp_path / "data")
     # No registry or scip dir should have been created for the rejected slug.
     assert not (tmp_path / "data").exists()
+
+
+def test_java_indexer_env_disables_gradle_parallelism(monkeypatch):
+    from codeintel.index_cli import _java_indexer_env
+
+    monkeypatch.delenv("GRADLE_OPTS", raising=False)
+    assert _java_indexer_env()["GRADLE_OPTS"] == "-Dorg.gradle.parallel=false"
+
+
+def test_java_indexer_env_appends_to_existing_gradle_opts(monkeypatch):
+    """Clobbering GRADLE_OPTS would silently discard the user's heap settings."""
+    from codeintel.index_cli import _java_indexer_env
+
+    monkeypatch.setenv("GRADLE_OPTS", "-Xmx4g")
+    value = _java_indexer_env()["GRADLE_OPTS"]
+    assert "-Xmx4g" in value
+    assert "-Dorg.gradle.parallel=false" in value
+
+
+def test_run_merges_env_over_os_environ(tmp_path: Path, monkeypatch):
+    """env= must extend os.environ, not replace it — PATH must survive."""
+    from codeintel.index_cli import _run
+
+    monkeypatch.setenv("CODEINTEL_MARKER", "from-parent")
+    out = tmp_path / "out.txt"
+    _run(
+        ["sh", "-c", f'printf "%s|%s" "$CODEINTEL_MARKER" "$EXTRA" > {out}'],
+        cwd=tmp_path,
+        step="probe",
+        env={"EXTRA": "from-arg"},
+    )
+    assert out.read_text() == "from-parent|from-arg"
 
 
 def test_forget_rejects_dotdot_slug(tmp_path: Path, monkeypatch, capsys):
@@ -669,7 +704,7 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
     captured: dict = {}
 
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None):
+                        language=None, search_only=None):
         captured["path"] = path
         captured["slug"] = slug
         captured["scheme"] = scheme
@@ -816,7 +851,7 @@ def test_semantic_include_flag_reaches_index_repo_as_a_tuple(tmp_path, monkeypat
     captured = {}
 
     def _fake_index_repo(repo_path, *, slug=None, root=None, scheme=None,
-                         semantic_include=None, language=None):
+                         semantic_include=None, language=None, search_only=None):
         captured["semantic_include"] = semantic_include
         return "myrepo"
 
@@ -943,7 +978,7 @@ def test_index_repo_language_override_skips_detection(tmp_path: Path, monkeypatc
 
     captured: dict = {}
 
-    def fake_run(cmd, *, cwd, step):
+    def fake_run(cmd, *, cwd, step, env=None):
         captured.setdefault("cmds", []).append(cmd)
         raise cli.IndexingError("stop after the indexer command is built")
 
@@ -981,7 +1016,7 @@ def test_language_override_to_swift_still_gets_xcodebuild(tmp_path: Path, monkey
 
     captured: dict = {}
 
-    def fake_run(cmd, *, cwd, step):
+    def fake_run(cmd, *, cwd, step, env=None):
         captured.setdefault("cmds", []).append(cmd)
         raise cli.IndexingError("stop after the indexer command is built")
 
@@ -1080,7 +1115,7 @@ def test_reindex_forwards_stored_language_override(tmp_path: Path, monkeypatch):
     captured: dict = {}
 
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None):
+                        language=None, search_only=None):
         captured["language"] = language
         return slug
 
@@ -1118,3 +1153,334 @@ def test_cmd_index_reports_non_git_directory_as_error(tmp_path: Path, monkeypatc
 
     assert rc == 1
     assert "not a git repository" in capsys.readouterr().err
+
+
+def test_search_only_publishes_zoekt_without_a_scip_pointer(tmp_path: Path, monkeypatch):
+    """Search-only must skip the indexer entirely and write no `current` pointer."""
+    from codeintel.index_cli import SEARCH_ONLY_STATUS, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("the SCIP indexer must not run in search-only mode")
+
+    monkeypatch.setattr("codeintel.index_cli.detect_language", lambda p: ("python", ["nope"]))
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None
+                        if cmd[0] == "zoekt-index" else _boom())
+    monkeypatch.setattr("codeintel.index_cli._run_semantic_stage",
+                        lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root, search_only=True)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == SEARCH_ONLY_STATUS
+        assert entry.search_only is True
+    finally:
+        registry.close()
+
+    assert not (config.index_dir(slug, data_root) / "current").exists()
+
+
+def test_search_only_persists_so_reindex_reuses_it(tmp_path: Path):
+    """`--search-only` follows the --language/--scheme contract: omitted means
+    "leave the persisted value alone", not "clear it"."""
+    from codeintel.index_cli import _resolve_search_only
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("r", "/p", "java", None, "search-only", search_only=True)
+        assert _resolve_search_only(registry, "r", None) is True
+        assert _resolve_search_only(registry, "r", False) is False
+        assert _resolve_search_only(registry, "absent", None) is False
+    finally:
+        registry.close()
+
+
+def test_search_only_tolerates_a_repo_with_no_indexable_language(tmp_path: Path, monkeypatch):
+    """A Go/Ruby repo has no SCIP indexer; search-only must still index it."""
+    from codeintel.index_cli import UNKNOWN_LANGUAGE, index_repo
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "main.go").write_text("package main\n\nfunc main() {}\n")
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None)
+    monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root, search_only=True)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.language == UNKNOWN_LANGUAGE
+    finally:
+        registry.close()
+
+
+def test_search_only_reindex_reuses_persisted_flag_for_an_unknown_language_repo(
+    tmp_path: Path, monkeypatch
+):
+    """Regression test for an ordering bug: `search_only` must be resolved
+    from the registry BEFORE `detect_language()` runs, not after (alongside
+    `scheme`/`semantic_include`) -- the `except UnsupportedLanguageError`
+    branch reads it, and a `codeintel reindex`/`watch` of a persisted
+    search-only repo never re-passes `--search-only` (search_only=None),
+    relying entirely on the persisted value. With the bug, this second call
+    would see the raw, unresolved `None` and incorrectly re-raise instead of
+    reusing the persisted `search_only=True`."""
+    from codeintel.index_cli import SEARCH_ONLY_STATUS, UNKNOWN_LANGUAGE, index_repo
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "main.go").write_text("package main\n\nfunc main() {}\n")
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None)
+    monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    # First run: explicit --search-only, establishing the persisted row with
+    # language=UNKNOWN_LANGUAGE (the repo has no SCIP-indexable source).
+    slug = index_repo(repo_dir, root=data_root, search_only=True)
+
+    # Second run: the reindex/watch case -- `--search-only` is omitted
+    # (search_only=None). detect_language() still raises for real, since the
+    # repo still has no supported source; this must not propagate.
+    slug_again = index_repo(repo_dir, root=data_root, search_only=None)
+    assert slug_again == slug
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.language == UNKNOWN_LANGUAGE
+        assert entry.search_only is True
+        assert entry.status == SEARCH_ONLY_STATUS
+    finally:
+        registry.close()
+
+    assert not (config.index_dir(slug, data_root) / "current").exists()
+
+
+def test_search_only_publish_retires_a_previously_published_scip_index(tmp_path: Path, monkeypatch):
+    """The scenario this branch was built for: a repo that indexed fine
+    before (e.g. Kotlin on 2.2.0) degrades to search-only on a later run
+    (e.g. after a bump to 2.2.20 hits the ABI-mismatch signature). The OLD
+    SCIP pointer, its versioned db/metadata files, and its graph edges must
+    not survive — otherwise navigation tools would keep silently answering
+    from the stale index instead of raising IndexNotFoundError."""
+    from codeintel.graph import GraphStore
+    from codeintel.index_cli import SEARCH_ONLY_STATUS, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    slug = config.repo_slug(repo_dir.name)
+
+    # Hand-build a previously published SCIP index for this repo, rather
+    # than running the real indexer/scip binaries (unavailable in a
+    # unit-test environment) -- a fake pointer + versioned db/metadata is
+    # exactly what a prior successful `index_repo()` run would have left
+    # under `config.index_dir()`.
+    target_dir = config.index_dir(slug, data_root)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    old_db = target_dir / "index-oldsha.db"
+    old_metadata = target_dir / "index-oldsha.metadata.json"
+    old_db.write_text("fake old index", encoding="utf-8")
+    old_metadata.write_text("{}", encoding="utf-8")
+    (target_dir / "current").write_text("index-oldsha.db", encoding="utf-8")
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert(slug, str(repo_dir), "java", "oldsha", "indexed")
+    finally:
+        registry.close()
+
+    # And a graph edge from this repo's own package to some other repo's
+    # package, mirroring what `populate_graph_for_repo` would have recorded
+    # for the old index.
+    graph_store = GraphStore(data_root / "registry.db")
+    try:
+        local_id = graph_store.upsert_package(repo=slug, name="maven:demo:app")
+        other_id = graph_store.upsert_package(repo="other-repo", name="maven:demo:dep")
+        graph_store.add_edge(from_package_id=local_id, to_package_id=other_id)
+        assert graph_store.get_dependents(other_id), "edge must exist before retirement"
+    finally:
+        graph_store.close()
+
+    monkeypatch.setattr("codeintel.index_cli.detect_language", lambda p: ("java", ["nope"]))
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None
+                        if cmd[0] == "zoekt-index" else (_ for _ in ()).throw(
+                            AssertionError("the SCIP indexer must not run in search-only mode")))
+    monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug_again = index_repo(repo_dir, root=data_root, search_only=True)
+    assert slug_again == slug
+
+    assert not (target_dir / "current").exists()
+    assert not old_db.exists()
+    assert not old_metadata.exists()
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == SEARCH_ONLY_STATUS
+        assert entry.search_only is True
+    finally:
+        registry.close()
+
+    graph_store = GraphStore(data_root / "registry.db")
+    try:
+        assert not graph_store.get_dependents(other_id), "outgoing edge must be retired"
+        # The package row itself must survive -- only outgoing edges are
+        # cleared, matching `populate_graph_for_repo`'s own rebuild pattern.
+        assert graph_store.get_package(local_id) is not None
+    finally:
+        graph_store.close()
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "e: java.lang.AbstractMethodError: ... org.jetbrains.kotlin.fir.analysis.checkers ...",
+        "NoSuchMethodError: 'org.jetbrains.kotlin.fir.declarations.FirFile ...getContainingFile()'",
+        "error: No SCIP shards found. This typically means that `scip-java` is unable ...",
+    ],
+)
+def test_recognized_failures_map_to_a_search_only_reason(output):
+    from codeintel.index_cli import _search_only_reason
+
+    assert _search_only_reason(output) is not None
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "error: Could not resolve all files for configuration ':app:debugCompileClasspath'",
+        "AbstractMethodError: com.example.Whatever",   # not a Kotlin FIR crash
+        "zsh: command not found: gradle",
+    ],
+)
+def test_unrecognized_failures_do_not_trigger_the_fallback(output):
+    from codeintel.index_cli import _search_only_reason
+
+    assert _search_only_reason(output) is None
+
+
+def test_indexer_failure_with_known_signature_publishes_search_only(tmp_path: Path, monkeypatch):
+    from codeintel.index_cli import SEARCH_ONLY_STATUS, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    from codeintel.index_cli import IndexingError
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        # " index" (leading space) matches only the indexer step (e.g.
+        # "scip-python index"), not the later "zoekt-index" step that
+        # _publish_search_only must still be allowed to run for real.
+        if step.endswith(" index"):
+            raise IndexingError("error: No SCIP shards found. scip-java cannot index this")
+        return None
+
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", _fake_run)
+    monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == SEARCH_ONLY_STATUS
+        assert entry.search_only is True, "must persist so reindex skips the doomed build"
+    finally:
+        registry.close()
+
+
+def test_indexer_failure_without_known_signature_still_fails(tmp_path: Path, monkeypatch):
+    """A transient build break must NOT be laundered into a success."""
+    from codeintel.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        # " index" (leading space) matches only the indexer step (e.g.
+        # "scip-python index"), not the later "zoekt-index" step that
+        # _publish_search_only must still be allowed to run for real.
+        if step.endswith(" index"):
+            raise IndexingError("error: could not resolve dependency com.example:thing:1.0")
+        return None
+
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", _fake_run)
+
+    with pytest.raises(IndexingError):
+        index_repo(repo_dir, root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(config.repo_slug(repo_dir.name))
+        assert entry is not None
+        assert entry.status == "failed"
+    finally:
+        registry.close()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(bool(_missing_java), reason=f"missing required binaries: {_missing_java}")
+def test_index_repo_end_to_end_for_java_repo(tmp_path: Path):
+    """A plain-JVM Gradle repo must produce real navigable symbols."""
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(JAVA_FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    slug = index_repo(repo_dir, root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "indexed", f"expected a full index, got {entry.status}"
+        assert entry.language == "java"
+    finally:
+        registry.close()
+
+    target_dir = config.index_dir(slug, data_root)
+    pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
+    conn = sqlite3.connect(f"file:{target_dir / pointer}?mode=ro", uri=True)
+    try:
+        symbols = conn.execute("SELECT COUNT(*) FROM global_symbols").fetchone()[0]
+        mentions = conn.execute("SELECT COUNT(*) FROM mentions").fetchone()[0]
+        chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        assert any(
+            "demo/Greeter#greet()" in row[0]
+            for row in conn.execute("SELECT symbol FROM global_symbols")
+        )
+    finally:
+        conn.close()
+
+    assert symbols > 0, "no symbols — the indexer produced nothing navigable"
+    assert chunks > 0 and mentions > 0, "symbols without occurrence ranges"
