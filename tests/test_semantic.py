@@ -94,7 +94,10 @@ def test_missing_lancedb_raises_install_hint(tmp_path, monkeypatch):
     from codeintel.semantic import SemanticStore
     monkeypatch.setitem(sys.modules, "lancedb", None)
     store = SemanticStore(tmp_path / "lancedb")
-    with pytest.raises(SemanticExtraMissingError, match="uv sync --extra semantic"):
+    # Escaped: `match` is a regex and [semantic] would read as a character class.
+    with pytest.raises(
+        SemanticExtraMissingError, match=r"codeintel-navigation-mcp\[semantic\]"
+    ):
         store.table_identity("myrepo")
 
 

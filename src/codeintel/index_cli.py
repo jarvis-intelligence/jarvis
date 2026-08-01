@@ -422,7 +422,8 @@ def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
         from codeintel.embeddings import SemanticExtraMissingError
     except ImportError:
         print(
-            "semantic indexing skipped — install with `uv sync --extra semantic`",
+            "semantic indexing skipped — install codeintel-navigation-mcp[semantic] "
+            "(uv tool install), or `uv sync --extra semantic` in a source checkout",
             file=sys.stderr,
         )
         return False

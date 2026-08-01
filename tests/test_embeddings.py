@@ -36,7 +36,13 @@ def _install_fake(monkeypatch):
 def test_missing_extra_raises_install_hint(monkeypatch):
     monkeypatch.setitem(sys.modules, "sentence_transformers", None)
     model = EmbeddingModel()
-    with pytest.raises(SemanticExtraMissingError, match="uv sync --extra semantic"):
+    # Asserts the extra is named, not just that some command appears: the hint
+    # previously offered only `uv sync`, which is unusable for anyone who
+    # installed from PyPI or through the Claude Code plugin. Escaped because
+    # `match` is a regex and [semantic] would otherwise be a character class.
+    with pytest.raises(
+        SemanticExtraMissingError, match=r"codeintel-navigation-mcp\[semantic\]"
+    ):
         model.embed_texts(["x"])
 
 
