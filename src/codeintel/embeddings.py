@@ -19,7 +19,15 @@ DEFAULT_BATCH_SIZE = 8
 # (or an estimate that undercounts) from blowing up encode-time memory:
 # attention cost scales with batch x sequence_length^2.
 MAX_SEQ_LENGTH = 1024
-_INSTALL_HINT = "semantic search requires the 'semantic' extra: uv sync --extra semantic"
+# Names the extra rather than a single command, because the command differs per
+# install path and the previous text ("uv sync --extra semantic") only applied
+# to a source checkout -- the one path a user who installed from PyPI, or via
+# the Claude Code plugin, does not have.
+_INSTALL_HINT = (
+    "semantic search requires the 'semantic' extra — install "
+    "codeintel-navigation-mcp[semantic] (uv tool install, or uvx --from), "
+    "or `uv sync --extra semantic` in a source checkout"
+)
 
 # Query/document instruction prefixes, by model. Matching is substring-based
 # so vendor-prefixed names resolve ("intfloat/multilingual-e5-large" matches

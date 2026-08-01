@@ -23,6 +23,15 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- The `semantic` extra hints named a command that only works from a source
+  checkout (`uv sync --extra semantic`). Anyone who installed from PyPI, or
+  through the Claude Code plugin, had no clone to run it in. Both the
+  `semanticSearch` error and the indexing warning now name the extra itself —
+  `codeintel-navigation-mcp[semantic]` — and keep the `uv sync` form for
+  checkouts. The plugin's own registration is unchanged and still omits the
+  extra by design; `plugin/skills/codeintel-use/SKILL.md` documents the
+  opt-in second-server path for anyone who needs `semanticSearch` there.
+
 - Java and Kotlin repos were un-indexable: `setup.sh` only ever probed for Docker and never put a
   `scip-java` executable on `PATH`, so every index failed with
   `No such file or directory: 'scip-java'`. It now installs upstream's launcher into

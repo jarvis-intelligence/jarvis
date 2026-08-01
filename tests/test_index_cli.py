@@ -770,7 +770,9 @@ def test_semantic_stage_skips_cleanly_when_extra_missing(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "codeintel.semantic", None)
     monkeypatch.delattr(codeintel, "semantic", raising=False)
     assert _run_semantic_stage(Path("/repo"), "slug", None) is False
-    assert "uv sync --extra semantic" in capsys.readouterr().err
+    # Names the extra, so the warning stays useful to someone who installed the
+    # CLI from PyPI rather than from a clone.
+    assert "codeintel-navigation-mcp[semantic]" in capsys.readouterr().err
 
 
 def test_semantic_stage_failure_is_nonfatal(monkeypatch, capsys):
