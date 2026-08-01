@@ -17,7 +17,7 @@ Before drafting, collect:
 - Repo + slug, and `codeintel status <slug>` output.
 - The tool name + arguments if it was an MCP call (e.g. `findReferences(repo="foo", symbol="bar")`).
 - The full error payload — every codeintel tool returns `{"error": "..."}`, copy it verbatim.
-- codeintel version: `python3 -c "import importlib.metadata; print(importlib.metadata.version('codeintel-navigation-mcp'))"` (codeintel has no `--version` flag; this reads it from the distribution metadata — note the distribution is `codeintel-navigation-mcp`, not `codeintel`).
+- codeintel version: `uv run --python 3.12 --with codeintel-navigation-mcp python3 -c "import importlib.metadata; print(importlib.metadata.version('codeintel-navigation-mcp'))"` (codeintel has no `--version` flag; this reads it from the distribution metadata. `uv run --with` builds a throwaway env containing the package just for this one command, so it resolves correctly regardless of how codeintel is installed — `uv tool install`, the plugin's `uvx` registration, or anything else — without depending on bare `python3` being able to see an isolated tool venv. Note the distribution is `codeintel-navigation-mcp`, not `codeintel`.)
 - OS/arch (`uname -s`, `uname -m`).
 
 ## 2. Classify — and check known limitations
