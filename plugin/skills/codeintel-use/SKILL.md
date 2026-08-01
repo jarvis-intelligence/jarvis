@@ -51,7 +51,7 @@ Before any structural tool call, check freshness:
 1. Call `getIndexStatus(repo, repo_path)` — pass `repo_path` = the repo's local git working dir to compare against `git rev-parse HEAD`.
 2. Branch on the result:
    - **indexed + fresh** → call the structural tool now.
-   - **indexed + stale** → run `uv run codeintel reindex <slug>`, then call the tool.
+   - **indexed + stale** → run `codeintel reindex <slug>`, then call the tool.
    - **not indexed** → fall back to grep for this query; offer to index (`codeintel index <path>`).
 3. For **text** search (not structure), use grep or `searchCode` — no preference between them.
 
@@ -59,7 +59,7 @@ Before any structural tool call, check freshness:
 
 - **`typeHierarchy` errors on real indexes.** Upstream `scip expt-convert` never populates `relationships`, so the tool returns an explicit error (not a bug, not "no supertypes"). Do not file this as a bug; it's a known upstream gap.
 - **Bare symbol names return empty results, not errors.** `goToDefinition(repo, "index_repo")` returns `{"definitions": []}` silently. The match is exact against the fully-qualified SCIP string — see "Symbol format" above. If a nav tool returns empty and the symbol definitely exists, you passed the wrong form: run `documentSymbols` first and use the returned `symbol` string verbatim.
-- **`semanticSearch` needs the `semantic` extra.** If `repo` was indexed without `uv sync --extra semantic`, it returns `{"error": "..."}` with an install hint — index/reindex after installing the extra.
+- **`semanticSearch` needs the `semantic` extra.** If `repo` was indexed without the `semantic` extra installed (`uv tool install "codeintel-navigation-mcp[semantic]"`), it returns `{"error": "..."}` with an install hint — index/reindex after installing the extra.
 - **`blastRadius` only sees already-indexed repos.** Index the dependency first, or re-run `codeintel index`/`reindex` after indexing it, for an edge to appear.
 - **One language per repo.** No multi-language merge — a polyglot repo indexes only its plurality language.
 - **Every tool returns `{"error": "..."}` on failure, never raises.** Check for an `error` key before reading results.

@@ -20,29 +20,33 @@ To take a machine from zero to "codeintel answering queries", run these in order
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/phuongddx/codeintel/main/setup.sh | sh
-uv sync
+uv tool install codeintel-navigation-mcp
 ```
 
 `setup.sh` installs every binary codeintel needs into `~/.codeintel/bin` and appends it to the shell rc. It is idempotent — re-running skips what's present. Options: `--only <name>` (one dependency), `--force` (reinstall), `--help`.
 
 Binaries installed: `scip` (≥ v0.9.0, SQLite conversion), `zoekt-index` / `zoekt-webserver` (search), and one indexer per language: `scip-typescript`, `scip-python`, `scip-swift` (macOS arm64 only), `scip-java` (detect-only).
 
+`uv tool install` puts `codeintel` (the CLI) and `codeintel-server` (the MCP server) on `PATH`. Optional extras: `uv tool install "codeintel-navigation-mcp[semantic]"` for `semanticSearch`, `[watch]` for `codeintel watch`.
+
 ## 3. Register the MCP server
+
+If you installed the Claude Code plugin, the server is already registered — skip this step.
 
 Claude Code:
 
 ```bash
-claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run codeintel-server
+claude mcp add codeintel --scope user -- codeintel-server
 ```
 
-Cursor / other MCP clients: point them at the stdio command `uv --directory /path/to/codeintel run codeintel-server`. No HTTP server, no auth, no network.
+Cursor / other MCP clients: point them at the stdio command `codeintel-server`. No HTTP server, no auth, no network.
 
 ## 4. Index a repo
 
 ```bash
-uv run codeintel index /path/to/your/repo            # slug = directory name
-uv run codeintel index /path/to/your/repo --slug foo # explicit slug
-uv run codeintel index /path/to/your/repo --scheme MyScheme  # Swift, ambiguous Xcode scheme
+codeintel index /path/to/your/repo            # slug = directory name
+codeintel index /path/to/your/repo --slug foo # explicit slug
+codeintel index /path/to/your/repo --scheme MyScheme  # Swift, ambiguous Xcode scheme
 ```
 
 Language is detected by counting source files per extension — **one language per index** (no multi-language merge). For a Swift repo with a checked-in `.xcodeproj`/`.xcworkspace`, codeintel auto-uses `xcodebuild`; pass `--scheme` on the first index if there is more than one scheme (it's persisted, so `reindex`/`watch` reuse it).
@@ -50,7 +54,7 @@ Language is detected by counting source files per extension — **one language p
 ## 5. Verify
 
 ```bash
-uv run codeintel status <slug>     # expect status: indexed
+codeintel status <slug>     # expect status: indexed
 ```
 
 Then call a tool through the MCP client, e.g. `goToDefinition(repo: "<slug>", symbol: "main")`. A non-error response with a `definitions` array means the pipeline works end to end.
