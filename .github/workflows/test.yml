@@ -85,3 +85,10 @@ jobs:
           # -rs surfaces skip reasons, so a dependency silently dropping tests
           # out of the run is visible in the log instead of passing as green.
           uv run pytest -m "not integration" -rs
+
+      - name: Check version consistency
+        run: |
+          set -eu
+          # Runs on every pull request, not only at release, so drift is caught
+          # when it is introduced rather than when it ships.
+          uv run python scripts/check_versions.py

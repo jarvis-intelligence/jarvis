@@ -32,7 +32,7 @@ Lexical search via an embedded Zoekt index (lazy-started on first call). `repo`,
 Returns: `{"query": ..., "hits": [{"repo","path","lineNumber","lineText"}], "total": int}`.
 
 ### semanticSearch(repo, query, limit=10) → dict
-Natural-language code search over `repo`: embeds `query`, retrieves top vector matches from the repo's semantic index, fuses them with Zoekt lexical hits via reciprocal rank fusion. Requires `repo` to have been indexed with the `semantic` extra installed (`uv sync --extra semantic`); otherwise returns `{"error": "..."}` with an install hint.
+Natural-language code search over `repo`: embeds `query`, retrieves top vector matches from the repo's semantic index, fuses them with Zoekt lexical hits via reciprocal rank fusion. Requires `repo` to have been indexed with the `semantic` extra installed (`uv tool install "codeintel-navigation-mcp[semantic]"`); otherwise returns `{"error": "..."}` with an install hint.
 Returns: `{"query": ..., "results": [{"repo","filePath","startLine","endLine","symbolName","content","score","sources"}], "total": int}` (plus an optional `"warning"` if the configured embedding model differs from the index's).
 
 ### blastRadius(repo, symbol_or_package) → dict

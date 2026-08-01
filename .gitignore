@@ -14,3 +14,6 @@ wheels/
 
 # Subagent-driven-development per-plan scratch workspace
 .superpowers/
+
+# Skill eval workspaces (benchmark output, not plugin content)
+evals/

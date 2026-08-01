@@ -1,6 +1,6 @@
 ---
 name: codeintel-use
-description: Use codeintel MCP tools for code structure queries: finding references, go-to-definition, call/type hierarchy, who calls a function, where a symbol is defined, document symbols, natural-language semantic search. Prefer over grep.
+description: "Use codeintel MCP tools for code structure queries: finding references, go-to-definition, call/type hierarchy, who calls a function, where a symbol is defined, document symbols, natural-language semantic search. Prefer over grep."
 version: "0.1.0"
 ---
 
@@ -51,7 +51,7 @@ Before any structural tool call, check freshness:
 1. Call `getIndexStatus(repo, repo_path)` — pass `repo_path` = the repo's local git working dir to compare against `git rev-parse HEAD`.
 2. Branch on the result:
    - **indexed + fresh** → call the structural tool now.
-   - **indexed + stale** → run `uv run codeintel reindex <slug>`, then call the tool.
+   - **indexed + stale** → run `codeintel reindex <slug>`, then call the tool.
    - **not indexed** → fall back to grep for this query; offer to index (`codeintel index <path>`).
 3. For **text** search (not structure), use grep or `searchCode` — no preference between them.
 
@@ -59,7 +59,12 @@ Before any structural tool call, check freshness:
 
 - **`typeHierarchy` errors on real indexes.** Upstream `scip expt-convert` never populates `relationships`, so the tool returns an explicit error (not a bug, not "no supertypes"). Do not file this as a bug; it's a known upstream gap.
 - **Bare symbol names return empty results, not errors.** `goToDefinition(repo, "index_repo")` returns `{"definitions": []}` silently. The match is exact against the fully-qualified SCIP string — see "Symbol format" above. If a nav tool returns empty and the symbol definitely exists, you passed the wrong form: run `documentSymbols` first and use the returned `symbol` string verbatim.
-- **`semanticSearch` needs the `semantic` extra.** If `repo` was indexed without `uv sync --extra semantic`, it returns `{"error": "..."}` with an install hint — index/reindex after installing the extra.
+- **`semanticSearch` needs the `semantic` extra.** If `repo` was indexed without the `semantic` extra installed (`uv tool install "codeintel-navigation-mcp[semantic]"`), it returns `{"error": "..."}` with an install hint — index/reindex after installing the extra.
+- **`semanticSearch` will always error under this plugin's default registration — installing/reindexing with `[semantic]` does not fix it.** The `semantic` extra must be present in the specific server process answering the query, not just at index time. `plugin/.mcp.json` registers `codeintel` as plain `uvx --from codeintel-navigation-mcp codeintel-server` (no `[semantic]`) by design, to keep every plugin user's MCP server cold-start free of lancedb/torch. That decision is not being revisited here. If you genuinely need `semanticSearch`, register a second, differently-named MCP server pointed at the extra (the `codeintel` name is already taken by the plugin's registration):
+  ```bash
+  claude mcp add codeintel-semantic --scope user -- uvx --from "codeintel-navigation-mcp[semantic]" codeintel-server
+  ```
+  Then call `semanticSearch` through `codeintel-semantic` instead of `codeintel`.
 - **`blastRadius` only sees already-indexed repos.** Index the dependency first, or re-run `codeintel index`/`reindex` after indexing it, for an edge to appear.
 - **One language per repo.** No multi-language merge — a polyglot repo indexes only its plurality language.
 - **Every tool returns `{"error": "..."}` on failure, never raises.** Check for an `error` key before reading results.

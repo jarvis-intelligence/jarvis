@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "codeintel": {
+      "command": "uvx",
+      "args": ["--from", "codeintel-navigation-mcp>=0.2.1", "codeintel-server"]
+    }
+  }
+}
