@@ -9,7 +9,7 @@
 # The import package, both CLIs, and the MCP server are all still `codeintel`
 # — only the name you install differs.
 name = "codeintel-navigation-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
 readme = "README.md"
 license = "MIT"
@@ -41,7 +41,11 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "mcp[cli]>=1.2.0",
+    # Capped below 2.0: mcp 2.0.0 removed `mcp.server.fastmcp`, which
+    # server.py imports, so an uncapped range lets a fresh install resolve a
+    # version the server cannot start on. uv.lock hid this during development
+    # by pinning 1.x — only installing from PyPI surfaced it.
+    "mcp[cli]>=1.2.0,<2.0.0",
     # Runtime must stay >= the gencode version vendored in scip_pb2.py
     # (generated against libprotoc 35.1 — see that file's header). Gencode
     # calls ValidateProtobufRuntimeVersion and refuses an older runtime.

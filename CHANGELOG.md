@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.1] - 2026-08-01
+
+### Fixed
+
+- `codeintel-server` could not start when installed from PyPI. The `mcp[cli]`
+  dependency had no upper bound, so a fresh install resolved mcp 2.0.0, which
+  removed `mcp.server.fastmcp` — the module `server.py` imports — and the
+  process died with `ModuleNotFoundError` before serving anything. Now capped
+  at `<2.0.0`, matching the bounds already used for `protobuf` and `zstandard`.
+  Development never saw this because `uv.lock` pinned mcp 1.x; only installing
+  the published artifact surfaced it. **0.2.0 is broken for every consumer and
+  should not be used.**
+
+### Added
+
+- The release workflow now installs the built wheel into a clean environment
+  with no lockfile and requires the server to complete an MCP handshake and
+  register all 9 tools before anything is uploaded. Every other check resolves
+  from `uv.lock` and so cannot catch a dependency range that is broken for
+  real users.
+
 ## [0.2.0] - 2026-08-01
 
 First release published to PyPI, as `codeintel-navigation-mcp`. Earlier versions existed

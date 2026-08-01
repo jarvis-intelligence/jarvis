@@ -156,7 +156,7 @@ wheels = [
 
 [[package]]
 name = "codeintel-navigation-mcp"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -185,7 +185,7 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "lancedb", marker = "extra == 'semantic'", specifier = ">=0.20" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.2.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.2.0,<2.0.0" },
     { name = "protobuf", specifier = ">=7.35.1,<8.0.0" },
     { name = "sentence-transformers", marker = "extra == 'semantic'", specifier = ">=3.0" },
     { name = "tree-sitter", marker = "extra == 'semantic'", specifier = ">=0.25" },

@@ -103,6 +103,55 @@ jobs:
           fi
           echo "Found the registry ownership marker"
 
+      - name: Smoke-test the wheel against a fresh dependency resolve
+        run: |
+          set -eu
+          # Every step above resolves dependencies from uv.lock, so none of them
+          # can catch a dependency *range* that is broken for real users. 0.2.0
+          # shipped exactly that way: `mcp[cli]>=1.2.0` was uncapped, a fresh
+          # install pulled mcp 2.0.0, which removed `mcp.server.fastmcp`, and the
+          # server could not start at all -- while CI stayed green on the 1.x pin
+          # in the lockfile.
+          #
+          # So: install the built wheel into a clean environment with no lockfile
+          # in sight, and require the server to complete a real MCP handshake.
+          uv venv "${RUNNER_TEMP}/smoke" --python 3.12
+          uv pip install --python "${RUNNER_TEMP}/smoke/bin/python" dist/*.whl
+          "${RUNNER_TEMP}/smoke/bin/python" - <<'PY'
+          import json, os, subprocess, sys
+
+          server = os.path.join(os.environ["RUNNER_TEMP"], "smoke", "bin", "codeintel-server")
+          proc = subprocess.Popen([server], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, bufsize=1)
+
+          def send(payload):
+              proc.stdin.write(json.dumps(payload) + "\n")
+              proc.stdin.flush()
+
+          def expect(label):
+              line = proc.stdout.readline()
+              if not line:
+                  proc.kill()
+                  sys.exit(f"{label}: server produced no response\n"
+                           f"stderr:\n{proc.stderr.read()}")
+              return json.loads(line)
+
+          send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                           "clientInfo": {"name": "publish-smoke", "version": "0"}}})
+          print("initialize ->", expect("initialize")["result"]["serverInfo"])
+
+          send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+          send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+          tools = sorted(t["name"] for t in expect("tools/list")["result"]["tools"])
+          proc.terminate()
+
+          # Guards against shipping a build that starts but registers nothing.
+          if len(tools) != 9:
+              sys.exit(f"expected 9 tools, got {len(tools)}: {tools}")
+          print(f"tools/list -> {len(tools)}: {', '.join(tools)}")
+          PY
+
       - name: Publish to PyPI
         run: |
           set -eu
