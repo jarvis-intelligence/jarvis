@@ -110,6 +110,23 @@ skip the doomed build. `--search-only` requests the same publish up front: Zoekt
 work, navigation tools return an explanation. Only listed signatures trigger it — any other indexer
 failure is still a hard failure.
 
+**Maven Java repos need bash >= 4.4 on macOS.** scip-java generates a `javac`
+wrapper (`#!/usr/bin/env bash`, `set -eu`) that expands `"${LAUNCHER_ARGS[@]}"`
+unguarded. maven-compiler-plugin's version probe passes no `-J` flags, so the
+array is empty — an error on bash < 4.4, and macOS ships only 3.2. Every
+Maven-built Java repo fails at `default-compile` with
+`LAUNCHER_ARGS[@]: unbound variable`.
+
+Because the wrapper's shebang resolves bash through `PATH`, `setup.sh` creates
+`~/.codeintel/shims/bash` pointing at a bash >= 4.4, and `_java_indexer_env()`
+prepends that one directory for the indexer subprocess. Only the shim dir is
+prepended, never a general bin dir — that would shadow `java`/`mvn`/`git` for
+the build. Gradle is unaffected: it does not use the forked-javac wrapper.
+
+Unlike the AGP case this is *fixable*, so it does not degrade to search-only —
+`--search-only` cannot be un-set, which would strand a user who later installed
+bash. It raises an error naming the remedy and leaves the repo `failed`.
+
 **Swift build-tool selection:** `scip-swift`'s own `BuildBackendDetector` picks `swiftpm`
 whenever `Package.swift` exists, even for repos that can't build that way (e.g. a UIKit-only
 iOS package with no macOS platform support). `index_cli.py`'s `_prefers_xcodebuild()` overrides

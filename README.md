@@ -299,6 +299,16 @@ as of v0.9.0, `scip-java`, `scip-kotlinc`), not codeintel bugs:
   unstable even across patch releases, so any other version fails.
   Both cases are detected automatically from the indexer's own failure output
   and degrade to `--search-only` rather than failing outright.
+- **Maven-built Java repos need bash >= 4.4 on macOS** — scip-java's generated
+  `javac` wrapper (`#!/usr/bin/env bash`, `set -eu`) expands
+  `"${LAUNCHER_ARGS[@]}"` unguarded, which errors on bash < 4.4; macOS ships
+  only 3.2, so the build dies at `default-compile` with
+  `LAUNCHER_ARGS[@]: unbound variable`. `setup.sh` works around it by linking
+  `~/.codeintel/shims/bash` to a newer bash and putting that one directory
+  first on `PATH` for the indexer. If no bash >= 4.4 is installed, indexing
+  fails with the remedy rather than degrading to `--search-only` — unlike the
+  two cases above, this one is fixable (`brew install bash`), and a persisted
+  `--search-only` cannot be un-set.
 
 ## Configuration
 
