@@ -744,3 +744,105 @@ def test_only_flag_runs_single_installer(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert not npm_log.exists(), "--only scip must not run npm installers"
+
+
+def _fake_bash(tmp_path, name: str, version_line: str) -> str:
+    """A stand-in bash that answers --version and nothing else."""
+    path = tmp_path / name
+    path.write_text(f'#!/bin/sh\n[ "$1" = "--version" ] && echo "{version_line}"\n')
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_shim_dir_defaults_under_codeintel_home():
+    result = run_func("shim_dir", env={"HOME": "/home/someone"})
+    assert result.stdout.strip() == "/home/someone/.codeintel/shims"
+
+
+def test_shim_dir_follows_data_dir_not_bin_dir(tmp_path):
+    """Must key off CODEINTEL_DATA_DIR: config.shim_dir() reads that one, and a
+    shim the Python side cannot find is worse than no shim."""
+    result = run_func(
+        "shim_dir",
+        env={"HOME": "/home/someone",
+             "CODEINTEL_DATA_DIR": str(tmp_path),
+             "CODEINTEL_BIN_DIR": "/should/be/ignored"},
+    )
+    assert result.stdout.strip() == f"{tmp_path}/shims"
+
+
+def test_bash_at_least_44_accepts_bash_5(tmp_path):
+    fake = _fake_bash(tmp_path, "bash5", "GNU bash, version 5.3.15(1)-release (arm64-apple-darwin25)")
+    assert run_func(f'bash_at_least_44 "{fake}"').returncode == 0
+
+
+def test_bash_at_least_44_accepts_exactly_44(tmp_path):
+    fake = _fake_bash(tmp_path, "bash44", "GNU bash, version 4.4.0(1)-release")
+    assert run_func(f'bash_at_least_44 "{fake}"').returncode == 0
+
+
+def test_bash_at_least_44_rejects_macos_bash_32(tmp_path):
+    fake = _fake_bash(tmp_path, "bash32", "GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)")
+    assert run_func(f'bash_at_least_44 "{fake}"').returncode != 0
+
+
+def test_bash_at_least_44_rejects_unparseable_version(tmp_path):
+    fake = _fake_bash(tmp_path, "weird", "not a version string at all")
+    assert run_func(f'bash_at_least_44 "{fake}"').returncode != 0
+
+
+def test_bash_at_least_44_rejects_missing_binary(tmp_path):
+    assert run_func(f'bash_at_least_44 "{tmp_path}/nope"').returncode != 0
+
+
+def test_install_bash_shim_is_a_noop_on_linux(tmp_path):
+    result = run_func(
+        'install_bash_shim linux',
+        env={"HOME": str(tmp_path), "CODEINTEL_DATA_DIR": str(tmp_path)},
+    )
+    assert result.returncode == 0
+    assert not (tmp_path / "shims" / "bash").exists()
+
+
+def test_install_bash_shim_skips_when_default_bash_is_modern(tmp_path):
+    """A mac with a modern default bash needs no shim."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _fake_bash(bindir, "bash", "GNU bash, version 5.3.15(1)-release")
+    result = run_func(
+        'install_bash_shim darwin',
+        env={"HOME": str(tmp_path), "CODEINTEL_DATA_DIR": str(tmp_path),
+             "PATH": f"{bindir}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    assert not (tmp_path / "shims" / "bash").exists()
+
+
+def test_install_bash_shim_links_candidate_when_default_is_old(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _fake_bash(bindir, "bash", "GNU bash, version 3.2.57(1)-release")
+    modern = _fake_bash(tmp_path, "modern-bash", "GNU bash, version 5.3.15(1)-release")
+    result = run_func(
+        f'BASH_SHIM_CANDIDATES="{modern}"\ninstall_bash_shim darwin',
+        env={"HOME": str(tmp_path), "CODEINTEL_DATA_DIR": str(tmp_path),
+             "PATH": f"{bindir}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    link = tmp_path / "shims" / "bash"
+    assert link.is_symlink()
+    assert link.resolve() == Path(modern).resolve()
+
+
+def test_install_bash_shim_advises_install_when_no_modern_bash(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _fake_bash(bindir, "bash", "GNU bash, version 3.2.57(1)-release")
+    result = run_func(
+        f'BASH_SHIM_CANDIDATES="{tmp_path}/absent"\ninstall_bash_shim darwin',
+        env={"HOME": str(tmp_path), "CODEINTEL_DATA_DIR": str(tmp_path),
+             "PATH": f"{bindir}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, "must not fail setup for users who never index Java"
+    assert "brew install bash" in result.stdout + result.stderr
+    assert not (tmp_path / "shims" / "bash").exists()

@@ -130,6 +130,17 @@ ensure_bin_dir() {
 	mkdir -p "$(bin_dir)"
 }
 
+# Where bash shims go. Keyed to CODEINTEL_DATA_DIR, NOT CODEINTEL_BIN_DIR:
+# index_cli.py resolves this same path via config.shim_dir() -> data_dir(),
+# which only honours CODEINTEL_DATA_DIR. A shim the reader cannot find is
+# worse than no shim at all.
+#
+# A sibling of bin_dir rather than a subdirectory: bin/ holds pinned binaries
+# we downloaded and own, shims/ holds symlinks to system tools we did not.
+shim_dir() {
+	echo "${CODEINTEL_DATA_DIR:-${HOME}/.codeintel}/shims"
+}
+
 # Echo the shell rc file to modify, or empty if the shell is unrecognized.
 shell_rc_path() {
 	case "${SHELL:-}" in
@@ -321,6 +332,72 @@ install_raw_binary() {
 
 scip_asset_name() {
 	echo "scip-$1-$2.tar.gz"
+}
+
+# Overridable so tests can point at fixtures instead of the real filesystem.
+BASH_SHIM_CANDIDATES="${BASH_SHIM_CANDIDATES:-/opt/homebrew/bin/bash /usr/local/bin/bash}"
+
+# True when $1 is a bash >= 4.4. Below that, `set -u` plus an empty
+# "${arr[@]}" is an error -- which is exactly how scip-java's generated javac
+# wrapper dies on macOS's stock bash 3.2.
+#
+# Parses `bash --version` rather than $BASH_VERSINFO so a test fixture can be a
+# plain sh script. First line looks like:
+#   GNU bash, version 5.3.15(1)-release (aarch64-apple-darwin25.4.0)
+bash_at_least_44() {
+	_bin=$1
+	[ -n "$_bin" ] || return 1
+	[ -x "$_bin" ] || return 1
+	_line=$("$_bin" --version 2>/dev/null | head -n 1) || return 1
+	_ver=${_line#*version }
+	_ver=${_ver%%[!0-9.]*}
+	_major=${_ver%%.*}
+	_rest=${_ver#*.}
+	_minor=${_rest%%.*}
+	case "$_major" in '' | *[!0-9]*) return 1 ;; esac
+	case "$_minor" in '' | *[!0-9]*) return 1 ;; esac
+	if [ "$_major" -gt 4 ]; then return 0; fi
+	if [ "$_major" -eq 4 ] && [ "$_minor" -ge 4 ]; then return 0; fi
+	return 1
+}
+
+# scip-java's generated javac wrapper is `#!/usr/bin/env bash` with `set -u`
+# and an unguarded "${LAUNCHER_ARGS[@]}", so it needs bash >= 4.4 on PATH.
+# macOS ships only 3.2, which breaks every Maven-built Java repo. Linux ships
+# >= 4.4, so this is a no-op there.
+#
+# Never runs `brew`: installing a shell is the user's call, and setup.sh
+# otherwise only downloads pinned release binaries into its own bin dir.
+install_bash_shim() {
+	_os=$1
+	if [ "$_os" != "darwin" ]; then
+		record bash-shim "not needed"
+		return 0
+	fi
+
+	_default=$(command -v bash 2>/dev/null) || _default=""
+	if bash_at_least_44 "$_default"; then
+		log_info "bash-shim: default bash is >= 4.4"
+		record bash-shim "not needed"
+		return 0
+	fi
+
+	# SC2086 intentional: BASH_SHIM_CANDIDATES is a space-separated list and
+	# must word-split. POSIX sh has no arrays, which is why it is a string.
+	# shellcheck disable=SC2086
+	for _cand in $BASH_SHIM_CANDIDATES; do
+		if bash_at_least_44 "$_cand"; then
+			mkdir -p "$(shim_dir)"
+			ln -sf "$_cand" "$(shim_dir)/bash"
+			log_info "bash-shim: linked ${_cand}"
+			record bash-shim "ok"
+			return 0
+		fi
+	done
+
+	log_warn "bash-shim: no bash >= 4.4 found. Maven-built Java repos cannot be SCIP-indexed until you run: brew install bash"
+	record bash-shim "skipped (run: brew install bash)"
+	return 0
 }
 
 install_scip() {
@@ -515,7 +592,7 @@ Installs codeintel's external binary dependencies into ~/.codeintel/bin.
 Options:
   --only <name>   Install just one dependency. One of:
                   scip, zoekt, scip-swift, scip-typescript,
-                  scip-python, scip-java
+                  scip-python, scip-java, bash-shim
   --force         Reinstall even if already present
   --help          Show this message
 
@@ -605,6 +682,7 @@ main() {
 	if should_run scip-typescript; then run_one scip-typescript install_scip_typescript; fi
 	if should_run scip-python; then run_one scip-python install_scip_python; fi
 	if should_run scip-java; then run_one scip-java install_scip_java; fi
+	if should_run bash-shim; then install_bash_shim "$OS"; fi
 
 	ensure_on_path
 	print_summary
