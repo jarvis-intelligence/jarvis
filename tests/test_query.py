@@ -251,3 +251,32 @@ def test_type_hierarchy_reports_unavailable_before_resolving(tmp_path: Path):
     assert available is False
     assert supertypes == []
     assert subtypes == []
+
+
+def test_document_symbols_populate_display_name_and_kind(query_service: QueryService):
+    """scip expt-convert leaves global_symbols.display_name and .kind NULL
+    for every row, so these were always null before the parser fallback."""
+    entries, _ = query_service.get_document_symbols(REPO, DOC_GREETER)
+    by_symbol = {e.symbol: e for e in entries}
+    greeter = by_symbol[CLASS_SYMBOL]
+    assert greeter.displayName == "Greeter"
+    assert greeter.kind == "TYPE"
+    method = by_symbol[METHOD_SYMBOL]
+    assert method.displayName == "greet"
+    assert method.kind == "METHOD"
+
+
+def test_display_name_prefers_a_populated_column_over_the_parser():
+    """Self-healing: if a future converter starts populating the real
+    columns, they win over the syntax-derived fallback."""
+    from codeintel.query import _display_and_kind
+
+    display_name, kind = _display_and_kind(CLASS_SYMBOL, "FromColumn", 5)
+    assert display_name == "FromColumn"
+    assert kind != "TYPE"  # kind_name(5) came from the column, not the parser
+
+
+def test_display_and_kind_falls_back_for_unparseable_symbols():
+    from codeintel.query import _display_and_kind
+
+    assert _display_and_kind("local 0", None, None) == (None, None)
