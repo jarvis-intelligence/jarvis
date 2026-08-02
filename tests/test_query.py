@@ -15,6 +15,7 @@ from codeintel import config
 from codeintel.index_reader import IndexConnectionCache, IndexNotFoundError
 from codeintel.models import Freshness
 from codeintel.query import QueryService
+from codeintel.symbols import AmbiguousSymbolError, SymbolNotFoundError
 from tests.fixtures.synthetic_index import (
     ANIMAL_SYMBOL,
     CLASS_SYMBOL,
@@ -64,9 +65,11 @@ def test_get_definitions_matches_combined_bitmask_role(query_service: QueryServi
     assert (locations[0].range.start.line, locations[0].range.start.character) == (6, 6)
 
 
-def test_get_definitions_unknown_symbol_returns_empty(query_service: QueryService):
-    locations, _ = query_service.get_definitions(REPO, "no-such-symbol")
-    assert locations == []
+def test_get_definitions_unknown_symbol_raises(query_service: QueryService):
+    """An unknown bare name now raises instead of returning a silently-empty
+    result — the regression this feature exists to fix."""
+    with pytest.raises(SymbolNotFoundError):
+        query_service.get_definitions(REPO, "no-such-symbol")
 
 
 def test_get_definitions_missing_index_raises_index_not_found(query_service: QueryService):
@@ -92,10 +95,11 @@ def test_call_hierarchy_returns_real_incoming_and_outgoing(query_service: QueryS
     assert outgoing == []
 
 
-def test_call_hierarchy_empty_for_symbol_with_no_data(query_service: QueryService):
-    incoming, outgoing, _ = query_service.call_hierarchy(REPO, "no-such-symbol")
-    assert incoming == []
-    assert outgoing == []
+def test_call_hierarchy_unknown_symbol_raises(query_service: QueryService):
+    """After wiring resolution, an unknown bare name raises instead of
+    returning a silently-empty result — the whole point of this feature."""
+    with pytest.raises(SymbolNotFoundError):
+        query_service.call_hierarchy(REPO, "no-such-symbol")
 
 
 def test_type_hierarchy_returns_real_supertype(query_service: QueryService):
@@ -155,3 +159,95 @@ def test_relationship_data_present_true_when_any_non_null(tmp_path):
         assert relationship_data_present(conn) is True
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Bare-name resolution wiring (Task 3)
+# ---------------------------------------------------------------------------
+
+def test_get_definitions_accepts_a_bare_name(query_service: QueryService):
+    """The regression this whole feature exists for: a bare name used to
+    return [] with no error."""
+    locations, _ = query_service.get_definitions(REPO, "Greeter")
+    assert len(locations) == 1
+    assert locations[0].path == DOC_GREETER
+
+
+def test_get_definitions_still_accepts_a_full_scip_symbol(query_service: QueryService):
+    locations, _ = query_service.get_definitions(REPO, CLASS_SYMBOL)
+    assert len(locations) == 1
+    assert locations[0].path == DOC_GREETER
+
+
+def test_find_references_accepts_a_bare_name(query_service: QueryService):
+    by_bare, _ = query_service.find_references(REPO, "greet")
+    by_full, _ = query_service.find_references(REPO, METHOD_SYMBOL)
+    assert by_bare == by_full
+    assert by_bare
+
+
+def test_call_hierarchy_accepts_a_bare_name(query_service: QueryService):
+    bare_in, bare_out, _ = query_service.call_hierarchy(REPO, "greet")
+    full_in, full_out, _ = query_service.call_hierarchy(REPO, METHOD_SYMBOL)
+    assert bare_in == full_in
+    assert bare_out == full_out
+
+
+def test_unknown_name_raises_instead_of_returning_empty(query_service: QueryService):
+    with pytest.raises(SymbolNotFoundError):
+        query_service.get_definitions(REPO, "NoSuchSymbol")
+
+
+def test_resolve_symbol_returns_the_full_scip_string(query_service: QueryService):
+    assert query_service.resolve_symbol(REPO, "Greeter") == CLASS_SYMBOL
+
+
+def test_resolve_symbol_is_idempotent(query_service: QueryService):
+    """server.py resolves, then the nav method resolves the result again.
+    Rung 1 makes the second pass a no-op."""
+    once = query_service.resolve_symbol(REPO, "Greeter")
+    assert query_service.resolve_symbol(REPO, once) == once
+
+
+def test_type_hierarchy_reports_unavailable_before_resolving(tmp_path: Path):
+    """The availability check must run before resolution, so even a nonsense
+    symbol gets the 'unavailable' explanation rather than a resolution error.
+    Uses a dedicated index with no relationships data (the real-world case)."""
+    from codeintel.index_reader import IndexConnectionCache
+    from tests.fixtures.scip_encoder import encode_occurrences
+    from codeintel import scip_pb2
+    from codeintel.scip_decoder import SymbolRoles
+
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE documents (id INTEGER PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE chunks (id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL, start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL, occurrences BLOB NOT NULL);
+        CREATE TABLE global_symbols (id INTEGER PRIMARY KEY, symbol TEXT NOT NULL UNIQUE,
+            display_name TEXT, kind INTEGER, documentation TEXT, signature BLOB,
+            enclosing_symbol TEXT, relationships BLOB);
+        CREATE TABLE mentions (chunk_id INTEGER NOT NULL, symbol_id INTEGER NOT NULL,
+            role INTEGER NOT NULL, PRIMARY KEY (chunk_id, symbol_id, role));
+        CREATE TABLE defn_enclosing_ranges (id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL,
+            symbol_id INTEGER NOT NULL, start_line INTEGER NOT NULL, start_char INTEGER NOT NULL,
+            end_line INTEGER NOT NULL, end_char INTEGER NOT NULL);
+    """)
+    conn.execute("INSERT INTO documents (id, relative_path) VALUES (1, 'f.ts')")
+    conn.execute("INSERT INTO global_symbols (id, symbol) VALUES (1, 'local 0')")
+    conn.commit()
+    conn.close()
+
+    index_dir = tmp_path / "scip" / config.PROJECT / "norel" / config.BRANCH
+    index_dir.mkdir(parents=True)
+    import shutil
+    shutil.copy(db_path, index_dir / "index-test.db")
+    (index_dir / "index-test.metadata.json").write_text('{"commit_sha":"x","published_at":"2026-01-01T00:00:00Z"}')
+    (index_dir / "current").write_text("index-test.db")
+
+    service = QueryService(IndexConnectionCache(str(tmp_path)))
+    supertypes, subtypes, _, available = service.type_hierarchy("norel", "NoSuchSymbol")
+    assert available is False
+    assert supertypes == []
+    assert subtypes == []

@@ -50,6 +50,7 @@ from codeintel.scip_decoder import (
     kind_name,
     scip_range_to_positions,
 )
+from codeintel import symbols
 
 __all__ = [
     "IndexNotFoundError",
@@ -334,8 +335,21 @@ class QueryService:
     def __init__(self, connection_cache: IndexConnectionCache) -> None:
         self._cache = connection_cache
 
+    def _resolved(self, conn: sqlite3.Connection, symbol: str) -> str:
+        """Accept either a bare name or a full SCIP symbol. Explicit at each
+        call site rather than a decorator: this codebase is consistently
+        explicit, and hiding resolution would make misfires hard to trace."""
+        return symbols.resolve(conn, symbol)
+
+    def resolve_symbol(self, repo: str, symbol: str) -> str:
+        """Public resolution for callers that need the canonical symbol
+        string itself — `server.py` reports it as `resolvedSymbol`."""
+        conn, _ = get_connection(self._cache, repo)
+        return self._resolved(conn, symbol)
+
     def get_definitions(self, repo: str, symbol: str) -> tuple[list[Location], FreshnessSnapshot]:
         conn, metadata = get_connection(self._cache, repo)
+        symbol = self._resolved(conn, symbol)
         locations = [
             _occurrence_to_location(path, occ)
             for path, occ in _occurrences_for_symbol(conn, symbol, role_bit=SymbolRoles.DEFINITION)
@@ -346,6 +360,7 @@ class QueryService:
     def find_references(self, repo: str, symbol: str) -> tuple[list[Location], FreshnessSnapshot]:
         """ALL occurrences of `symbol`, definition sites included — no role filter."""
         conn, metadata = get_connection(self._cache, repo)
+        symbol = self._resolved(conn, symbol)
         locations = [
             _occurrence_to_location(path, occ) for path, occ in _occurrences_for_symbol(conn, symbol, role_bit=None)
         ]
@@ -406,6 +421,7 @@ class QueryService:
         self, repo: str, symbol: str
     ) -> tuple[list[CallHierarchyEntry], list[CallHierarchyEntry], FreshnessSnapshot]:
         conn, metadata = get_connection(self._cache, repo)
+        symbol = self._resolved(conn, symbol)
         incoming = _call_hierarchy_incoming(conn, symbol)
         outgoing = _call_hierarchy_outgoing(conn, symbol)
         return incoming, outgoing, _freshness_snapshot(metadata)
@@ -423,6 +439,7 @@ class QueryService:
         available = relationship_data_present(conn)
         if not available:
             return [], [], _freshness_snapshot(metadata), False
+        symbol = self._resolved(conn, symbol)
         supertypes = _type_hierarchy_supertypes(conn, symbol)
         subtypes = _type_hierarchy_subtypes(conn, symbol)
         return supertypes, subtypes, _freshness_snapshot(metadata), True
