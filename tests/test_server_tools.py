@@ -226,7 +226,7 @@ async def test_type_hierarchy_returns_results_when_relationships_present():
     swallowing genuine results.
     """
     async with create_connected_server_and_client_session(server.mcp) as client:
-        result = await client.call_tool("typeHierarchy", {"repo": REPO, "symbol": "x"})
+        result = await client.call_tool("typeHierarchy", {"repo": REPO, "symbol": "Greeter"})
         payload = json.loads(result.content[0].text)
 
     assert "error" not in payload, payload
