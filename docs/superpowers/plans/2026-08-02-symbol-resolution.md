@@ -689,7 +689,7 @@ def resolve(conn: sqlite3.Connection, query: str) -> str:
 
     Rung 1: verbatim passthrough — an already-full SCIP symbol returns
     unchanged via one indexed lookup, which also makes resolve() idempotent.
-    Rung 2: dotted-suffix match on `'.'.join(parents + (name,))`.
+    Rung 2: dotted-suffix match on `'.'.join((package,) + parents + (name,))`.
     """
     row = conn.execute(
         "SELECT symbol FROM global_symbols WHERE symbol = ?", (query,)
@@ -1248,7 +1248,7 @@ git commit -m "test: verify bare-name resolution against a real index"
 
 ## Self-Review
 
-**Spec coverage.** Every spec section maps to a task: parser → 1; ladder, parameter exclusion, cache → 2; `QueryService` wiring and `type_hierarchy` ordering → 3; error contract, `resolvedSymbol`, `resolve_symbol` → 3+4; `documentSymbols` backfill → 5; testing table and all six acceptance criteria → 6. The spec's "re-measure the heuristic figures" risk is Task 1 Step 5.
+**Spec coverage.** Every spec section maps to a task: parser → 1; ladder, parameter exclusion, cache → 2; `QueryService` wiring and `type_hierarchy` ordering → 3; error contract, `resolvedSymbol`, `resolve_symbol` → 3+4; `documentSymbols` backfill → 5; testing table and all six acceptance criteria → 6. The spec's grammar-coverage claim is re-confirmed by Task 1 Step 5.
 
 **Two spec errors found and fixed while planning:**
 1. The spec named `tests/test_server.py`; the file is `tests/test_server_tools.py`. Corrected in the spec.
