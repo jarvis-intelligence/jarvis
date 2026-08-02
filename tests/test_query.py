@@ -15,7 +15,7 @@ from codeintel import config
 from codeintel.index_reader import IndexConnectionCache, IndexNotFoundError
 from codeintel.models import Freshness
 from codeintel.query import QueryService
-from codeintel.symbols import AmbiguousSymbolError, SymbolNotFoundError
+from codeintel.symbols import SymbolNotFoundError
 from tests.fixtures.synthetic_index import (
     ANIMAL_SYMBOL,
     CLASS_SYMBOL,
@@ -213,11 +213,6 @@ def test_type_hierarchy_reports_unavailable_before_resolving(tmp_path: Path):
     """The availability check must run before resolution, so even a nonsense
     symbol gets the 'unavailable' explanation rather than a resolution error.
     Uses a dedicated index with no relationships data (the real-world case)."""
-    from codeintel.index_reader import IndexConnectionCache
-    from tests.fixtures.scip_encoder import encode_occurrences
-    from codeintel import scip_pb2
-    from codeintel.scip_decoder import SymbolRoles
-
     db_path = tmp_path / "test.db"
     conn = sqlite3.connect(db_path)
     conn.executescript("""
