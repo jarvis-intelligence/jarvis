@@ -5,6 +5,7 @@ CLI binaries (marked `@pytest.mark.integration` — skipped if unavailable).
 
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -316,6 +317,28 @@ def test_java_indexer_env_appends_to_existing_gradle_opts(monkeypatch):
     value = _java_indexer_env()["GRADLE_OPTS"]
     assert "-Xmx4g" in value
     assert "-Dorg.gradle.parallel=false" in value
+
+
+def test_java_indexer_env_prepends_shim_dir_when_bash_shim_exists(tmp_path: Path, monkeypatch):
+    """The shim must come FIRST — the whole point is beating /bin/bash 3.2."""
+    from codeintel.index_cli import _java_indexer_env
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    (shims / "bash").write_text("#!/bin/sh\n")
+
+    assert _java_indexer_env()["PATH"] == f"{shims}{os.pathsep}/usr/bin:/bin"
+
+
+def test_java_indexer_env_omits_path_when_no_shim(tmp_path: Path, monkeypatch):
+    """No shim on Linux or a modern-bash mac: the branch must stay inert."""
+    from codeintel.index_cli import _java_indexer_env
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+
+    assert "PATH" not in _java_indexer_env()
 
 
 def test_run_merges_env_over_os_environ(tmp_path: Path, monkeypatch):
@@ -1354,6 +1377,93 @@ def test_search_only_publish_retires_a_previously_published_scip_index(tmp_path:
         assert graph_store.get_package(local_id) is not None
     finally:
         graph_store.close()
+
+
+def test_bash_shim_failure_detected():
+    from codeintel.index_cli import _bash_shim_failure
+
+    assert _bash_shim_failure(
+        "Fatal error compiling: Could not retrieve version from "
+        "/tmp/scip-java1/bin/javac. Exit code 1, Output: "
+        "/tmp/scip-java1/bin/javac: line 38: LAUNCHER_ARGS[@]: unbound variable"
+    )
+
+
+def test_bash_shim_failure_ignores_other_output():
+    from codeintel.index_cli import _bash_shim_failure
+
+    assert not _bash_shim_failure("error: No SCIP shards found")
+
+
+def test_bash_shim_failure_does_not_publish_search_only(tmp_path: Path, monkeypatch):
+    """A fixable env problem must NOT persist search_only=1.
+
+    --search-only is store_true/default=None: settable, never clearable. If this
+    downgraded, a user who then installed bash would silently keep getting no
+    navigation, escapable only via `codeintel forget`.
+    """
+    from codeintel.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(JAVA_FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError(
+                "Fatal error compiling: Could not retrieve version from "
+                "/tmp/scip-java1/bin/javac. Exit code 1, Output: "
+                "/tmp/scip-java1/bin/javac: line 38: LAUNCHER_ARGS[@]: unbound variable"
+            )
+        return None
+
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", _fake_run)
+    monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    with pytest.raises(IndexingError, match="bash"):
+        index_repo(repo_dir, root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get("repo")
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.search_only is False, "a fixable env problem must stay recoverable"
+    finally:
+        registry.close()
+
+
+def test_bash_shim_failure_is_gated_on_java_language(tmp_path: Path, monkeypatch):
+    """The bash-shim remedy is scip-java-specific: a non-Java indexer that
+    happened to emit the same two substrings by coincidence must not get the
+    scip-java remedy message wrapped around its error."""
+    from codeintel.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    original_message = (
+        "Fatal error compiling: Could not retrieve version from "
+        "/tmp/scip-java1/bin/javac. Exit code 1, Output: "
+        "/tmp/scip-java1/bin/javac: line 38: LAUNCHER_ARGS[@]: unbound variable"
+    )
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError(original_message)
+        return None
+
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", _fake_run)
+
+    with pytest.raises(IndexingError) as excinfo:
+        index_repo(repo_dir, root=data_root)
+
+    assert str(excinfo.value) == original_message, "must not get the scip-java-specific bash remedy"
 
 
 @pytest.mark.parametrize(

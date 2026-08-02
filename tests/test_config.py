@@ -38,3 +38,17 @@ def test_ignored_dirs_shared_with_index_cli():
     from codeintel import index_cli
     assert index_cli._IGNORED_DIRS is config.IGNORED_DIRS
     assert "node_modules" in config.IGNORED_DIRS
+
+
+def test_shim_dir_is_under_data_dir(tmp_path, monkeypatch):
+    from codeintel import config
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    assert config.shim_dir() == tmp_path / "shims"
+
+
+def test_shim_dir_honors_explicit_root(tmp_path):
+    """The root override wins over the env var, matching data_dir()."""
+    from codeintel import config
+
+    assert config.shim_dir(tmp_path) == tmp_path / "shims"

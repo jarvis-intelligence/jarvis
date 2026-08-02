@@ -30,6 +30,22 @@ def lancedb_dir(root: Path | None = None) -> Path:
     return data_dir(root) / "lancedb"
 
 
+def shim_dir(root: Path | None = None) -> Path:
+    """Directory holding shims for system tools whose default version is too
+    old for an indexer to use.
+
+    Currently just `bash`: scip-java's generated javac wrapper is
+    `#!/usr/bin/env bash` with `set -eu` and an unguarded `"${LAUNCHER_ARGS[@]}"`,
+    which errors on bash < 4.4 — the bash macOS ships. `setup.sh` writes the
+    symlink here; `index_cli._java_indexer_env()` puts this directory first on
+    PATH for the indexer subprocess.
+
+    Deliberately NOT under `bin/`: that holds pinned binaries setup.sh
+    downloaded and owns, this holds links to system tools it did not.
+    """
+    return data_dir(root) / "shims"
+
+
 _SLUG_UNSAFE = re.compile(r"[^a-z0-9._-]+")
 
 
