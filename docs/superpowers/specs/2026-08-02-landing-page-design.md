@@ -27,10 +27,12 @@ install-conversion or GitHub-star growth.
 2. **Why it's built this way** — the three architectural guarantees from the
    README: read-only runtime, atomic publish, rebuild-not-accumulate graph.
    This is the trust-building section that justifies "understand first."
-3. **How it works** — the two architecture diagrams, **regenerated first**
-   (see "Diagram regeneration" below — the committed PNGs are factually
-   stale and must not ship as-is), each with the 1–2 sentence captions
-   already written in the README. Embed as **SVG**, not PNG.
+3. **How it works** — the **three verified SVG diagrams** committed in
+   `aaa1ccc` (see "Diagram regeneration" below). Do **not** use the two old
+   PNGs; they are factually stale. Each diagram gets a 1–2 sentence caption.
+   - `codeintel-core-components.svg` — pipeline, embedding, storage
+   - `codeintel-query-engine.svg` — SCIP path vs. hybrid path, no router
+   - `codeintel-agent-integration.svg` — MCP over stdio, 9 flat tools
 4. **Tools** — the 9 MCP tools table (name + what it does), condensed from
    the README table. `typeHierarchy` must be marked non-functional here,
    matching the README.
@@ -59,7 +61,31 @@ All copy is sourced directly from `README.md` and
 `docs/project-overview-pdr.md` — no invented marketing claims beyond what's
 already documented there.
 
-## Diagram regeneration (blocking prerequisite)
+## Diagram regeneration — RESOLVED (commit `aaa1ccc`)
+
+**Superseded by three purpose-built diagrams**, each fact checked against
+`src/codeintel/` and each visually verified after export:
+
+| File | Covers |
+|---|---|
+| `codeintel-core-components.svg` (43KB) | 6-stage pipeline, embedding generation, 4 storage stores |
+| `codeintel-query-engine.svg` (28KB) | SCIP structural path vs. hybrid vector+lexical path, RRF k=60 |
+| `codeintel-agent-integration.svg` (27KB) | stdio JSON-RPC, 9 flat tools, response contract |
+
+Sources are the matching `.excalidraw` files; export was via the Kroki API
+(`curl -X POST https://kroki.io/excalidraw/svg -H "Content-Type: text/plain"`),
+verified by rendering to PNG with `rsvg-convert` and inspecting.
+
+This closed the finding **without** needing the local export toolchain, so
+the Playwright-Firefox install is no longer a blocker for this page.
+
+**Still open (not blocking the page):** `README.md` continues to embed the
+two stale PNGs. Repointing it at these three and deleting
+`codeintel-architecture.png` / `codeintel-system-architecture.png` is a
+separate cleanup, pending explicit go-ahead (deletion is hard to reverse).
+
+<details>
+<summary>Original staleness findings, kept for the record</summary>
 
 The two committed PNGs are **factually stale** and must be regenerated from
 their `.excalidraw` sources before the page ships. Verified inaccuracies:
@@ -117,6 +143,8 @@ therefore *not* a constraint on the visual direction.
 **Bonus:** `README.md` embeds these same stale PNGs, so regenerating fixes
 the README too. Keep the PNG filenames the README references, or update the
 README's image links in the same change.
+
+</details>
 
 ## GitHub Pages exposure (accepted decision)
 
