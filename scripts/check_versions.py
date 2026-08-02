@@ -1,14 +1,15 @@
 """Assert every file declaring the release version agrees.
 
-Four files carry the release version and must be identical:
+Five files carry the release version and must be identical:
 
     pyproject.toml                     [project] version
     server.json                        version
     server.json                        packages[0].version
     plugin/.claude-plugin/plugin.json  version
+    .codex-plugin/plugin.json          version
 
 .claude-plugin/marketplace.json deliberately omits a version for its plugin
-entry. The field is optional, and leaving it out removes a fifth place to drift.
+entry. The field is optional, and leaving it out removes a sixth place to drift.
 
 plugin/.mcp.json carries something different in kind: the OLDEST package the
 plugin tolerates, in its `--from` specifier. That is a compatibility floor, not
@@ -47,11 +48,15 @@ def read_declared_versions(root: Path) -> dict[str, str]:
     plugin = json.loads(
         (root / "plugin" / ".claude-plugin" / "plugin.json").read_text()
     )
+    codex_plugin = json.loads(
+        (root / ".codex-plugin" / "plugin.json").read_text()
+    )
     return {
         "pyproject.toml [project] version": pyproject["project"]["version"],
         "server.json version": server["version"],
         "server.json packages[0].version": server["packages"][0]["version"],
         "plugin/.claude-plugin/plugin.json version": plugin["version"],
+        ".codex-plugin/plugin.json version": codex_plugin["version"],
     }
 
 

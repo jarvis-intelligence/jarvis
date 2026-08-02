@@ -1,0 +1,4 @@
+interface:
+  display_name: "codeintel Setup"
+  short_description: "Install and configure codeintel for Codex"
+  default_prompt: "Use $codeintel-setup to install codeintel, register the MCP server, and index a repo for the first time."

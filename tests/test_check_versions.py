@@ -23,9 +23,11 @@ def _load_checker():
 check_versions = _load_checker()
 
 
-def _build(root: Path, *, version="0.2.1", plugin_version=None, floor="0.2.1"):
-    """Write the four version-bearing files plus .mcp.json into root."""
+def _build(root: Path, *, version="0.2.1", plugin_version=None,
+            codex_plugin_version=None, floor="0.2.1"):
+    """Write the five version-bearing files plus .mcp.json into root."""
     plugin_version = plugin_version or version
+    codex_plugin_version = codex_plugin_version or version
     (root / "pyproject.toml").write_text(
         f'[project]\nname = "codeintel-navigation-mcp"\nversion = "{version}"\n'
     )
@@ -43,6 +45,11 @@ def _build(root: Path, *, version="0.2.1", plugin_version=None, floor="0.2.1"):
     plugin_dir.mkdir(parents=True)
     (plugin_dir / "plugin.json").write_text(
         json.dumps({"name": "codeintel", "version": plugin_version})
+    )
+    codex_plugin_dir = root / ".codex-plugin"
+    codex_plugin_dir.mkdir(parents=True)
+    (codex_plugin_dir / "plugin.json").write_text(
+        json.dumps({"name": "codeintel", "version": codex_plugin_version})
     )
     (root / "plugin" / ".mcp.json").write_text(
         json.dumps(
@@ -76,6 +83,13 @@ def test_plugin_version_drift_is_reported(tmp_path):
     assert "plugin.json" in problems[0]
     assert "0.2.0" in problems[0] and "0.2.1" in problems[0]
 
+
+def test_codex_plugin_version_drift_is_reported(tmp_path):
+    _build(tmp_path, version="0.2.1", codex_plugin_version="0.2.0")
+    problems = check_versions.check(tmp_path)
+    assert len(problems) == 1
+    assert ".codex-plugin/plugin.json" in problems[0]
+    assert "0.2.0" in problems[0] and "0.2.1" in problems[0]
 
 def test_floor_ahead_of_release_is_reported(tmp_path):
     _build(tmp_path, version="0.2.1", floor="0.3.0")

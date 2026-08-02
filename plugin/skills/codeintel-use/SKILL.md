@@ -63,6 +63,7 @@ Before any structural tool call, check freshness:
 - **`semanticSearch` will always error under this plugin's default registration — installing/reindexing with `[semantic]` does not fix it.** The `semantic` extra must be present in the specific server process answering the query, not just at index time. `plugin/.mcp.json` registers `codeintel` as plain `uvx --from codeintel-navigation-mcp codeintel-server` (no `[semantic]`) by design, to keep every plugin user's MCP server cold-start free of lancedb/torch. That decision is not being revisited here. If you genuinely need `semanticSearch`, register a second, differently-named MCP server pointed at the extra (the `codeintel` name is already taken by the plugin's registration):
   ```bash
   claude mcp add codeintel-semantic --scope user -- uvx --from "codeintel-navigation-mcp[semantic]" codeintel-server
+  codex mcp add codeintel-semantic -- uvx --from "codeintel-navigation-mcp[semantic]" codeintel-server
   ```
   Then call `semanticSearch` through `codeintel-semantic` instead of `codeintel`.
 - **`blastRadius` only sees already-indexed repos.** Index the dependency first, or re-run `codeintel index`/`reindex` after indexing it, for an edge to appear.
