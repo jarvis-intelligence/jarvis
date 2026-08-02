@@ -262,3 +262,18 @@ def test_unknown_name_message_says_not_found():
     with pytest.raises(SymbolNotFoundError) as excinfo:
         resolve(conn, "NoSuchThing")
     assert "no symbol named" in str(excinfo.value)
+
+
+def test_stale_full_symbol_hints_the_bare_name_instead_of_a_bare_not_found():
+    """A query that parses as a full SCIP symbol but matches nothing is very
+    likely a stale, version-mismatched string (SCIP symbols embed the
+    package version) -- the design spec's opening scenario -- not a typo'd
+    bare name. The message should hint the stable bare name to retry with,
+    not the generic 'no symbol named' text."""
+    conn = _conn(TS_METHOD)
+    stale = TS_METHOD.replace("0.0.1", "9.9.9")
+    with pytest.raises(SymbolNotFoundError) as excinfo:
+        resolve(conn, stale)
+    message = str(excinfo.value)
+    assert "stale" in message.lower() or "different package version" in message.lower()
+    assert "'greet'" in message

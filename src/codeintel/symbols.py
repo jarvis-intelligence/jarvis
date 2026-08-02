@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import sqlite3
 import string
+from collections import OrderedDict
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -209,8 +210,15 @@ class AmbiguousSymbolError(Exception):
 
 # Keyed by db file path. Published indexes are immutable (`index-<sha>.db`,
 # opened mode=ro&immutable=1), so an entry can never go stale and a reindex
-# produces a new sha -> a new key. No invalidation, no TTL.
-_name_maps: dict[str, dict[str, list[Candidate]]] = {}
+# produces a new sha -> a new key -- no invalidation, no TTL is needed for
+# correctness. But `codeintel watch` republishes under a new sha on every
+# debounced change, so the key space is unbounded over a long-running
+# process (measured ~5MB per 17K-symbol index); bound it exactly like
+# `IndexConnectionCache` (index_reader.py): an OrderedDict as a simple
+# bounded FIFO/LRU hybrid, sufficient because each entry is cheap to rebuild
+# (~20ms/17K symbols) if evicted and needed again.
+_NAME_MAP_CACHE_MAX_SIZE = 64
+_name_maps: OrderedDict[str, dict[str, list[Candidate]]] = OrderedDict()
 
 
 def _db_path(conn: sqlite3.Connection) -> str:
@@ -241,8 +249,13 @@ def _name_map(conn: sqlite3.Connection) -> dict[str, list[Candidate]]:
     if not path:
         return _build_name_map(conn)
     cached = _name_maps.get(path)
-    if cached is None:
-        cached = _name_maps[path] = _build_name_map(conn)
+    if cached is not None:
+        _name_maps.move_to_end(path)
+        return cached
+    cached = _name_maps[path] = _build_name_map(conn)
+    _name_maps.move_to_end(path)
+    while len(_name_maps) > _NAME_MAP_CACHE_MAX_SIZE:
+        _name_maps.popitem(last=False)
     return cached
 
 
@@ -266,9 +279,27 @@ def _matches(name_map: dict[str, list[Candidate]], query: str) -> list[Candidate
 
 
 def _not_found_message(conn: sqlite3.Connection, query: str) -> str:
-    """Distinguish "no such name" from "that name is only ever a parameter".
-    Today both produce an identical empty result, which is the bug this
-    whole module exists to remove. Only runs on the failure path."""
+    """Distinguish "no such name" from "that name is only ever a parameter"
+    from "this looks like a full SCIP symbol that no longer exists". Today
+    all three produced an identical empty result, which is the bug this
+    whole module exists to remove. Only runs on the failure path.
+
+    The third case is exactly the "package version changed" scenario the
+    design spec opens with: SCIP symbols embed the package version, so a
+    symbol string recorded anywhere -- a prompt, a skill, a cached plan --
+    silently stops matching at the next release. `query` parses as a
+    full SCIP symbol (>=5 space-separated fields) but rung 1's exact lookup
+    already missed it, so it is very likely stale rather than malformed;
+    hint the bare leaf name as the stable thing to retry with.
+    """
+    query_as_symbol = parse_symbol(query)
+    if query_as_symbol is not None:
+        return (
+            f"{query!r} looks like a full SCIP symbol string but does not match "
+            "anything in this index. SCIP symbols embed the package version, so "
+            "this is likely stale or from a different package version -- retry "
+            f"with the bare name {query_as_symbol.name!r} instead."
+        )
     suffix = "." + query
     for (symbol,) in conn.execute("SELECT symbol FROM global_symbols"):
         parsed = parse_symbol(symbol)
