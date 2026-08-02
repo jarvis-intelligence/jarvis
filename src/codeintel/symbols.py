@@ -25,6 +25,7 @@ parseable.
 
 from __future__ import annotations
 
+import sqlite3
 import string
 from dataclasses import dataclass
 from enum import StrEnum
@@ -162,3 +163,143 @@ def parse_symbol(symbol: str) -> ParsedSymbol | None:
         kind=kind,
         parents=tuple(n for n, _ in descriptors[:-1]),
     )
+
+
+# ---------------------------------------------------------------------------
+# Bare-name resolution
+# ---------------------------------------------------------------------------
+
+CANDIDATE_LIMIT = 10
+
+# Parameters and type parameters are deliberately not resolution targets.
+# They dominate name collisions (measured: tmp_path 205, self 79,
+# monkeypatch 71 in this repo alone) and nobody navigates to them. Callers
+# who genuinely want one pass the full SCIP symbol, which rung 1 honours.
+_RESOLVABLE_KINDS = frozenset(
+    {
+        DescriptorKind.NAMESPACE,
+        DescriptorKind.TYPE,
+        DescriptorKind.TERM,
+        DescriptorKind.METHOD,
+        DescriptorKind.META,
+    }
+)
+
+
+@dataclass(frozen=True)
+class Candidate:
+    symbol: str
+    dotted_path: str
+    kind: DescriptorKind
+
+
+class SymbolNotFoundError(Exception):
+    """No symbol in the index matches the query."""
+
+
+class AmbiguousSymbolError(Exception):
+    """More than one symbol matches; the caller must qualify further."""
+
+    def __init__(self, query: str, candidates: tuple[Candidate, ...], total: int) -> None:
+        super().__init__(f"{query!r} is ambiguous ({total} matches)")
+        self.query = query
+        self.candidates = candidates
+        self.total = total
+
+
+# Keyed by db file path. Published indexes are immutable (`index-<sha>.db`,
+# opened mode=ro&immutable=1), so an entry can never go stale and a reindex
+# produces a new sha -> a new key. No invalidation, no TTL.
+_name_maps: dict[str, dict[str, list[Candidate]]] = {}
+
+
+def _db_path(conn: sqlite3.Connection) -> str:
+    """Absolute path of the connection's main database, or "" for an
+    in-memory or temporary db — which must never be cached, since distinct
+    connections would collide on the same empty key."""
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return row[2] if row is not None else ""
+
+
+def _build_name_map(conn: sqlite3.Connection) -> dict[str, list[Candidate]]:
+    """Bucket every resolvable symbol by its leaf descriptor name. Cost is
+    linear in symbol count — measured 20 ms for 17,422 symbols — and is paid
+    once per index, not once per query."""
+    buckets: dict[str, list[Candidate]] = {}
+    for (symbol,) in conn.execute("SELECT symbol FROM global_symbols"):
+        parsed = parse_symbol(symbol)
+        if parsed is None or parsed.kind not in _RESOLVABLE_KINDS:
+            continue
+        buckets.setdefault(parsed.name, []).append(
+            Candidate(symbol=symbol, dotted_path=parsed.dotted_path, kind=parsed.kind)
+        )
+    return buckets
+
+
+def _name_map(conn: sqlite3.Connection) -> dict[str, list[Candidate]]:
+    path = _db_path(conn)
+    if not path:
+        return _build_name_map(conn)
+    cached = _name_maps.get(path)
+    if cached is None:
+        cached = _name_maps[path] = _build_name_map(conn)
+    return cached
+
+
+def _matches(name_map: dict[str, list[Candidate]], query: str) -> list[Candidate]:
+    """Candidates whose dotted path equals `query` or ends with '.' + query.
+
+    The leaf-name bucket is the fast path. It misses when the query's own
+    last segment contains a dot — a backtick-escaped name like
+    `greeter.ts`, which scip-typescript emits routinely — so fall back to a
+    full scan rather than wrongly reporting not-found.
+    """
+    suffix = "." + query
+
+    def hit(candidate: Candidate) -> bool:
+        return candidate.dotted_path == query or candidate.dotted_path.endswith(suffix)
+
+    bucketed = [c for c in name_map.get(query.rsplit(".", 1)[-1], ()) if hit(c)]
+    if bucketed:
+        return bucketed
+    return [c for candidates in name_map.values() for c in candidates if hit(c)]
+
+
+def _not_found_message(conn: sqlite3.Connection, query: str) -> str:
+    """Distinguish "no such name" from "that name is only ever a parameter".
+    Today both produce an identical empty result, which is the bug this
+    whole module exists to remove. Only runs on the failure path."""
+    suffix = "." + query
+    for (symbol,) in conn.execute("SELECT symbol FROM global_symbols"):
+        parsed = parse_symbol(symbol)
+        if parsed is None or parsed.kind in _RESOLVABLE_KINDS:
+            continue
+        if parsed.dotted_path == query or parsed.dotted_path.endswith(suffix):
+            return (
+                f"{query!r} matches only parameters or type parameters, which are "
+                "not resolution targets; pass the full SCIP symbol string to "
+                "navigate to one"
+            )
+    return f"no symbol named {query!r} in this index"
+
+
+def resolve(conn: sqlite3.Connection, query: str) -> str:
+    """Resolve `query` to exactly one SCIP symbol string.
+
+    Rung 1: verbatim passthrough — an already-full SCIP symbol returns
+    unchanged via one indexed lookup, which also makes resolve() idempotent.
+    Rung 2: dotted-suffix match on `'.'.join((package,) + parents + (name,))`.
+    """
+    row = conn.execute(
+        "SELECT symbol FROM global_symbols WHERE symbol = ?", (query,)
+    ).fetchone()
+    if row is not None:
+        return row[0]
+
+    matches = _matches(_name_map(conn), query)
+    if len(matches) == 1:
+        return matches[0].symbol
+    if not matches:
+        raise SymbolNotFoundError(_not_found_message(conn, query))
+    ordered = sorted(matches, key=lambda c: c.dotted_path)
+    raise AmbiguousSymbolError(query, tuple(ordered[:CANDIDATE_LIMIT]), len(ordered))
