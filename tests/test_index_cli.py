@@ -5,6 +5,7 @@ CLI binaries (marked `@pytest.mark.integration` — skipped if unavailable).
 
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -316,6 +317,28 @@ def test_java_indexer_env_appends_to_existing_gradle_opts(monkeypatch):
     value = _java_indexer_env()["GRADLE_OPTS"]
     assert "-Xmx4g" in value
     assert "-Dorg.gradle.parallel=false" in value
+
+
+def test_java_indexer_env_prepends_shim_dir_when_bash_shim_exists(tmp_path: Path, monkeypatch):
+    """The shim must come FIRST — the whole point is beating /bin/bash 3.2."""
+    from codeintel.index_cli import _java_indexer_env
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    (shims / "bash").write_text("#!/bin/sh\n")
+
+    assert _java_indexer_env()["PATH"] == f"{shims}{os.pathsep}/usr/bin:/bin"
+
+
+def test_java_indexer_env_omits_path_when_no_shim(tmp_path: Path, monkeypatch):
+    """No shim on Linux or a modern-bash mac: the branch must stay inert."""
+    from codeintel.index_cli import _java_indexer_env
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+
+    assert "PATH" not in _java_indexer_env()
 
 
 def test_run_merges_env_over_os_environ(tmp_path: Path, monkeypatch):

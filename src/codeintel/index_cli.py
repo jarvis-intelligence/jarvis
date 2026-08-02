@@ -189,9 +189,24 @@ def _java_indexer_env() -> dict[str, str]:
     single-threaded execution avoids it.
 
     Appended to any existing GRADLE_OPTS rather than replacing it, so a user's
-    heap settings survive. Reported upstream."""
+    heap settings survive. Reported upstream.
+
+    PATH gets the shim dir prepended when it holds a bash: scip-java's
+    generated javac wrapper is `#!/usr/bin/env bash` (so bash comes from PATH)
+    with `set -u` and an unguarded `"${LAUNCHER_ARGS[@]}"`, which is an error on
+    bash < 4.4. macOS ships 3.2, so every Maven build fails at
+    maven-compiler-plugin's version probe without this. Remove once the pinned
+    scip-java emits a bash-3.2-safe wrapper.
+
+    Only the shim dir, never a general bin dir: prepending e.g. Homebrew's bin
+    would also shadow java/mvn/git for the build.
+    """
     existing = os.environ.get("GRADLE_OPTS", "")
-    return {"GRADLE_OPTS": f"{existing} -Dorg.gradle.parallel=false".strip()}
+    env = {"GRADLE_OPTS": f"{existing} -Dorg.gradle.parallel=false".strip()}
+    shims = config.shim_dir()
+    if (shims / "bash").exists():
+        env["PATH"] = f"{shims}{os.pathsep}{os.environ.get('PATH', '')}"
+    return env
 
 
 def _git_tracked_files(repo_path: Path) -> list[str]:
