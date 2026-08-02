@@ -118,6 +118,9 @@ def _search_only_reason(output: str) -> str | None:
 # for Android/AGP, which is permanently unindexable; a trap for this, which one
 # `brew install bash` fixes. Failing loudly with the remedy keeps the repo
 # `failed` and recoverable by a plain reindex.
+#
+# Upstream: https://github.com/scip-code/scip-java/issues/987 -- remove this
+# workaround once scip-java emits a bash-3.2-safe wrapper.
 _BASH_SHIM_TOKENS = ("LAUNCHER_ARGS[@]", "unbound variable")
 
 _BASH_SHIM_REMEDY = (
@@ -213,7 +216,7 @@ def _java_indexer_env() -> dict[str, str]:
 
     PATH gets the shim dir prepended when it holds a bash: scip-java's
     generated javac wrapper is `#!/usr/bin/env bash` (so bash comes from PATH)
-    with `set -u` and an unguarded `"${LAUNCHER_ARGS[@]}"`, which is an error on
+    with `set -eu` and an unguarded `"${LAUNCHER_ARGS[@]}"`, which is an error on
     bash < 4.4. macOS ships 3.2, so every Maven build fails at
     maven-compiler-plugin's version probe without this. Remove once the pinned
     scip-java emits a bash-3.2-safe wrapper.
@@ -634,7 +637,7 @@ def index_repo(
                      step=f"{indexer_cmd[0]} index",
                      env=_java_indexer_env() if language == "java" else None)
             except IndexingError as exc:
-                if _bash_shim_failure(str(exc)):
+                if language == "java" and _bash_shim_failure(str(exc)):
                     raise IndexingError(f"{_BASH_SHIM_REMEDY}\n\n{exc}") from exc
                 reason = _search_only_reason(str(exc))
                 if reason is None:

@@ -1405,7 +1405,7 @@ def test_bash_shim_failure_does_not_publish_search_only(tmp_path: Path, monkeypa
     from codeintel.index_cli import IndexingError, index_repo
 
     repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
+    shutil.copytree(JAVA_FIXTURE_REPO, repo_dir)
     _init_git_repo(repo_dir)
     data_root = tmp_path / "data"
 
@@ -1433,6 +1433,37 @@ def test_bash_shim_failure_does_not_publish_search_only(tmp_path: Path, monkeypa
         assert entry.search_only is False, "a fixable env problem must stay recoverable"
     finally:
         registry.close()
+
+
+def test_bash_shim_failure_is_gated_on_java_language(tmp_path: Path, monkeypatch):
+    """The bash-shim remedy is scip-java-specific: a non-Java indexer that
+    happened to emit the same two substrings by coincidence must not get the
+    scip-java remedy message wrapped around its error."""
+    from codeintel.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    original_message = (
+        "Fatal error compiling: Could not retrieve version from "
+        "/tmp/scip-java1/bin/javac. Exit code 1, Output: "
+        "/tmp/scip-java1/bin/javac: line 38: LAUNCHER_ARGS[@]: unbound variable"
+    )
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError(original_message)
+        return None
+
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", _fake_run)
+
+    with pytest.raises(IndexingError) as excinfo:
+        index_repo(repo_dir, root=data_root)
+
+    assert str(excinfo.value) == original_message, "must not get the scip-java-specific bash remedy"
 
 
 @pytest.mark.parametrize(

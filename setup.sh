@@ -361,24 +361,33 @@ bash_at_least_44() {
 	return 1
 }
 
-# scip-java's generated javac wrapper is `#!/usr/bin/env bash` with `set -u`
+# scip-java's generated javac wrapper is `#!/usr/bin/env bash` with `set -eu`
 # and an unguarded "${LAUNCHER_ARGS[@]}", so it needs bash >= 4.4 on PATH.
 # macOS ships only 3.2, which breaks every Maven-built Java repo. Linux ships
 # >= 4.4, so this is a no-op there.
 #
 # Never runs `brew`: installing a shell is the user's call, and setup.sh
 # otherwise only downloads pinned release binaries into its own bin dir.
+#
+# Always symlinks a known-good bash into the shim dir on darwin, even when
+# `command -v bash` here is already modern: this is setup.sh's OWN PATH at
+# install time, not necessarily the PATH the indexer subprocess inherits
+# later (a GUI-launched MCP server, launchd, a stripped-env shell). Baking
+# the resolved path into the shim dir removes that PATH-context dependency --
+# `_java_indexer_env()` only checks whether the shim file exists on disk.
 install_bash_shim() {
 	_os=$1
 	if [ "$_os" != "darwin" ]; then
-		record bash-shim "not needed"
+		record bash-shim "not needed (linux ships bash >= 4.4)"
 		return 0
 	fi
 
 	_default=$(command -v bash 2>/dev/null) || _default=""
 	if bash_at_least_44 "$_default"; then
-		log_info "bash-shim: default bash is >= 4.4"
-		record bash-shim "not needed"
+		mkdir -p "$(shim_dir)"
+		ln -sf "$_default" "$(shim_dir)/bash"
+		log_info "bash-shim: linked default bash (${_default})"
+		record bash-shim "ok"
 		return 0
 	fi
 
@@ -598,6 +607,7 @@ Options:
 
 Environment:
   CODEINTEL_BIN_DIR   Override the install directory
+  CODEINTEL_DATA_DIR  Override where the bash shim is created (default ~/.codeintel)
 EOF
 }
 

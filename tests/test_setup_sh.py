@@ -804,18 +804,25 @@ def test_install_bash_shim_is_a_noop_on_linux(tmp_path):
     assert not (tmp_path / "shims" / "bash").exists()
 
 
-def test_install_bash_shim_skips_when_default_bash_is_modern(tmp_path):
-    """A mac with a modern default bash needs no shim."""
+def test_install_bash_shim_links_default_bash_when_it_is_already_modern(tmp_path):
+    """A modern default bash must still be linked into the shim dir -- setup.sh's
+    own PATH at install time is not necessarily the PATH the indexer subprocess
+    will inherit later (a GUI-launched MCP server, launchd, a stripped-env shell),
+    so "already modern here, skip" leaves those contexts with no shim and the
+    original bug. Baking the resolved default into the shim dir removes the
+    PATH-context dependency entirely."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    _fake_bash(bindir, "bash", "GNU bash, version 5.3.15(1)-release")
+    modern = _fake_bash(bindir, "bash", "GNU bash, version 5.3.15(1)-release")
     result = run_func(
         'install_bash_shim darwin',
         env={"HOME": str(tmp_path), "CODEINTEL_DATA_DIR": str(tmp_path),
              "PATH": f"{bindir}:/usr/bin:/bin"},
     )
     assert result.returncode == 0
-    assert not (tmp_path / "shims" / "bash").exists()
+    link = tmp_path / "shims" / "bash"
+    assert link.is_symlink()
+    assert link.resolve() == Path(modern).resolve()
 
 
 def test_install_bash_shim_links_candidate_when_default_is_old(tmp_path):

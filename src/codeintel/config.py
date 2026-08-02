@@ -35,7 +35,7 @@ def shim_dir(root: Path | None = None) -> Path:
     old for an indexer to use.
 
     Currently just `bash`: scip-java's generated javac wrapper is
-    `#!/usr/bin/env bash` with `set -u` and an unguarded `"${LAUNCHER_ARGS[@]}"`,
+    `#!/usr/bin/env bash` with `set -eu` and an unguarded `"${LAUNCHER_ARGS[@]}"`,
     which errors on bash < 4.4 — the bash macOS ships. `setup.sh` writes the
     symlink here; `index_cli._java_indexer_env()` puts this directory first on
     PATH for the indexer subprocess.
