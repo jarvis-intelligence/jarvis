@@ -1379,6 +1379,62 @@ def test_search_only_publish_retires_a_previously_published_scip_index(tmp_path:
         graph_store.close()
 
 
+def test_bash_shim_failure_detected():
+    from codeintel.index_cli import _bash_shim_failure
+
+    assert _bash_shim_failure(
+        "Fatal error compiling: Could not retrieve version from "
+        "/tmp/scip-java1/bin/javac. Exit code 1, Output: "
+        "/tmp/scip-java1/bin/javac: line 38: LAUNCHER_ARGS[@]: unbound variable"
+    )
+
+
+def test_bash_shim_failure_ignores_other_output():
+    from codeintel.index_cli import _bash_shim_failure
+
+    assert not _bash_shim_failure("error: No SCIP shards found")
+
+
+def test_bash_shim_failure_does_not_publish_search_only(tmp_path: Path, monkeypatch):
+    """A fixable env problem must NOT persist search_only=1.
+
+    --search-only is store_true/default=None: settable, never clearable. If this
+    downgraded, a user who then installed bash would silently keep getting no
+    navigation, escapable only via `codeintel forget`.
+    """
+    from codeintel.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError(
+                "Fatal error compiling: Could not retrieve version from "
+                "/tmp/scip-java1/bin/javac. Exit code 1, Output: "
+                "/tmp/scip-java1/bin/javac: line 38: LAUNCHER_ARGS[@]: unbound variable"
+            )
+        return None
+
+    monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("codeintel.index_cli._run", _fake_run)
+    monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    with pytest.raises(IndexingError, match="bash"):
+        index_repo(repo_dir, root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get("repo")
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.search_only is False, "a fixable env problem must stay recoverable"
+    finally:
+        registry.close()
+
+
 @pytest.mark.parametrize(
     "output",
     [

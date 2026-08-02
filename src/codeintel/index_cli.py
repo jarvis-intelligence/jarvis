@@ -112,6 +112,26 @@ def _search_only_reason(output: str) -> str | None:
     return None
 
 
+# Not a _SEARCH_ONLY_SIGNATURES entry on purpose: that path persists
+# search_only=1, and --search-only is store_true/default=None -- settable but
+# never clearable, so the only escape is `codeintel forget` + reindex. Correct
+# for Android/AGP, which is permanently unindexable; a trap for this, which one
+# `brew install bash` fixes. Failing loudly with the remedy keeps the repo
+# `failed` and recoverable by a plain reindex.
+_BASH_SHIM_TOKENS = ("LAUNCHER_ARGS[@]", "unbound variable")
+
+_BASH_SHIM_REMEDY = (
+    "scip-java's generated javac wrapper requires bash >= 4.4, but this machine's "
+    "default bash is older (macOS ships 3.2). Install a newer bash "
+    "(`brew install bash`), re-run setup.sh to create the shim, then reindex."
+)
+
+
+def _bash_shim_failure(output: str) -> bool:
+    """True when the indexer died on bash < 4.4 expanding an empty array."""
+    return all(token in output for token in _BASH_SHIM_TOKENS)
+
+
 class UnsupportedLanguageError(Exception):
     """Raised when no supported source extension is found under a repo."""
 
@@ -614,6 +634,8 @@ def index_repo(
                      step=f"{indexer_cmd[0]} index",
                      env=_java_indexer_env() if language == "java" else None)
             except IndexingError as exc:
+                if _bash_shim_failure(str(exc)):
+                    raise IndexingError(f"{_BASH_SHIM_REMEDY}\n\n{exc}") from exc
                 reason = _search_only_reason(str(exc))
                 if reason is None:
                     raise
