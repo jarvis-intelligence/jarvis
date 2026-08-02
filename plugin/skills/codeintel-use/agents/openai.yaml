@@ -1,0 +1,4 @@
+interface:
+  display_name: "codeintel Navigation"
+  short_description: "Prefer codeintel MCP tools over grep for structural queries"
+  default_prompt: "Use $codeintel-use to answer structural code questions via SCIP navigation (definition, references, call hierarchy) and search."

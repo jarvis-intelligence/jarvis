@@ -35,7 +35,15 @@ semantic search work; navigation does not). See CLAUDE.md for the detail.
 
 ## 3. Register the MCP server
 
-If you installed the Claude Code plugin, the server is already registered — skip this step.
+If you installed the Codex **or** Claude Code plugin, the bundled `plugin/.mcp.json` auto-registers the `codeintel` MCP server — skip this step. (Both clients consume the same stdio `.mcp.json`.)
+
+For a manual registration without the plugin:
+
+Codex CLI:
+
+```bash
+codex mcp add codeintel -- codeintel-server
+```
 
 Claude Code:
 
