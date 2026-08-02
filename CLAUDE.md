@@ -151,3 +151,15 @@ against fixtures in `tests/fixtures/`.
 - Env vars are prefixed `CODEINTEL_` (`CODEINTEL_DATA_DIR`, `CODEINTEL_EMBEDDING_MODEL`,
   `CODEINTEL_EMBEDDING_BATCH_SIZE`, `CODEINTEL_EMBEDDING_QUERY_PREFIX`,
   `CODEINTEL_EMBEDDING_DOC_PREFIX`, `CODEINTEL_ZOEKT_BIN`).
+
+## Cutting a release
+
+Use the `.claude/skills/codeintel-release` skill (project-scoped, maintainer-only — distinct from
+`plugin/skills/`, which ships to end users installing codeintel). It captures the full pipeline
+verified end-to-end while cutting v0.3.1: bump the version consistently across `pyproject.toml`,
+`server.json` (two fields), `plugin/.claude-plugin/plugin.json`, and `uv.lock`; add a `CHANGELOG.md`
+entry; open and merge a `chore/release-X.Y.Z` PR; tag and publish a GitHub Release; confirm
+`publish-pypi.yml`/`publish-mcp-registry.yml` both succeed. `scripts/check_versions.py` (run in CI
+by `test.yml`) enforces the same 4-file consistency, plus a 5th file the skill doesn't hand-bump:
+`plugin/.mcp.json`'s `--from` floor, a `>=` compatibility minimum checked against the release
+version, not synced to it.
