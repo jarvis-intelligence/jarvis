@@ -9,7 +9,7 @@
 # The import package, both CLIs, and the MCP server are all still `codeintel`
 # — only the name you install differs.
 name = "codeintel-navigation-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
 readme = "README.md"
 license = "MIT"

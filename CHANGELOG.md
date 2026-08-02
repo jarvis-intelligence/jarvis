@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.1] - 2026-08-02
+
+### Fixed
+
+- Maven-built Java repos failed to index on macOS. scip-java's generated `javac` wrapper
+  (`#!/usr/bin/env bash`, `set -eu`) expands `"${LAUNCHER_ARGS[@]}"` unguarded, which errors
+  on bash < 4.4 — the only bash macOS ships (3.2.57) — so every Maven build died at
+  `default-compile` with `LAUNCHER_ARGS[@]: unbound variable`. `setup.sh` now creates
+  `~/.codeintel/shims/bash`, symlinked to a working bash >= 4.4 whenever one is findable,
+  and `_java_indexer_env()` prepends that one directory to `PATH` for the indexer subprocess.
+  If no bash >= 4.4 is available, indexing now fails with an actionable error naming the fix
+  (`brew install bash`) instead of silently degrading to `--search-only`, which cannot be
+  un-set short of `codeintel forget` and a full reindex. Filed upstream:
+  [scip-code/scip-java#987](https://github.com/scip-code/scip-java/issues/987).
+
 ## [0.3.0] - 2026-08-01
 
 Minor rather than patch: Java/Kotlin repos are indexable for the first time,
