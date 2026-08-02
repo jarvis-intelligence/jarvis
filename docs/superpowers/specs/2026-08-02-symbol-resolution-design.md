@@ -55,56 +55,69 @@ has ever returned. This design fixes that as a by-product, since the parser prod
 
 ## Measured feasibility
 
-All figures below come from the live `codeintel` index (`index-bdd789b3…db`, 2180 symbols) using a
-**heuristic** parser — the last identifier in the descriptor string. A conforming grammar parser
-will shift them, most likely upward, because the heuristic mishandles backtick-escaped names
-containing punctuation. **Re-measure during implementation and update this section.**
+Figures below were produced by the **conforming grammar parser** (the one this spec specifies),
+run against four live indexes spanning three languages. Parameters and type-parameters are
+excluded throughout, per the rule below.
 
-Bucketing symbols by their leaf descriptor name:
+**Grammar coverage: 46,914 symbols, 0 unparsed.** Every symbol in all four indexes parsed cleanly.
 
-| corpus | distinct names | resolve to exactly 1 | ambiguous |
-| --- | --- | --- | --- |
-| all symbols | 1187 | 1046 (88%) | 141 (11%) |
-| excluding parameters / type-parameters | 1055 | **990 (93%)** | 65 (6%) |
+| repo | language | symbols | distinct names | bare name | + parent qualifier | + package |
+| --- | --- | --- | --- | --- | --- | --- |
+| `codeintel` | Python | 2,180 | 1,056 | 93% | 99% | **100%** |
+| `polaris-ui` | TypeScript | 9,920 | 5,472 | 78% | 87% | **99%** |
+| `epost-ios-theme-showcase` | Swift | 17,422 | 15,907 | 91% | 91% | **100%** |
+| `post-shell-app` | Swift | 17,392 | 15,883 | 91% | 91% | **100%** |
 
-The collisions are dominated by things nobody navigates to:
+Three things this shows, none of which a single-repo measurement would have:
 
-| all symbols | count | | excluding parameters | count |
-| --- | --- | --- | --- | --- |
-| `tmp_path` | 205 | | `__init__` | 92 |
-| `__init__` | 92 | | `symbol` | 6 |
-| `self` | 79 | | `name` | 5 |
-| `monkeypatch` | 71 | | `repo` | 5 |
-| `repo` | 35 | | `_boom` | 5 |
-| `symbol` | 30 | | `__all__` | 4 |
+**1. Bare-name resolution alone is not enough — 78% at worst, not 93%.**
 
-`tmp_path`, `self`, `monkeypatch` are pytest fixtures and parameters. Excluding parameters and
-type-parameters removes the entire long tail and leaves `__init__` — one per class, expected — as
-the only heavy collision.
+**2. The parent qualifier is worthless in some repos** (Swift: 91% → 91%). The colliding symbols
+have byte-identical descriptors and differ *only* in the package field:
 
-Adding a single parent qualifier resolves nearly all of the remainder:
+```
+scip-swift xcodebuild epost_comp_showcase_sdk . `c:@CM@UIKit@@objc(cs)UIView(im)centerXAnchor`.
+scip-swift xcodebuild ios_theme_ui            . `c:@CM@UIKit@@objc(cs)UIView(im)centerXAnchor`.
+```
 
-| rung | resolves |
-| --- | --- |
-| bare leaf name (`search_zoekt`) | 990 / 1055 (93%) |
-| + one parent qualifier (`SemanticStore.__init__`) | 63 of the remaining 65 (96%) |
-| **combined** | **1053 / 1055 (99.8%)** |
-| irreducible | 2 — `tokenizer`, `__call__` |
+No amount of parent qualification can separate those. TypeScript has the same shape — `index.d.ts`
+appears 8 times, once per npm package (`@types/react`, `@types/js-yaml`, …). This is why the
+package is part of the dotted path.
 
-Ambiguity is therefore an edge case, not the main path. This design should not be built around it.
+**3. With the package folded in, resolution is 99–100% everywhere.** The only residue is 76 names
+in `polaris-ui` (0.8%), which fall through to the candidate list.
 
-### Not a Python artifact, and fast enough
+In this repo the collisions excluded by the parameter rule were `tmp_path` (205), `self` (79),
+`monkeypatch` (71) — pytest fixtures and parameters, none of them navigation targets. The heaviest
+remaining collision is `__init__` (92), one per class, resolved by a parent qualifier.
 
-Largest indexed repo, `epost-ios-theme-showcase` (Swift, 17,422 symbols):
+### Bare-name resolution does not help Swift
+
+**100% of scip-swift symbol names are clang USR strings** — 17,422 of 17,422 in
+`epost-ios-theme-showcase`, with zero readable names:
+
+```
+c:@CM@UIKit@@objc(cs)UIView(im)centerXAnchor
+```
+
+Nobody types that, so the feature has no practical value in a Swift repo even though resolution
+succeeds at 100% there. TypeScript is the opposite — 100% readable (`cacheLife`, `revalidate`,
+`stale`), and Python likewise.
+
+This bounds the feature rather than breaking it: Python, TypeScript, Java and Kotlin get the
+benefit; Swift does not. Recovering readable names from USRs is viable but is scip-swift-specific
+parsing and belongs in its own spec — recorded under *Unresolved questions*.
+
+### Fast enough for query time
+
+Largest indexed repo, `epost-ios-theme-showcase` (17,422 symbols):
 
 | step | cost |
 | --- | --- |
 | `SELECT symbol FROM global_symbols` | 5.3 ms |
 | parse + bucket all rows | 14.6 ms |
-| distinct names / unique | 14,266 / 12,468 (**87%**) |
 
-87% on Swift against 88% on Python — the collision profile is a property of code, not of language.
-And 20 ms for a full cold build settles the index-time-vs-query-time question: query-time
+20 ms for a full cold build settles the index-time-vs-query-time question: query-time
 resolution needs no schema change and no pipeline stage. Precomputing a lookup table would mean
 extending the vendored `scip expt-convert` schema — a permanent maintenance seam — for no
 measurable gain.
@@ -121,9 +134,14 @@ lands in exactly one file.
 ```python
 @dataclass(frozen=True)
 class ParsedSymbol:
+    package: str              # SCIP package field -- outermost path segment
     name: str                 # leaf descriptor name
     kind: DescriptorKind      # StrEnum
     parents: tuple[str, ...]  # enclosing descriptor names, outermost first
+
+    @property
+    def dotted_path(self) -> str:
+        return ".".join((self.package,) + self.parents + (self.name,))
 
 def parse_symbol(symbol: str) -> ParsedSymbol | None
 def resolve(conn: sqlite3.Connection, query: str) -> str
@@ -161,19 +179,31 @@ One indexed lookup via `idx_global_symbols_symbol`. Full SCIP strings keep worki
 behaviour change, and no grammar sniffing is needed to decide which form the caller used.
 
 **Rung 2 — dotted-suffix match.** Build each symbol's dotted path as
-`'.'.join(parents + (name,))`, then match when `full == query` or `full.endswith('.' + query)`.
+`'.'.join((package,) + parents + (name,))`, then match when `full == query` or
+`full.endswith('.' + query)`.
 
-That one rule covers both query forms:
+That one rule covers every query form. For
+`codeintel-navigation-mcp.codeintel.search.search_zoekt`:
 
-| query | matches `codeintel.search.search_zoekt` via |
+| query | matches via |
 | --- | --- |
 | `search_zoekt` | `.endswith('.search_zoekt')` |
 | `SemanticStore.__init__` | `.endswith('.SemanticStore.__init__')` |
-| `codeintel.search.search_zoekt` | exact |
+| `ios_theme_ui.UIView.centerXAnchor` | `.endswith('.ios_theme_ui.UIView.centerXAnchor')` |
+| full dotted path | exact |
+
+The package is the outermost segment, so it is available as a qualifier precisely when parent
+qualification cannot help — the Swift and TypeScript cases above — without changing the rule.
 
 Requiring the `.` boundary prevents partial-identifier matches: `zoekt` does not match
 `search_zoekt`. It also handles backtick-escaped names containing dots — `` `codeintel.search` ``
 is one parent, not two — which a naive `query.split('.')` comparison against `parents` gets wrong.
+
+**Leaf-bucket fast path with a full-scan fallback.** The name map is keyed by leaf descriptor name,
+so the common query is one dict lookup. That key is wrong when the query's own last segment
+contains a dot — `` `greeter.ts` `` is a single descriptor name that scip-typescript emits
+routinely, and `rsplit('.')` would key it as `ts`. On a bucket miss, scan all candidates against
+the same suffix rule. Correct in every case, fast in the common one.
 
 No fuzzy or case-insensitive fallback. Discovery-by-approximation is what `searchCode` is for;
 adding it here would reintroduce wrong-answer risk into the one layer whose entire value is
@@ -257,6 +287,16 @@ Redefining `"symbol"` to carry the resolved value would be cleaner, but the plug
 existing agent prompts read that field. Additive delivers the canonical form to the caller without
 breaking a published contract.
 
+**How `server.py` learns the resolved value.** The nav methods return `(locations, freshness)` and
+`server.py` holds no connection, so it cannot see what resolution produced. `QueryService` gains a
+public `resolve_symbol(repo, symbol) -> str`; each tool calls it first and passes the result down.
+
+The nav methods still resolve internally, so direct `QueryService` callers (tests, CLI, future
+code) keep the behaviour without going through `server.py`. Double resolution is safe by
+construction: rung 1 is verbatim passthrough, so resolving an already-resolved symbol is one
+indexed lookup returning the same string. Idempotent, and cheaper than threading a new return
+value through four signatures and their existing tests.
+
 ### `documentSymbols` backfill
 
 `get_document_symbols` populates `displayName` and `kind` from the parser instead of from the
@@ -282,7 +322,7 @@ index pipeline, the DB schema.
 | --- | --- |
 | `tests/test_symbols.py` *(new, mirrors `symbols.py`)* | Parser units, zero fixtures: every descriptor kind, backtick-escaped names with embedded dots, doubled-backtick escape, `local <id>` → `None`, malformed → `None`. Resolution ladder against an in-memory `global_symbols`. |
 | `tests/test_query.py` | Resolution wired into all four nav methods; both exceptions propagate. |
-| `tests/test_server.py` | `candidates` / `candidateTotal` payload; `resolvedSymbol` present only when it differs. |
+| `tests/test_server_tools.py` | `candidates` / `candidateTotal` payload; `resolvedSymbol` present only when it differs. |
 | `tests/test_index_cli.py` | `@pytest.mark.integration` — resolve against a real built index. |
 
 Fixtures must include at least one non-Python symbol set. The parser is language-agnostic and the
@@ -297,23 +337,35 @@ The calls that fail today:
    returns only for the full SCIP string.
 2. The same call still works when passed the full SCIP string (rung 1).
 3. `findReferences(repo="codeintel", symbol="__init__")` returns `candidates`, not `[]`.
-4. `findReferences(repo="codeintel", symbol="base_url")` returns a not-found error naming the
+4. `findReferences(repo="codeintel", symbol="tmp_path")` returns a not-found error naming the
    parameter-exclusion rule, not `[]`.
+
+   Use `tmp_path` (a pytest fixture, parameter-only — verified), **not** `base_url`: that is a real
+   method on `ZoektLifecycle` (`search.py:121`) and correctly resolves to it. A parameter-exclusion
+   test needs a name that is only ever a parameter. `monkeypatch`, `self`, `timeout_seconds` and
+   `include_prefixes` also qualify.
 5. `documentSymbols` returns non-null `displayName` / `kind`.
 6. A symbol resolvable at package version `0.3.1` stays resolvable at `0.4.0` with no caller change.
 
 ## Risks
 
-- **Heuristic-derived figures.** Every percentage in *Measured feasibility* came from the
-  last-identifier heuristic, not a grammar parser. Re-measure and update.
 - **Constructor names dominate ambiguity in every language.** `__init__`, `init`, `<init>`,
   `constructor`. The error message must lead with the qualifier hint.
+- **Verbose `dottedPath`.** Including the package makes candidate paths long
+  (`codeintel-navigation-mcp.codeintel.search.search_zoekt`). Accepted: it is the disambiguator,
+  and it is the only thing that separates the Swift and TypeScript collisions.
 - **Cost is linear in symbol count** — 20 ms at 17K symbols, so roughly 600 ms at 500K, paid once
   per index. Acceptable; worth a comment in the cache code so it is not mistaken for per-query
   cost.
 
 ## Unresolved questions
 
-None blocking. Two deferred by choice: a standalone `lookupSymbol` tool (YAGNI while candidates
-ride the error path) and cross-repo resolution (blocked on the hardcoded `PROJECT="_"` /
-`BRANCH="_"` index layout, a separate change).
+None blocking. Three deferred by choice:
+
+1. **Readable names for Swift.** scip-swift emits clang USRs for 100% of symbol names, so bare-name
+   resolution has no practical value in a Swift repo. Extracting the trailing readable identifier
+   (`c:@CM@UIKit@@objc(cs)UIView(im)centerXAnchor` → `centerXAnchor`) would fix it, but that is
+   scip-swift-specific parsing and belongs in its own spec.
+2. **A standalone `lookupSymbol` tool** — YAGNI while candidates ride the error path.
+3. **Cross-repo resolution** — blocked on the hardcoded `PROJECT="_"` / `BRANCH="_"` index layout,
+   a separate and larger change.
