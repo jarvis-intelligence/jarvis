@@ -50,6 +50,7 @@ from codeintel.scip_decoder import (
     kind_name,
     scip_range_to_positions,
 )
+from codeintel import symbols
 
 __all__ = [
     "IndexNotFoundError",
@@ -176,9 +177,36 @@ def _symbol_display_and_kind(conn: sqlite3.Connection, symbol: str) -> tuple[str
     return row[0], row[1]
 
 
+def _display_and_kind(
+    symbol: str, display_name: str | None, kind: int | None
+) -> tuple[str | None, str | None]:
+    """Resolve a symbol's display name and kind, preferring the DB columns.
+
+    `scip expt-convert` declares `global_symbols.display_name` and `.kind`
+    but never populates either (measured: 0 of 2180 rows on a real index),
+    so both are always NULL today and every documentSymbols response
+    carried nulls. Falling back to the symbol string fixes that.
+
+    The fallback kind is derived from *descriptor syntax* ('#' -> TYPE,
+    '().' -> METHOD), not from the indexer's semantic classification, which
+    is what the integer `kind` column was meant to carry. It is therefore
+    not a SCIP `SymbolKind` value. Same self-healing property as
+    `relationship_data_present`: a converter that starts populating the real
+    columns immediately takes precedence, with no code change here.
+    """
+    column_kind = kind_name(kind)
+    if display_name is not None and column_kind is not None:
+        return display_name, column_kind
+    parsed = symbols.parse_symbol(symbol)
+    if parsed is None:
+        return display_name, column_kind
+    return display_name or parsed.name, column_kind or str(parsed.kind)
+
+
 def _symbol_info(conn: sqlite3.Connection, symbol: str) -> SymbolInfo:
     display_name, kind = _symbol_display_and_kind(conn, symbol)
-    return SymbolInfo(symbol=symbol, displayName=display_name, kind=kind_name(kind))
+    display_name, kind_label = _display_and_kind(symbol, display_name, kind)
+    return SymbolInfo(symbol=symbol, displayName=display_name, kind=kind_label)
 
 
 def _document_path(conn: sqlite3.Connection, document_id: int) -> str | None:
@@ -334,8 +362,21 @@ class QueryService:
     def __init__(self, connection_cache: IndexConnectionCache) -> None:
         self._cache = connection_cache
 
+    def _resolved(self, conn: sqlite3.Connection, symbol: str) -> str:
+        """Accept either a bare name or a full SCIP symbol. Explicit at each
+        call site rather than a decorator: this codebase is consistently
+        explicit, and hiding resolution would make misfires hard to trace."""
+        return symbols.resolve(conn, symbol)
+
+    def resolve_symbol(self, repo: str, symbol: str) -> str:
+        """Public resolution for callers that need the canonical symbol
+        string itself — `server.py` reports it as `resolvedSymbol`."""
+        conn, _ = get_connection(self._cache, repo)
+        return self._resolved(conn, symbol)
+
     def get_definitions(self, repo: str, symbol: str) -> tuple[list[Location], FreshnessSnapshot]:
         conn, metadata = get_connection(self._cache, repo)
+        symbol = self._resolved(conn, symbol)
         locations = [
             _occurrence_to_location(path, occ)
             for path, occ in _occurrences_for_symbol(conn, symbol, role_bit=SymbolRoles.DEFINITION)
@@ -346,6 +387,7 @@ class QueryService:
     def find_references(self, repo: str, symbol: str) -> tuple[list[Location], FreshnessSnapshot]:
         """ALL occurrences of `symbol`, definition sites included — no role filter."""
         conn, metadata = get_connection(self._cache, repo)
+        symbol = self._resolved(conn, symbol)
         locations = [
             _occurrence_to_location(path, occ) for path, occ in _occurrences_for_symbol(conn, symbol, role_bit=None)
         ]
@@ -368,10 +410,11 @@ class QueryService:
 
         entries: dict[str, DocumentSymbolEntry] = {}
         for symbol, display_name, kind, start_line, start_char, end_line, end_char in outline_rows:
+            entry_name, entry_kind = _display_and_kind(symbol, display_name, kind)
             entries[symbol] = DocumentSymbolEntry(
                 symbol=symbol,
-                displayName=display_name,
-                kind=kind_name(kind),
+                displayName=entry_name,
+                kind=entry_kind,
                 range=Range(
                     start=Position(line=start_line, character=start_char),
                     end=Position(line=end_line, character=end_char),
@@ -388,11 +431,12 @@ class QueryService:
                 if occ.symbol.startswith("local ") or occ.symbol in entries or not occ.is_definition():
                     continue
                 display_name, kind = _symbol_display_and_kind(conn, occ.symbol)
+                entry_name, entry_kind = _display_and_kind(occ.symbol, display_name, kind)
                 start_line, start_char, end_line, end_char = scip_range_to_positions(occ.range)
                 entries[occ.symbol] = DocumentSymbolEntry(
                     symbol=occ.symbol,
-                    displayName=display_name,
-                    kind=kind_name(kind),
+                    displayName=entry_name,
+                    kind=entry_kind,
                     range=Range(
                         start=Position(line=start_line, character=start_char),
                         end=Position(line=end_line, character=end_char),
@@ -406,6 +450,7 @@ class QueryService:
         self, repo: str, symbol: str
     ) -> tuple[list[CallHierarchyEntry], list[CallHierarchyEntry], FreshnessSnapshot]:
         conn, metadata = get_connection(self._cache, repo)
+        symbol = self._resolved(conn, symbol)
         incoming = _call_hierarchy_incoming(conn, symbol)
         outgoing = _call_hierarchy_outgoing(conn, symbol)
         return incoming, outgoing, _freshness_snapshot(metadata)
@@ -423,6 +468,7 @@ class QueryService:
         available = relationship_data_present(conn)
         if not available:
             return [], [], _freshness_snapshot(metadata), False
+        symbol = self._resolved(conn, symbol)
         supertypes = _type_hierarchy_supertypes(conn, symbol)
         subtypes = _type_hierarchy_subtypes(conn, symbol)
         return supertypes, subtypes, _freshness_snapshot(metadata), True

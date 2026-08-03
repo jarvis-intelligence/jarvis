@@ -19,6 +19,7 @@ from codeintel.index_reader import IndexNotFoundError
 from codeintel.query import FreshnessSnapshot, QueryService
 from codeintel.registry import SEARCH_ONLY_STATUS
 from codeintel.search import ZoektLifecycle, search_zoekt
+from codeintel.symbols import AmbiguousSymbolError
 
 mcp = FastMCP("codeintel")
 _query_service: QueryService | None = None
@@ -92,7 +93,28 @@ def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
                 "for example an Android/Gradle project."
             )
         }
+    if isinstance(exc, AmbiguousSymbolError):
+        hint = exc.candidates[0].dotted_path if exc.candidates else exc.query
+        return {
+            "error": (
+                f"{exc.query!r} is ambiguous in {repo} ({exc.total} matches). "
+                f"Retry with a qualifier, e.g. {hint!r}."
+            ),
+            # A structured list, not prose inside `error`, so the caller can
+            # act on it without parsing English.
+            "candidates": [
+                {"symbol": c.symbol, "dottedPath": c.dotted_path, "kind": str(c.kind)}
+                for c in exc.candidates
+            ],
+            "candidateTotal": exc.total,
+        }
     return {"error": str(exc)}
+
+
+def _resolved_fields(symbol: str, resolved: str) -> dict[str, Any]:
+    """`resolvedSymbol` appears only when resolution changed the input, so
+    callers passing full SCIP symbols see an unchanged response shape."""
+    return {} if resolved == symbol else {"resolvedSymbol": resolved}
 
 
 @mcp.tool(name="documentSymbols")
@@ -108,36 +130,56 @@ def document_symbols(repo: str, path: str) -> dict[str, Any]:
 
 @mcp.tool(name="goToDefinition")
 def go_to_definition(repo: str, symbol: str) -> dict[str, Any]:
-    """Resolve `symbol`'s definition location(s) within `repo`."""
+    """Resolve `symbol`'s definition location(s) within `repo`. `symbol` may
+    be a bare name (`Greeter`), a qualified name (`Greeter.greet`), or a full
+    SCIP symbol string."""
     try:
-        locations, freshness = _service().get_definitions(repo, symbol)
-    except Exception as exc:
-        # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
-        return _error_payload(repo, exc)
-    return {"symbol": symbol, "definitions": [_json_safe(asdict(loc)) for loc in locations], **_freshness_fields(freshness)}
-
-
-@mcp.tool(name="findReferences")
-def find_references(repo: str, symbol: str) -> dict[str, Any]:
-    """Every occurrence of `symbol` within `repo`, definition sites included."""
-    try:
-        locations, freshness = _service().find_references(repo, symbol)
-    except Exception as exc:
-        # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
-        return _error_payload(repo, exc)
-    return {"symbol": symbol, "references": [_json_safe(asdict(loc)) for loc in locations], **_freshness_fields(freshness)}
-
-
-@mcp.tool(name="callHierarchy")
-def call_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
-    """Single-level incoming/outgoing call hierarchy for `symbol` within `repo`."""
-    try:
-        incoming, outgoing, freshness = _service().call_hierarchy(repo, symbol)
+        resolved = _service().resolve_symbol(repo, symbol)
+        locations, freshness = _service().get_definitions(repo, resolved)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return _error_payload(repo, exc)
     return {
         "symbol": symbol,
+        **_resolved_fields(symbol, resolved),
+        "definitions": [_json_safe(asdict(loc)) for loc in locations],
+        **_freshness_fields(freshness),
+    }
+
+
+@mcp.tool(name="findReferences")
+def find_references(repo: str, symbol: str) -> dict[str, Any]:
+    """Every occurrence of `symbol` within `repo`, definition sites included.
+    `symbol` may be a bare name (`Greeter`), a qualified name
+    (`Greeter.greet`), or a full SCIP symbol string."""
+    try:
+        resolved = _service().resolve_symbol(repo, symbol)
+        locations, freshness = _service().find_references(repo, resolved)
+    except Exception as exc:
+        # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
+        return _error_payload(repo, exc)
+    return {
+        "symbol": symbol,
+        **_resolved_fields(symbol, resolved),
+        "references": [_json_safe(asdict(loc)) for loc in locations],
+        **_freshness_fields(freshness),
+    }
+
+
+@mcp.tool(name="callHierarchy")
+def call_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
+    """Single-level incoming/outgoing call hierarchy for `symbol` within
+    `repo`. `symbol` may be a bare name (`Greeter`), a qualified name
+    (`Greeter.greet`), or a full SCIP symbol string."""
+    try:
+        resolved = _service().resolve_symbol(repo, symbol)
+        incoming, outgoing, freshness = _service().call_hierarchy(repo, resolved)
+    except Exception as exc:
+        # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
+        return _error_payload(repo, exc)
+    return {
+        "symbol": symbol,
+        **_resolved_fields(symbol, resolved),
         "incomingCalls": [_json_safe(asdict(e)) for e in incoming],
         "outgoingCalls": [_json_safe(asdict(e)) for e in outgoing],
         **_freshness_fields(freshness),
@@ -146,13 +188,18 @@ def call_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
 
 @mcp.tool(name="typeHierarchy")
 def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
-    """Single-level super/subtypes for `symbol` within `repo`.
+    """Single-level super/subtypes for `symbol` within `repo`. `symbol` may
+    be a bare name (`Greeter`), a qualified name (`Greeter.greet`), or a full
+    SCIP symbol string.
 
     Returns an explicit error when the index carries no relationship data —
     `scip expt-convert` does not populate `global_symbols.relationships`, so
     an empty result would wrongly imply the symbol has no supertypes."""
     try:
+        resolved = symbol
         supertypes, subtypes, freshness, available = _service().type_hierarchy(repo, symbol)
+        if available:
+            resolved = _service().resolve_symbol(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return _error_payload(repo, exc)
@@ -170,6 +217,7 @@ def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
         }
     return {
         "symbol": symbol,
+        **_resolved_fields(symbol, resolved),
         "supertypes": [_json_safe(asdict(e)) for e in supertypes],
         "subtypes": [_json_safe(asdict(e)) for e in subtypes],
         **_freshness_fields(freshness),

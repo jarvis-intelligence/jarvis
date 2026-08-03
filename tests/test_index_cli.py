@@ -1596,3 +1596,38 @@ def test_index_repo_end_to_end_for_java_repo(tmp_path: Path):
 
     assert symbols > 0, "no symbols — the indexer produced nothing navigable"
     assert chunks > 0 and mentions > 0, "symbols without occurrence ranges"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_bare_name_resolution_against_a_real_index(tmp_path: Path):
+    """End-to-end: a bare name resolves through a genuinely converted SCIP
+    index, not a hand-built fixture. Guards against grammar assumptions that
+    hold for synthetic symbols but not for real indexer output."""
+    from codeintel.query import QueryService
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+
+    data_root = tmp_path / "data"
+    slug = index_repo(repo_dir, root=data_root)
+
+    cache = config.new_connection_cache(data_root)
+    service = QueryService(cache)
+
+    conn, _ = config.get_connection(cache, slug)
+    path = conn.execute("SELECT relative_path FROM documents LIMIT 1").fetchone()[0]
+
+    entries, _ = service.get_document_symbols(slug, path)
+    assert entries, "fixture repo produced no document symbols"
+    target = entries[0]
+
+    parsed_name = target.displayName
+    assert parsed_name, "displayName should be populated from the parser"
+
+    resolved = service.resolve_symbol(slug, parsed_name)
+    assert resolved == target.symbol
+
+    # Idempotence: rung 1 returns a full symbol unchanged.
+    assert service.resolve_symbol(slug, resolved) == resolved

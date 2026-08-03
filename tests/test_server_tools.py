@@ -14,7 +14,8 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from codeintel import config, query, server
 from codeintel.graph import GraphStore
 from codeintel.search import ZoektLifecycle
-from tests.fixtures.synthetic_index import DOC_GREETER, build_published_index
+from codeintel.symbols import AmbiguousSymbolError, Candidate, DescriptorKind
+from tests.fixtures.synthetic_index import CLASS_SYMBOL, DOC_GREETER, METHOD_SYMBOL, build_published_index
 
 REPO = "toy-repo"
 
@@ -82,12 +83,48 @@ async def test_unexpected_exception_still_returns_structured_error_payload(monke
     def _boom(*args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(server.QueryService, "get_definitions", _boom)
+    # goToDefinition resolves the symbol before calling get_definitions, so
+    # the raising call must be resolve_symbol to exercise the same
+    # generic-exception path this test targets.
+    monkeypatch.setattr(server.QueryService, "resolve_symbol", _boom)
     async with create_connected_server_and_client_session(server.mcp) as client:
         result = await client.call_tool("goToDefinition", {"repo": REPO, "symbol": "x"})
         assert result.isError is not True
         payload = json.loads(result.content[0].text)
         assert payload == {"error": "boom"}
+
+
+@pytest.mark.anyio
+async def test_ambiguous_symbol_error_reaches_client_as_candidates_payload(monkeypatch):
+    """Full-stack check that `AmbiguousSymbolError` -- raised during symbol
+    resolution -- reaches a real MCP tool call as a structured
+    `{"candidates": ..., "candidateTotal": ...}` payload. `resolve()` and
+    `_error_payload()` are each covered directly elsewhere in this file /
+    test_symbols.py, but neither exercises the actual tool-invocation path,
+    which is what a caller of goToDefinition experiences."""
+    candidates = (
+        Candidate(symbol="sym-a", dotted_path="a.C.dup", kind=DescriptorKind.METHOD),
+        Candidate(symbol="sym-b", dotted_path="b.D.dup", kind=DescriptorKind.METHOD),
+    )
+
+    def _ambiguous(*args, **kwargs):
+        raise AmbiguousSymbolError("dup", candidates, 2)
+
+    # goToDefinition resolves the symbol via resolve_symbol before calling
+    # get_definitions -- see server.py's go_to_definition -- so that is the
+    # call site to raise from to exercise the real wiring end to end.
+    monkeypatch.setattr(server.QueryService, "resolve_symbol", _ambiguous)
+    async with create_connected_server_and_client_session(server.mcp) as client:
+        result = await client.call_tool("goToDefinition", {"repo": REPO, "symbol": "dup"})
+        assert result.isError is not True
+        payload = json.loads(result.content[0].text)
+
+    assert payload["candidateTotal"] == 2
+    assert payload["candidates"] == [
+        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD"},
+        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD"},
+    ]
+    assert "definitions" not in payload
 
 
 _FAKE_ZOEKT_SEARCH_SCRIPT = """\
@@ -226,7 +263,7 @@ async def test_type_hierarchy_returns_results_when_relationships_present():
     swallowing genuine results.
     """
     async with create_connected_server_and_client_session(server.mcp) as client:
-        result = await client.call_tool("typeHierarchy", {"repo": REPO, "symbol": "x"})
+        result = await client.call_tool("typeHierarchy", {"repo": REPO, "symbol": "Greeter"})
         payload = json.loads(result.content[0].text)
 
     assert "error" not in payload, payload
@@ -300,3 +337,43 @@ def test_get_index_status_reports_none_status_when_never_registered():
     result = server.get_index_status(repo="never-registered-anywhere")
     assert result["status"] is None
     assert result["indexed"] is False
+
+
+def test_error_payload_renders_ambiguous_candidates(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    candidates = (
+        Candidate(symbol="sym-a", dotted_path="a.C.dup", kind=DescriptorKind.METHOD),
+        Candidate(symbol="sym-b", dotted_path="b.D.dup", kind=DescriptorKind.METHOD),
+    )
+    payload = server._error_payload(REPO, AmbiguousSymbolError("dup", candidates, 7))
+    assert payload["candidateTotal"] == 7
+    assert payload["candidates"] == [
+        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD"},
+        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD"},
+    ]
+    assert "ambiguous" in payload["error"]
+    assert "a.C.dup" in payload["error"]  # leads with the qualifier hint
+
+
+def test_go_to_definition_reports_resolved_symbol_for_a_bare_name():
+    result = server.go_to_definition(REPO, "Greeter")
+    assert result["symbol"] == "Greeter"
+    assert result["resolvedSymbol"] == CLASS_SYMBOL
+    assert result["definitions"]
+
+
+def test_go_to_definition_omits_resolved_symbol_when_input_was_already_full():
+    result = server.go_to_definition(REPO, CLASS_SYMBOL)
+    assert "resolvedSymbol" not in result
+    assert result["definitions"]
+
+
+def test_find_references_reports_resolved_symbol_for_a_bare_name():
+    result = server.find_references(REPO, "greet")
+    assert result["resolvedSymbol"] == METHOD_SYMBOL
+
+
+def test_unknown_symbol_returns_error_not_empty_references():
+    result = server.find_references(REPO, "NoSuchSymbol")
+    assert "no symbol named" in result["error"]
+    assert "references" not in result

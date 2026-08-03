@@ -282,8 +282,11 @@ as of v0.9.0, `scip-java`, `scip-kotlinc`), not codeintel bugs:
   supertypes"; the error says "cannot tell" instead. Reported upstream:
   [scip-code/scip#464](https://github.com/scip-code/scip/issues/464), fixed by
   [scip-code/scip#465](https://github.com/scip-code/scip/pull/465) (open, CI green).
-- **`displayName` / `kind` are often `null`** for symbols the converter only
-  ever sees as bare occurrences (no defining `SymbolInformation` was indexed).
+- **`displayName` / `kind` are backfilled from the symbol string.** The converter never populates
+  `global_symbols.display_name`/`.kind`, so `query.py`'s `_display_and_kind` parses both from the
+  SCIP symbol string whenever the database columns are empty (which they still normally are) —
+  `documentSymbols` returns real values in practice; only a genuinely unparseable symbol falls
+  through to `null`.
 - **`searchCode`'s `repo` filter matches Zoekt's own repository name**, which
   `codeintel index` now names after the slug via `zoekt-index -meta` — so this
   no longer diverges for repos indexed with current code. Shards published by
