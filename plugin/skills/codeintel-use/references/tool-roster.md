@@ -5,23 +5,23 @@ The 9 MCP tools registered by `codeintel-server`. All take `repo` (the slug from
 ## Tool detail
 
 ### documentSymbols(repo, path) → dict
-Every top-level symbol defined in `path` within `repo`, each with its range. **The returned `symbol` field is the exact string to pass to the other nav tools** — always read it from here first rather than guessing.
+Every top-level symbol defined in `path` within `repo`, each with its range. `symbol` is the full SCIP string; `displayName`/`kind` are readable. Useful for browsing a file or picking a qualifier when a nav tool reports an ambiguous name — not a mandatory first step.
 Returns: `{"path": ..., "symbols": [{...}], "freshness": {...}}`.
 
 ### goToDefinition(repo, symbol) → dict
-Resolve `symbol`'s definition location(s) within `repo`. `symbol` must be the **fully-qualified SCIP string** (e.g. `` scip-python python codeintel 0.1.0 `codeintel.index_cli`/index_repo() ``); a bare name returns empty. Get the string from `documentSymbols`.
-Returns: `{"symbol": ..., "definitions": [{...}], "freshness": {...}}`.
+Resolve `symbol`'s definition location(s) within `repo`. `symbol` accepts a bare name (`Greeter`), a qualified name (`Greeter.greet`, or `package-name.Greeter.greet` when a bare name collides across packages/modules), or the full SCIP symbol string. Resolution tries an exact match, then a dotted-suffix match; an ambiguous name returns an error payload with `candidates`/`candidateTotal` instead of a silent empty result. When resolution changed the input, the response includes `resolvedSymbol` (the canonical form); omitted when the caller already passed the exact full symbol.
+Returns: `{"symbol": ..., "resolvedSymbol"?: ..., "definitions": [{...}], "freshness": {...}}`.
 
 ### findReferences(repo, symbol) → dict
-Every occurrence of `symbol` within `repo`, definition sites included. Same fully-qualified-`symbol` requirement as `goToDefinition`.
-Returns: `{"symbol": ..., "references": [{...}], "freshness": {...}}`.
+Every occurrence of `symbol` within `repo`, definition sites included. Same `symbol`-resolution behavior as `goToDefinition`.
+Returns: `{"symbol": ..., "resolvedSymbol"?: ..., "references": [{...}], "freshness": {...}}`.
 
 ### callHierarchy(repo, symbol) → dict
-Single-level incoming + outgoing call hierarchy for `symbol`. Same fully-qualified-`symbol` requirement.
-Returns: `{"symbol": ..., "incomingCalls": [...], "outgoingCalls": [...], "freshness": {...}}`.
+Single-level incoming + outgoing call hierarchy for `symbol`. Same `symbol`-resolution behavior as `goToDefinition`.
+Returns: `{"symbol": ..., "resolvedSymbol"?: ..., "incomingCalls": [...], "outgoingCalls": [...], "freshness": {...}}`.
 
 ### typeHierarchy(repo, symbol) → dict
-Single-level super/subtypes for `symbol`. Same fully-qualified-`symbol` requirement. **Returns an `error` on real indexes** — upstream `scip expt-convert` never populates `relationships`. Treat the error as "unavailable", not as "no supertypes".
+Single-level super/subtypes for `symbol`. Same `symbol`-resolution behavior as `goToDefinition`. **Returns an `error` on real indexes** — upstream `scip expt-convert` never populates `relationships`. Treat the error as "unavailable", not as "no supertypes".
 
 ### getIndexStatus(repo, repo_path=None) → dict
 Whether `repo` has a published index, plus freshness. Pass `repo_path` (the repo's local git dir) to compare the published commit against `git rev-parse HEAD`.

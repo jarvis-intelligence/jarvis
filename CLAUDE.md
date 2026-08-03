@@ -42,7 +42,13 @@ Three engines sit behind the MCP server, each backed by its own storage:
 - **Query** (`query.py` + `index_reader.py` + `scip_decoder.py`) — SCIP nav ops via raw SQL
   against the `scip expt-convert` SQLite schema (`documents`/`chunks`/`global_symbols`/`mentions`).
   `scip_decoder.py` is the *only* module importing `scip_pb2`/`zstandard` — an isolation seam so
-  future SCIP proto version bumps localize to one file.
+  future SCIP proto version bumps localize to one file. `symbols.py` is the same kind of isolation
+  seam for the SCIP *symbol string* grammar: it owns parsing (`parse_symbol()`) and bare-name
+  resolution (`resolve()`, a two-rung ladder of exact match then dotted-suffix match) end to end, so
+  `goToDefinition`/`findReferences`/`callHierarchy`/`typeHierarchy` accept a bare or qualified name
+  instead of requiring the full, version-pinned SCIP string. Caveat: scip-swift emits clang USR
+  strings (e.g. `c:@CM@UIKit@@objc(cs)UIView(im)centerXAnchor`) as its symbol names, so bare-name
+  resolution has no practical value in Swift repos — it works for Python/TypeScript/Java/Kotlin.
 - **Search** (`search.py`) — `searchCode` via a real `httpx` client to `zoekt-webserver`.
   `ZoektLifecycle` lazily spawns the webserver on first call (pidfile-tracked, killed at exit);
   never spawn it elsewhere.

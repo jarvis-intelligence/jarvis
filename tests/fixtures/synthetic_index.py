@@ -248,14 +248,16 @@ def build_synthetic_index_db(db_path: Path) -> None:
     b.add_symbol(ANIMAL_SYMBOL, "Animal", scip_pb2.SymbolInformation.Interface)
     # Greeter implements Animal — the only non-NULL relationships blob in
     # this fixture (real v0.7.0 output never populates this column; see
-    # module docstring).
+    # module docstring). `kind` is left NULL, matching the real acme-app
+    # index (see scip_decoder.kind_name's docstring) and exercising
+    # query.py's parser-based fallback for documentSymbols.
     b.add_symbol(
         CLASS_SYMBOL,
         "Greeter",
-        scip_pb2.SymbolInformation.Class,
+        None,
         relationships=[scip_pb2.Relationship(symbol=ANIMAL_SYMBOL, is_implementation=True)],
     )
-    b.add_symbol(METHOD_SYMBOL, "greet", scip_pb2.SymbolInformation.Method)
+    b.add_symbol(METHOD_SYMBOL, "greet", None)
     b.add_symbol(SAY_HI_METHOD_SYMBOL, "sayHi", scip_pb2.SymbolInformation.Method)
     b.add_symbol(CONST_SYMBOL, "DEFAULT_NAME", None)
 
