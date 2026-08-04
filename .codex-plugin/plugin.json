@@ -1,6 +1,6 @@
 {
   "name": "codeintel",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Local-first SCIP code navigation and Zoekt search over your own indexed repositories, with skills that teach the agent to prefer structural queries over grep.",
   "author": {
     "name": "phuongddx",

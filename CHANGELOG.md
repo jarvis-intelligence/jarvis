@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.2] - 2026-08-04
+
+### Added
+
+- Bare-name symbol resolution for the SCIP navigation tools. `goToDefinition`,
+  `findReferences`, `callHierarchy`, and `typeHierarchy` now accept a bare symbol
+  name (e.g. `build_mcp_server`) in addition to the existing dotted SCIP
+  identifier, resolving it against the index automatically. Callers no longer need
+  to construct the full SCIP symbol string (`scheme manager package version descriptors`)
+  before querying. Backed by
+  the new `codeintel.symbols` module (`src/codeintel/symbols.py`).
+
+### Changed
+
+- `codeintel-use` skill and its `references/tool-roster.md` updated to document
+  bare-name inputs and the resolved-symbol return shape.
+
 ## [0.3.1] - 2026-08-02
 
 ### Fixed
