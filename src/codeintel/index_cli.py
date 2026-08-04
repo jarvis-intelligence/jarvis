@@ -740,7 +740,6 @@ def index_repo(
     repo_path = repo_path.resolve()
     slug = config.repo_slug(slug or repo_path.name)
     sha = _git_head(repo_path)
-    check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
     try:
@@ -748,6 +747,11 @@ def index_repo(
     except Exception:
         registry.close()
         raise
+    # After the duplicate-slug gate, not before: rejecting a request for a
+    # repo path already registered under another slug shouldn't depend on
+    # `scip` being installed at all -- there's no point checking a tool
+    # version for a call that's about to be refused anyway.
+    check_scip_version()
     # Resolved before language detection (not after, alongside scheme/
     # semantic_include) because the except branch below reads it: a
     # `codeintel reindex`/`watch` of a persisted search-only repo never
