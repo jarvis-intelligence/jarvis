@@ -1,0 +1,4 @@
+interface:
+  display_name: "jarvis Setup"
+  short_description: "Install and configure jarvis for Codex"
+  default_prompt: "Use $jarvis-setup to install jarvis, register the MCP server, and index a repo for the first time."

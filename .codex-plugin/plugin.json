@@ -1,0 +1,42 @@
+{
+  "name": "jarvis",
+  "version": "0.0.1",
+  "description": "Local-first SCIP code navigation and Zoekt search over your own indexed repositories, with skills that teach the agent to prefer structural queries over grep.",
+  "author": {
+    "name": "phuongddx",
+    "email": "95doanphuong@gmail.com",
+    "url": "https://github.com/phuongddx"
+  },
+  "homepage": "https://github.com/phuongddx/jarvis-dist",
+  "repository": "https://github.com/phuongddx/jarvis-dist",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "code-intelligence",
+    "code-search",
+    "code-navigation",
+    "scip",
+    "zoekt"
+  ],
+  "skills": "./plugin/skills/",
+  "interface": {
+    "displayName": "jarvis",
+    "shortDescription": "Local-first SCIP code navigation & Zoekt search",
+    "longDescription": "Indexes your own git repositories with SCIP indexers and Zoekt, then answers structural questions — go-to-definition, find-references, call/type hierarchy, document symbols, lexical and semantic search, and cross-repo blast radius — through nine MCP tools. Skills steer the agent toward structural queries over grep and handle setup, everyday use, and bug reporting.",
+    "developerName": "phuongddx",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "Find all callers of a function in this repo.",
+      "Where is this symbol defined?",
+      "Index this repo for code navigation."
+    ],
+    "websiteURL": "https://github.com/phuongddx/jarvis-dist",
+    "privacyPolicyURL": "https://github.com/phuongddx/jarvis-dist/blob/main/plugin/README.md#privacy",
+    "termsOfServiceURL": "https://github.com/phuongddx/jarvis-dist/blob/main/plugin/LICENSE",
+    "brandColor": "#3B82F6",
+    "composerIcon": "./plugin/assets/jarvis-small.svg",
+    "logo": "./plugin/assets/app-icon.png",
+    "screenshots": []
+  }
+}

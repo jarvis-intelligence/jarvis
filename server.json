@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.phuongddx/jarvis",
+  "description": "Local-first SCIP code navigation and Zoekt search over your own indexed repositories",
+  "repository": {
+    "url": "https://github.com/phuongddx/jarvis",
+    "source": "github"
+  },
+  "version": "0.0.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "jarvis-mcp",
+      "version": "0.0.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

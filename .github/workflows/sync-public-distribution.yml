@@ -1,0 +1,67 @@
+# Publishes jarvis's public distribution surface into phuongddx/jarvis-dist.
+#
+# Why this exists: this repo is private, so raw.githubusercontent.com and the
+# plugin marketplace both 404 for anyone without access -- which is every real
+# user. jarvis-dist is public and holds only what a user needs to install and
+# report bugs: the installer script, the Claude Code plugin definition, and
+# (via build-zoekt.yml) the prebuilt zoekt binaries.
+#
+# Deliberately NOT synced: src/ (already on PyPI), tests/, docs/, plans/,
+# .github/, CHANGELOG.md, pyproject.toml, git history, branches.
+#
+# Release-triggered because plugin/.claude-plugin/plugin.json carries the
+# version: syncing on release keeps the published plugin matched to the
+# published PyPI package. A change landing on main without a release does not
+# reach jarvis-dist until the next release, which is intended.
+name: sync-public-distribution
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out this repo
+        uses: actions/checkout@v4
+
+      - name: Clone jarvis-dist
+        env:
+          # Fine-grained PAT, Contents:write on phuongddx/jarvis-dist only. The
+          # default GITHUB_TOKEN cannot write to another repo.
+          GH_TOKEN: ${{ secrets.JARVIS_DIST_TOKEN }}
+        run: |
+          set -eu
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/phuongddx/jarvis-dist.git" "${RUNNER_TEMP}/jarvis"
+
+      - name: Copy the distribution surface over jarvis-dist's contents
+        run: |
+          set -eu
+          dest="${RUNNER_TEMP}/jarvis"
+          # rsync --delete so a file removed here is removed there, but never
+          # touch .git or jarvis-dist's own README (which describes jarvis-dist
+          # itself and has no counterpart in this repo).
+          rsync -a --delete --exclude '.git/' setup.sh "${dest}/setup.sh"
+          rsync -a --delete --exclude '.git/' .claude-plugin/ "${dest}/.claude-plugin/"
+          rsync -a --delete --exclude '.git/' plugin/ "${dest}/plugin/"
+          ls -la "$dest"
+
+      - name: Commit and push only if something changed
+        env:
+          GH_TOKEN: ${{ secrets.JARVIS_DIST_TOKEN }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          cd "${RUNNER_TEMP}/jarvis"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          # An empty commit on a no-op release is noise, not a record.
+          if git diff --cached --quiet; then
+            echo "jarvis-dist already up to date; nothing to push"
+            exit 0
+          fi
+          git commit -m "chore: sync distribution surface from jarvis@${SOURCE_SHA}"
+          git push

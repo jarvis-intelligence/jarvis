@@ -1,0 +1,17 @@
+{
+  "name": "jarvis",
+  "metadata": {
+    "description": "Local-first code intelligence for Claude Code — SCIP navigation and Zoekt search over your own repositories."
+  },
+  "owner": {
+    "name": "phuongddx",
+    "email": "95doanphuong@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "jarvis",
+      "source": "./plugin",
+      "description": "SCIP navigation and Zoekt search MCP server, plus skills for setup, everyday structural queries, and bug reporting."
+    }
+  ]
+}

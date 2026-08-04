@@ -1,0 +1,96 @@
+[project]
+# The plain `jarvis` name on PyPI is taken by an unrelated package, so the
+# distribution is published as `jarvis-mcp`. This MUST stay in sync with the
+# project name on the PyPI trusted publisher: if the two disagree, uploads
+# fail with "Non-user identities cannot create new projects" rather than
+# anything that names the real problem.
+#
+# The import package, both CLIs, and the MCP server are all `jarvis` — only
+# the name you install differs.
+#
+# (Before 0.5.0 this project was called codeintel and shipped as
+# `codeintel-navigation-mcp`, whose plain name was likewise taken — by the
+# abandoned Komodo Edit CodeIntel package. That distribution is still
+# installable at 0.4.0 and receives no further releases.)
+name = "jarvis-mcp"
+version = "0.0.1"
+description = "Local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "phuongddx", email = "95doanphuong@gmail.com" }
+]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "code-intelligence",
+    "code-search",
+    "scip",
+    "zoekt",
+    "claude-code",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
+requires-python = ">=3.12"
+dependencies = [
+    # Capped below 2.0: mcp 2.0.0 removed `mcp.server.fastmcp`, which
+    # server.py imports, so an uncapped range lets a fresh install resolve a
+    # version the server cannot start on. uv.lock hid this during development
+    # by pinning 1.x — only installing from PyPI surfaced it.
+    "mcp[cli]>=1.2.0,<2.0.0",
+    # Runtime must stay >= the gencode version vendored in scip_pb2.py
+    # (generated against libprotoc 35.1 — see that file's header). Gencode
+    # calls ValidateProtobufRuntimeVersion and refuses an older runtime.
+    "protobuf>=7.35.1,<8.0.0",
+    "zstandard>=0.23.0,<1.0.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+watch = ["watchdog>=4.0"]
+semantic = [
+    "lancedb>=0.20",
+    "sentence-transformers>=3.0",
+    "tree-sitter>=0.25",
+    "tree-sitter-language-pack>=0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/phuongddx/jarvis-dist"
+Repository = "https://github.com/phuongddx/jarvis-dist"
+Issues = "https://github.com/phuongddx/jarvis-dist/issues"
+Changelog = "https://pypi.org/project/jarvis-mcp/#history"
+
+[project.scripts]
+jarvis = "jarvis.index_cli:main"
+jarvis-server = "jarvis.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# The distribution is `jarvis-mcp`, which would otherwise make the backend
+# look for `src/jarvis_mcp/`. The import package is and stays `jarvis`.
+module-name = "jarvis"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: exercises real external binaries (scip-python, scip, zoekt-index)"]

@@ -1,0 +1,4 @@
+interface:
+  display_name: "jarvis Navigation"
+  short_description: "Prefer jarvis MCP tools over grep for structural queries"
+  default_prompt: "Use $jarvis-use to answer structural code questions via SCIP navigation (definition, references, call hierarchy) and search."

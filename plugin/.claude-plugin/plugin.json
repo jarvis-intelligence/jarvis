@@ -1,0 +1,20 @@
+{
+  "name": "jarvis",
+  "description": "Local-first SCIP code navigation and Zoekt search over your own indexed repositories, with skills that teach Claude to prefer structural queries over grep.",
+  "version": "0.0.1",
+  "author": {
+    "name": "phuongddx",
+    "email": "95doanphuong@gmail.com"
+  },
+  "homepage": "https://github.com/phuongddx/jarvis-dist",
+  "repository": "https://github.com/phuongddx/jarvis-dist",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "code-intelligence",
+    "code-search",
+    "code-navigation",
+    "scip",
+    "zoekt"
+  ]
+}

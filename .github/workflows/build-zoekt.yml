@@ -1,0 +1,114 @@
+# Cross-compiles zoekt for the platforms setup.sh supports and publishes the
+# binaries to phuongddx/jarvis-dist — a separate PUBLIC repo, not this one.
+#
+# Why this exists: upstream sourcegraph/zoekt publishes no releases and no tags,
+# so there is no prebuilt zoekt-git-index/zoekt-webserver to download on any
+# platform. setup.sh downloads from our own releases instead.
+#
+# Why jarvis-dist and not here: this repo is private, and GitHub serves release
+# assets only to viewers of the owning repo — an unauthenticated `curl` against
+# a private repo's release 404s, which is exactly what every user's setup.sh run
+# would hit. jarvis-dist is public and holds nothing but published artifacts.
+#
+# Runs only when the pinned commit changes, or on manual dispatch — never on a
+# schedule, so upstream breakage can't land unannounced.
+name: build-zoekt
+
+on:
+  push:
+    branches: [main]
+    paths: ["ZOEKT_COMMIT", ".github/workflows/build-zoekt.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Read pinned commit
+        id: pin
+        run: |
+          commit=$(tr -d '[:space:]' < ZOEKT_COMMIT)
+          if [ -z "$commit" ]; then
+            echo "ZOEKT_COMMIT is empty" >&2
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile all platforms
+        env:
+          ZOEKT_COMMIT: ${{ steps.pin.outputs.commit }}
+        run: |
+          set -eux
+          mkdir -p dist work
+          cd work
+          go mod init zoekt-build
+          # Resolve the pinned commit to a module version and fetch it.
+          GOFLAGS=-mod=mod go get "github.com/sourcegraph/zoekt@${ZOEKT_COMMIT}"
+          # zoekt-git-index pulls deps zoekt-index does not (automaxprocs,
+          # cloud.google.com/go/profiler). Without this the build fails with
+          # "missing go.sum entry".
+          GOFLAGS=-mod=mod go get "github.com/sourcegraph/zoekt/cmd/zoekt-git-index@${ZOEKT_COMMIT}"
+
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os=${target%/*}
+            arch=${target#*/}
+            stage="../dist/stage-${os}-${arch}"
+            mkdir -p "$stage"
+            for cmd in zoekt-git-index zoekt-webserver; do
+              GOFLAGS=-mod=mod GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+                go build -trimpath -o "${stage}/${cmd}" \
+                "github.com/sourcegraph/zoekt/cmd/${cmd}"
+            done
+            tar -czf "../dist/zoekt-${os}-${arch}.tar.gz" -C "$stage" zoekt-git-index zoekt-webserver
+            rm -rf "$stage"
+          done
+
+      - name: Generate checksums
+        run: |
+          set -eu
+          cd dist
+          for f in *.tar.gz; do
+            # Match the "<digest>  <filename>" sidecar format setup.sh parses.
+            sha256sum "$f" > "${f}.sha256"
+          done
+          ls -la
+
+      - name: Smoke-test the native binary
+        run: |
+          set -eux
+          mkdir -p smoke
+          tar -xzf dist/zoekt-linux-amd64.tar.gz -C smoke
+          # zoekt-git-index has no -version flag and `-h` exits non-zero, so capture
+          # to a file and grep separately rather than piping -- a piped form
+          # would silently depend on pipefail being unset.
+          smoke/zoekt-git-index -h >index-help.txt 2>&1 || true
+          grep -q "zoekt-git-index" index-help.txt
+          smoke/zoekt-webserver -version
+
+      - name: Publish release
+        env:
+          # JARVIS_DIST_TOKEN, not GITHUB_TOKEN: the default token cannot
+          # write to a different repo. Fine-grained, Contents:write on
+          # phuongddx/jarvis-dist only.
+          GH_TOKEN: ${{ secrets.JARVIS_DIST_TOKEN }}
+          ZOEKT_COMMIT: ${{ steps.pin.outputs.commit }}
+        run: |
+          set -eu
+          tag="zoekt-${ZOEKT_COMMIT}"
+          if gh release view "$tag" --repo phuongddx/jarvis-dist >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.tar.gz dist/*.sha256 --clobber --repo phuongddx/jarvis-dist
+          else
+            gh release create "$tag" dist/*.tar.gz dist/*.sha256 \
+              --repo phuongddx/jarvis-dist \
+              --title "zoekt @ ${ZOEKT_COMMIT}" \
+              --notes "zoekt-git-index and zoekt-webserver cross-compiled from sourcegraph/zoekt@${ZOEKT_COMMIT}. Consumed by jarvis's setup.sh."
+          fi

@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local git worktrees (per-plan isolated workspaces)
+.worktrees/
+
+# Subagent-driven-development per-plan scratch workspace
+.superpowers/
+
+# Skill eval workspaces (benchmark output, not plugin content)
+evals/

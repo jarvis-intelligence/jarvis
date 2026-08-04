@@ -1,0 +1,78 @@
+# Runs setup.sh on real Linux and macOS runners.
+#
+# Why: setup.sh must work under whatever `sh` the host provides. On
+# ubuntu-latest that is dash, which rejects the bashisms macOS's bash-in-posix-
+# mode silently accepts -- so this job is the real guard for the POSIX
+# constraint, and the only Linux coverage available without a local container.
+name: setup-smoke
+
+on:
+  push:
+    branches: [main]
+    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml"]
+  pull_request:
+    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml"]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show which sh we are testing against
+        run: |
+          set -eu
+          ls -la /bin/sh || true
+          sh -c 'echo "sh works"'
+
+      - name: Reject bashisms explicitly
+        run: |
+          set -eu
+          # Fail loudly if setup.sh contains constructs dash cannot parse.
+          # `sh -n` is a parse-only check: no installer side effects.
+          sh -n setup.sh
+          echo "setup.sh parses under the system sh"
+
+      - name: Install scip and zoekt via setup.sh
+        run: |
+          set -eu
+          JARVIS_BIN_DIR="${RUNNER_TEMP}/ci-bin" sh setup.sh --only scip
+          JARVIS_BIN_DIR="${RUNNER_TEMP}/ci-bin" sh setup.sh --only zoekt
+          ls -la "${RUNNER_TEMP}/ci-bin"
+
+      - name: Verify the installed binaries run
+        run: |
+          set -eu
+          bin="${RUNNER_TEMP}/ci-bin"
+          "${bin}/scip" --version
+          "${bin}/zoekt-webserver" -version
+          # zoekt-git-index has no -version flag and `-h` exits non-zero.
+          "${bin}/zoekt-git-index" -h >help.txt 2>&1 || true
+          grep -q "zoekt-git-index" help.txt
+
+      - name: Re-run to prove idempotency
+        run: |
+          set -eu
+          JARVIS_BIN_DIR="${RUNNER_TEMP}/ci-bin" sh setup.sh --only scip 2>&1 | tee out.txt
+          grep -qi "already installed" out.txt
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Run the setup.sh unit tests
+        run: |
+          set -eu
+          # dash is the interpreter tests/test_setup_sh.py prefers; on Linux it
+          # is already present, on macOS the suite falls back with a clear
+          # failure if absent.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq dash
+          else
+            brew install dash
+          fi
+          uv sync
+          uv run pytest tests/test_setup_sh.py -v

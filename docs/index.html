@@ -1,0 +1,867 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jarvis · local-first code intelligence for coding agents</title>
+<meta name="description" content="Precomputed SCIP navigation, Zoekt lexical search, and semantic search, exposed to Claude Code or any MCP client. One local stdio process. No server, no auth, no network.">
+
+<style>
+/* ---------------------------------------------------------------
+   jarvis landing page
+   Single self-contained file: no build step, no framework, no JS,
+   no third-party requests. Diagrams are local SVGs in ./assets/.
+   Dual theme via prefers-color-scheme. One accent (teal), one
+   radius scale (--r surfaces, --r-sm inline code).
+   --------------------------------------------------------------- */
+
+:root {
+  --bg:        #fbfbfa;
+  --surface:   #ffffff;
+  --surface-2: #f4f4f2;
+  --text:      #1c1c1a;
+  --text-2:    #55554f;
+  --text-3:    #7d7d75;
+  --border:    #e4e4df;
+  --border-2:  #d2d2cb;
+  --accent:    #0f6f63;
+  --accent-tx: #ffffff;
+  --code-bg:   #f6f6f3;
+  --warn:      #8a4b1c;
+  /* diagram plate stays light in both themes: an SVG figure on paper */
+  --plate:     #ffffff;
+  --r:    10px;
+  --r-sm: 6px;
+  --maxw: 1120px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #131414;
+    --surface:   #1a1b1b;
+    --surface-2: #1f2020;
+    --text:      #ececea;
+    --text-2:    #a8a8a1;
+    --text-3:    #82827a;
+    --border:    #2b2c2c;
+    --border-2:  #3a3b3b;
+    --accent:    #58bda9;
+    --accent-tx: #0c1211;
+    --code-bg:   #1c1d1d;
+    --warn:      #d9a06a;
+    --plate:     #f4f4f1;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 17px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+code, pre, .mono {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+}
+
+a { color: inherit; }
+
+.wrap {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ---------- navigation: single line, 64px ---------- */
+
+.nav {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  z-index: 10;
+}
+@supports not (background: color-mix(in srgb, red 50%, blue)) {
+  .nav { background: var(--bg); }
+}
+
+.brand {
+  font-weight: 620;
+  letter-spacing: -0.015em;
+  text-decoration: none;
+  font-size: 1.02rem;
+  margin-right: auto;
+}
+
+.nav-links { display: flex; gap: 26px; align-items: center; }
+
+.nav-links a {
+  color: var(--text-2);
+  text-decoration: none;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  transition: color .16s ease;
+}
+.nav-links a:hover { color: var(--text); }
+
+@media (max-width: 860px) {
+  .nav { gap: 16px; }
+  .nav-links { gap: 18px; }
+  .nav-links a.opt { display: none; }
+}
+/* below this, only the two links that matter fit on one line */
+@media (max-width: 620px) {
+  .nav-links a.opt2 { display: none; }
+}
+
+/* ---------- shared section rhythm ---------- */
+
+section { padding: clamp(3.5rem, 8vw, 6.5rem) 0; }
+
+.sec-head { max-width: 62ch; margin-bottom: 2.75rem; }
+
+h1, h2, h3 { letter-spacing: -0.022em; line-height: 1.12; margin: 0; }
+
+h2 { font-size: clamp(1.65rem, 3.6vw, 2.3rem); font-weight: 600; }
+
+h3 { font-size: 1.06rem; font-weight: 600; letter-spacing: -0.01em; }
+
+.lede { color: var(--text-2); margin: 0.9rem 0 0; max-width: 62ch; }
+
+.rule { border: 0; border-top: 1px solid var(--border); margin: 0; }
+
+/* ---------- hero: asymmetric split ---------- */
+
+.hero { padding-top: clamp(2.5rem, 6vw, 4.5rem); }
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2.75rem;
+  align-items: center;
+}
+@media (min-width: 940px) {
+  .hero-grid { grid-template-columns: 1.12fr 1fr; gap: 3.5rem; }
+}
+
+.hero h1 {
+  /* capped so the headline holds to 2 lines in the split column at >=940px */
+  font-size: clamp(1.95rem, 4vw, 2.6rem);
+  font-weight: 640;
+}
+
+.hero .lede { font-size: 1.09rem; margin-top: 1.15rem; }
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 2rem;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  padding: 0 22px;
+  border-radius: var(--r);
+  font-size: 0.94rem;
+  font-weight: 550;
+  text-decoration: none;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  transition: transform .12s ease, background .16s ease, border-color .16s ease;
+}
+.btn:active { transform: translateY(1px); }
+
+.btn-primary { background: var(--accent); color: var(--accent-tx); }
+.btn-primary:hover { background: color-mix(in srgb, var(--accent) 88%, #000); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border-2);
+}
+.btn-ghost:hover { border-color: var(--text-3); }
+
+/* ---------- code blocks (real commands and real output) ---------- */
+
+.term {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 20px 22px;
+  overflow-x: auto;
+}
+
+.term pre {
+  margin: 0;
+  font-size: 0.845rem;
+  line-height: 1.75;
+  white-space: pre;
+}
+
+.term .c { color: var(--text-3); }        /* comment */
+.term .p { color: var(--accent); }        /* prompt glyph */
+.term .k { color: var(--text); font-weight: 550; }
+
+code.inline {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.08em 0.36em;
+  font-size: 0.88em;
+}
+
+/* ---------- guarantees: hairline stack, no cards ---------- */
+
+.guarantees { display: grid; gap: 0; margin-top: 0.5rem; }
+
+.g-item {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.5rem 2.5rem;
+  padding: 1.85rem 0;
+  border-top: 1px solid var(--border);
+}
+@media (min-width: 860px) {
+  .g-item { grid-template-columns: 15rem 1fr; }
+}
+.g-item:last-child { border-bottom: 1px solid var(--border); }
+
+.g-item h3 { padding-top: 0.1rem; }
+
+.g-item p { margin: 0; color: var(--text-2); max-width: 60ch; }
+
+/* ---------- figures: full-width diagram rows ---------- */
+
+.fig { margin: 0 0 3.25rem; }
+.fig:last-child { margin-bottom: 0; }
+
+.fig-plate {
+  background: var(--plate);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r);
+  padding: 14px;
+  overflow-x: auto;
+}
+
+.fig-plate img {
+  display: block;
+  width: 100%;
+  min-width: 680px;
+  height: auto;
+}
+
+.fig-open {
+  display: inline-block;
+  font-size: 0.85rem;
+  color: var(--text-2);
+  text-decoration: none;
+  margin-top: 0.6rem;
+  border-bottom: 1px solid var(--border-2);
+}
+.fig-open:hover { color: var(--text); border-bottom-color: var(--text-3); }
+
+.fig figcaption {
+  color: var(--text-2);
+  font-size: 0.945rem;
+  margin-top: 0.95rem;
+  max-width: 74ch;
+}
+
+.fig figcaption b { color: var(--text); font-weight: 600; }
+
+.fig-note {
+  font-size: 0.85rem;
+  color: var(--text-3);
+  margin-top: 1.1rem;
+}
+
+/* ---------- tools: grouped, hairline, no boxes ---------- */
+
+.tool-groups {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+@media (min-width: 800px) {
+  .tool-groups { grid-template-columns: 1fr 1fr; column-gap: 4rem; }
+}
+
+.tg { border-top: 1px solid var(--border); padding: 1.6rem 0 1.75rem; }
+
+.tg h3 { margin-bottom: 0.15rem; }
+
+.tg > p {
+  margin: 0.35rem 0 1.05rem;
+  color: var(--text-3);
+  font-size: 0.9rem;
+}
+
+.tg ul { list-style: none; margin: 0; padding: 0; }
+
+.tg li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.55rem;
+  padding: 0.34rem 0;
+  font-size: 0.925rem;
+}
+
+.tg li .n { font-size: 0.9rem; color: var(--text); }
+
+.tg li .d { color: var(--text-2); font-size: 0.88rem; }
+
+.flag {
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: var(--r-sm);
+  padding: 0.05em 0.4em;
+  white-space: nowrap;
+}
+@supports not (background: color-mix(in srgb, red 50%, blue)) {
+  .flag { border-color: var(--border-2); }
+}
+
+/* ---------- limits: side-by-side comparison ---------- */
+
+.cmp {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2rem;
+  margin-bottom: 3rem;
+}
+@media (min-width: 800px) {
+  .cmp { grid-template-columns: 1fr 1fr; gap: 3.5rem; }
+}
+
+.cmp-col h3 { margin-bottom: 0.75rem; }
+
+.cmp-col p { margin: 0 0 1rem; color: var(--text-2); font-size: 0.95rem; }
+
+.langs { display: flex; flex-wrap: wrap; gap: 7px; }
+
+.lang {
+  font-size: 0.83rem;
+  padding: 0.22em 0.6em;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+}
+
+.lang.on { color: var(--text); border-color: var(--text-3); }
+
+.hard { display: grid; gap: 0; }
+
+.hard div {
+  border-top: 1px solid var(--border);
+  padding: 1.05rem 0;
+  color: var(--text-2);
+  font-size: 0.95rem;
+  max-width: 78ch;
+}
+.hard div:last-child { border-bottom: 1px solid var(--border); }
+
+.hard b { color: var(--text); font-weight: 600; }
+
+/* ---------- install: vertical sequence ---------- */
+
+.step { border-top: 1px solid var(--border); padding: 2rem 0; }
+.step:last-of-type { border-bottom: 1px solid var(--border); }
+
+.step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.85rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.step-head h3 { margin: 0; }
+
+.step-head span { color: var(--text-3); font-size: 0.9rem; }
+
+.step > p { margin: 0.9rem 0 0; color: var(--text-2); font-size: 0.925rem; }
+
+.alt {
+  margin-top: 1.15rem;
+  padding-top: 1.15rem;
+  border-top: 1px dashed var(--border-2);
+}
+
+.alt p { margin: 0 0 0.8rem; color: var(--text-3); font-size: 0.9rem; }
+
+/* ---------- footer ---------- */
+
+footer {
+  border-top: 1px solid var(--border);
+  padding: 3rem 0 4rem;
+  color: var(--text-3);
+  font-size: 0.9rem;
+}
+
+.foot-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem 2.5rem;
+  align-items: baseline;
+}
+
+.foot-links { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-left: auto; }
+
+.foot-links a { color: var(--text-2); text-decoration: none; }
+.foot-links a:hover { color: var(--text); text-decoration: underline; }
+
+/* ---------- a11y ---------- */
+
+a:focus-visible, .btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+
+<nav class="nav">
+  <div class="wrap" style="display:flex;align-items:center;gap:28px;width:100%">
+    <a class="brand" href="#top">jarvis</a>
+    <div class="nav-links">
+      <a class="opt2" href="#how">How it works</a>
+      <a class="opt2" href="#tools">Tools</a>
+      <a class="opt" href="#limits">Limits</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/phuongddx/jarvis-dist">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<main id="top">
+
+  <!-- ================= HERO: asymmetric split ================= -->
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <h1>Code intelligence that stays on your machine.</h1>
+        <p class="lede">
+          Precomputed SCIP navigation and Zoekt search, exposed to your coding
+          agent as MCP tools. One local stdio process.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#install">Install</a>
+          <a class="btn btn-ghost" href="https://github.com/phuongddx/jarvis-dist">View source</a>
+        </div>
+      </div>
+
+      <div class="term">
+<pre><span class="c"># index a repo once</span>
+<span class="p">$</span> <span class="k">jarvis index</span> ~/src/api-gateway
+
+<span class="c"># then your agent calls a tool instead of grepping</span>
+<span class="p">$</span> <span class="k">getIndexStatus</span>(repo=<span class="p">"jarvis"</span>)
+
+{"repo": "jarvis",
+ "indexed": true,
+ "status": "indexed",
+ "commit": "c7667da",
+ "freshness": "stale"}</pre>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ================= GUARANTEES: hairline stack ================= -->
+  <section id="why">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>Why it is built this way</h2>
+        <p class="lede">
+          Three properties hold regardless of what the indexer is doing. They are
+          the reason a reindex cannot corrupt a query in flight.
+        </p>
+      </div>
+
+      <div class="guarantees">
+        <div class="g-item">
+          <h3>The runtime never writes</h3>
+          <p>
+            Queries open a published <code class="inline">index-&lt;sha&gt;.db</code>
+            read-only, with <code class="inline">mode=ro&amp;immutable=1</code>.
+            Index files are never mutated in place, so there is no lock
+            contention and no torn read.
+          </p>
+        </div>
+        <div class="g-item">
+          <h3>Publishing is atomic</h3>
+          <p>
+            A reindex writes a new versioned database, populates the package
+            graph, and runs <code class="inline">zoekt-index</code>. Only once all
+            of that succeeds does <code class="inline">os.replace</code> flip a
+            small pointer file. A query already reading the old file keeps
+            working, and a failure anywhere leaves the previous index live.
+          </p>
+        </div>
+        <div class="g-item">
+          <h3>The package graph is rebuilt, not accumulated</h3>
+          <p>
+            Each reindex clears that repo's own outgoing dependency edges before
+            recomputing them, so a dependency you removed stops showing up.
+            The graph reflects each repo's last index run rather than every run
+            it has ever had.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ================= HOW IT WORKS: full-width figures ================= -->
+  <section id="how">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>How it works</h2>
+        <p class="lede">
+          Three views of the same system: what runs at index time, what runs at
+          query time, and what the agent actually talks to.
+        </p>
+      </div>
+
+      <figure class="fig">
+        <div class="fig-plate">
+          <img src="assets/jarvis-core-components.svg"
+               alt="Index pipeline as a six-stage timeline: language indexer, scip expt-convert, populate graph, zoekt-index, optional semantic index, then atomic publish. Below it, embedding generation flows from tree-sitter chunking through hash dedup and bge-m3 embedding into a LanceDB table, alongside the four storage locations under the jarvis data directory.">
+        </div>
+        <figcaption>
+          <b>Core components and data flow.</b>
+          Language is detected by extension plurality across
+          <code class="inline">git ls-files</code>, not a filesystem walk, because
+          a walk also counts gitignored scratch directories that can outnumber a
+          repo's own code. The semantic stage is the one stage allowed to fail
+          without blocking the publish.
+        </figcaption>
+        <a class="fig-open" href="assets/jarvis-core-components.svg">Open the full-size diagram</a>
+      </figure>
+
+      <figure class="fig">
+        <div class="fig-plate">
+          <img src="assets/jarvis-query-engine.svg"
+               alt="Two independent query paths side by side beneath the agent, divided by a dashed line labelled no router, no fallback, no query classification. Left path: QueryService to index_reader to scip_decoder to the read-only index database. Right path: embed query, then LanceDB vector top-30 and Zoekt trigram top-30 in parallel, fused by reciprocal rank fusion at k equals 60, then truncated and limited.">
+        </div>
+        <figcaption>
+          <b>Two query paths, and no router between them.</b>
+          The structural path returns exact ranges. The hybrid path fuses vector
+          and lexical hits with reciprocal rank fusion. Nothing classifies your
+          query or silently falls back: the agent picks the tool, which means you
+          can predict which one ran.
+        </figcaption>
+        <a class="fig-open" href="assets/jarvis-query-engine.svg">Open the full-size diagram</a>
+      </figure>
+
+      <figure class="fig">
+        <div class="fig-plate">
+          <img src="assets/jarvis-agent-integration.svg"
+               alt="MCP client on the left connected to server.py by stdio JSON-RPC, with a dashed result arrow returning. On the right, nine MCP tools in a flat grid with typeHierarchy marked non-functional. Below, the response contract: uniform error payload, fixed result caps, and replacing grep and glob and read loops.">
+        </div>
+        <figcaption>
+          <b>Agent integration.</b>
+          Nine flat tools over stdio JSON-RPC. Every tool reports failure the
+          same way, as an <code class="inline">{"error": "..."}</code> payload
+          rather than a transport error, so a query bug never takes the server
+          down mid-session.
+        </figcaption>
+        <a class="fig-open" href="assets/jarvis-agent-integration.svg">Open the full-size diagram</a>
+        <p class="fig-note">
+          Diagram sources are the matching
+          <code class="inline">.excalidraw</code> files in
+          <code class="inline">docs/assets/</code>.
+        </p>
+      </figure>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ================= TOOLS: grouped hairlines ================= -->
+  <section id="tools">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>Nine MCP tools</h2>
+        <p class="lede">
+          Every navigation tool takes <code class="inline">repo</code>, the slug
+          from <code class="inline">jarvis index</code>, plus a
+          <code class="inline">symbol</code> or <code class="inline">path</code>.
+          Eight of the nine work today.
+        </p>
+      </div>
+
+      <div class="tool-groups">
+        <div class="tg">
+          <h3>Navigation</h3>
+          <p>Backed by SCIP. Exact ranges, not text matches.</p>
+          <ul>
+            <li><span class="n mono">goToDefinition</span>
+                <span class="d">resolve a symbol to its defining range</span></li>
+            <li><span class="n mono">findReferences</span>
+                <span class="d">every occurrence across the indexed repo</span></li>
+            <li><span class="n mono">callHierarchy</span>
+                <span class="d">incoming and outgoing calls</span></li>
+            <li><span class="n mono">documentSymbols</span>
+                <span class="d">outline of one file</span></li>
+            <li><span class="n mono">typeHierarchy</span>
+                <span class="flag">NOT WORKING</span></li>
+          </ul>
+        </div>
+
+        <div class="tg">
+          <h3>Search</h3>
+          <p>Lexical and natural language, fused when both are available.</p>
+          <ul>
+            <li><span class="n mono">searchCode</span>
+                <span class="d">Zoekt trigram search, regex capable</span></li>
+            <li><span class="n mono">semanticSearch</span>
+                <span class="d">vector hits fused with Zoekt by rank</span></li>
+          </ul>
+        </div>
+
+        <div class="tg">
+          <h3>Cross-repo</h3>
+          <p>Needs the dependency indexed too, or the edge cannot resolve.</p>
+          <ul>
+            <li><span class="n mono">blastRadius</span>
+                <span class="d">which other indexed repos depend on a package, up to two hops</span></li>
+          </ul>
+        </div>
+
+        <div class="tg">
+          <h3>Freshness</h3>
+          <p>Never reports stale without evidence to compare against.</p>
+          <ul>
+            <li><span class="n mono">getIndexStatus</span>
+                <span class="d">published commit, and staleness against a working tree</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ================= LIMITS: side-by-side comparison ================= -->
+  <section id="limits">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>What it does not do</h2>
+        <p class="lede">
+          Read this before installing. jarvis is deliberately narrow, and the
+          gaps below are real rather than roadmap items.
+        </p>
+      </div>
+
+      <div class="cmp">
+        <div class="cmp-col">
+          <h3>Navigation and search</h3>
+          <p>
+            Four language families get the full SCIP tool set, including
+            go-to-definition and find-references.
+          </p>
+          <div class="langs">
+            <span class="lang on">TypeScript</span>
+            <span class="lang on">TSX</span>
+            <span class="lang on">Python</span>
+            <span class="lang on">Java</span>
+            <span class="lang on">Kotlin</span>
+            <span class="lang on">Swift</span>
+          </div>
+        </div>
+        <div class="cmp-col">
+          <h3>Search only</h3>
+          <p>
+            With <code class="inline">--search-only</code>, ten more languages
+            are searchable but have no navigation at all.
+          </p>
+          <div class="langs">
+            <span class="lang">Go</span>
+            <span class="lang">Ruby</span>
+            <span class="lang">Rust</span>
+            <span class="lang">C</span>
+            <span class="lang">C++</span>
+            <span class="lang">C#</span>
+            <span class="lang">PHP</span>
+            <span class="lang">Scala</span>
+            <span class="lang">Shell</span>
+            <span class="lang">SQL</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hard">
+        <div>
+          <b>macOS and Linux only.</b>
+          Windows is not supported.
+        </div>
+        <div>
+          <b>One language per repo.</b>
+          A polyglot monorepo is indexed as whichever language has the most
+          git-tracked files. Override it with
+          <code class="inline">--language</code>; multi-language merge is out of
+          scope.
+        </div>
+        <div>
+          <b>It never edits your code.</b>
+          Navigation and search only. If you want an agent that performs semantic
+          renames and refactors, you want
+          <a href="https://github.com/oraios/serena">Serena</a>, which is
+          complementary rather than competing.
+        </div>
+        <div>
+          <b>Indexing is an explicit step.</b>
+          Nothing is analysed live. Run <code class="inline">jarvis index</code>
+          or <code class="inline">jarvis watch</code> to publish an index
+          before querying it.
+        </div>
+        <div>
+          <b><code class="inline">typeHierarchy</code> returns an error, not results.</b>
+          The upstream converter declares
+          <code class="inline">global_symbols.relationships</code> but never
+          populates it. An empty answer would wrongly assert "no supertypes", so
+          the tool says it cannot tell instead. Tracked as
+          <a href="https://github.com/scip-code/scip/issues/464">scip#464</a>,
+          with a fix open in
+          <a href="https://github.com/scip-code/scip/pull/465">scip#465</a>.
+        </div>
+        <div>
+          <b>It needs external binaries.</b>
+          One language indexer per repo, plus
+          <code class="inline">scip</code> and
+          <code class="inline">zoekt-index</code>. The setup script installs
+          them, and re-running it skips whatever is already present.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ================= INSTALL: vertical sequence ================= -->
+  <section id="install">
+    <div class="wrap">
+      <div class="sec-head">
+        <h2>Install</h2>
+        <p class="lede">
+          Four steps. The first two are once per machine, the third is once per
+          repo, and the fourth is once per client.
+        </p>
+      </div>
+
+      <div class="step">
+        <div class="step-head">
+          <h3>Install the indexer binaries</h3>
+          <span>once per machine</span>
+        </div>
+        <div class="term">
+<pre><span class="p">$</span> curl -fsSL https://raw.githubusercontent.com/phuongddx/jarvis-dist/main/setup.sh | sh</pre>
+        </div>
+        <p>
+          Installs <code class="inline">scip</code>, the Zoekt binaries, and the
+          per-language indexers. Pass <code class="inline">--only &lt;name&gt;</code>
+          for a single dependency or <code class="inline">--force</code> to
+          reinstall.
+        </p>
+      </div>
+
+      <div class="step">
+        <div class="step-head">
+          <h3>Install jarvis</h3>
+          <span>once per machine</span>
+        </div>
+        <div class="term">
+<pre><span class="p">$</span> uv tool install jarvis-mcp</pre>
+        </div>
+        <div class="alt">
+          <p>Optional extras, if you want file watching or semantic search:</p>
+          <div class="term">
+<pre><span class="p">$</span> uv tool install <span class="k">"jarvis-mcp[watch]"</span>
+<span class="p">$</span> uv tool install <span class="k">"jarvis-mcp[semantic]"</span></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-head">
+          <h3>Index a repo</h3>
+          <span>once per repo</span>
+        </div>
+        <div class="term">
+<pre><span class="p">$</span> jarvis index /path/to/your/repo</pre>
+        </div>
+        <p>
+          The slug defaults to the directory name. Use
+          <code class="inline">jarvis list</code> to see what is indexed and
+          <code class="inline">jarvis reindex &lt;slug&gt;</code> to refresh it.
+        </p>
+      </div>
+
+      <div class="step">
+        <div class="step-head">
+          <h3>Register the server</h3>
+          <span>once per client</span>
+        </div>
+        <p style="margin-top:0;margin-bottom:1rem">
+          In Claude Code, installing the plugin registers the MCP server for you:
+        </p>
+        <div class="term">
+<pre>/plugin marketplace add phuongddx/jarvis-dist
+/plugin install jarvis@jarvis</pre>
+        </div>
+        <div class="alt">
+          <p>Any other MCP client, or Claude Code without the plugin:</p>
+          <div class="term">
+<pre><span class="p">$</span> claude mcp add jarvis --scope user -- jarvis-server</pre>
+          </div>
+        </div>
+      </div>
+
+      <p class="lede" style="margin-top:2.25rem">
+        That is it. Ask your agent to find every reference to
+        <code class="inline">AuthService</code> and it will call
+        <code class="inline">findReferences</code> instead of grepping.
+      </p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap foot-grid">
+    <div>
+      MIT licensed. Runs entirely on your machine.
+    </div>
+    <div class="foot-links">
+      <a href="https://github.com/phuongddx/jarvis-dist">GitHub</a>
+      <a href="https://pypi.org/project/jarvis-mcp/">PyPI</a>
+      <a href="system-architecture.md">Architecture</a>
+      <a href="project-overview-pdr.md">Overview</a>
+      <a href="https://github.com/phuongddx/jarvis-dist/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>

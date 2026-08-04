@@ -1,0 +1,4 @@
+interface:
+  display_name: "jarvis Issues"
+  short_description: "File bugs and feature requests for jarvis"
+  default_prompt: "Use $jarvis-issues to gather context, classify against known limitations, and file a well-formed GitHub issue for jarvis."
