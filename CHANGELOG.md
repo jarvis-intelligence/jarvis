@@ -2,6 +2,50 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] - 2026-08-04
+
+Minor rather than patch: `getIndexStatus` gains a new field
+(`searchCoverage`) that detects a class of failure the previous release
+could not see at all, alongside the fix that caused it.
+
+### Fixed
+
+- `zoekt-index` walked the filesystem, not the git tree, so it indexed every
+  gitignored path — `.venv/`, `node_modules/`, vendored checkouts. On real
+  repos this inflated one index from 133 tracked files to 7353 documents /
+  241 MB. Zoekt splits an oversized index into numbered shard files
+  (`<slug>_v16.<NNNNN>.zoekt`); `<NNNNN>` is a shard ordinal, not a version,
+  but that bloat made it look like accumulated stale versions. Deleting "old"
+  shards on that mistaken premise destroyed 15 of 16 shards of a real
+  repository's index, and `searchCode` kept answering queries afterward with
+  no error, silently missing most of the repo's content.
+
+  Indexing now runs through `zoekt-git-index`, which reads blobs directly out
+  of the git tree, so gitignored content is excluded by construction with no
+  denylist to maintain. This does mean `searchCode` now reflects git HEAD,
+  not the working tree — an uncommitted edit or new untracked file is
+  findable via `grep` but not `searchCode` until it's committed; SCIP
+  navigation is unaffected and still reflects the working tree.
+
+  `zoekt-git-index` has no `-meta` flag, so the per-repo search index name is
+  now pinned via `git config zoekt.name <slug>` instead; without it, Zoekt
+  falls back to naming the index after the `origin` remote URL, and
+  `searchCode(repo=<slug>)`'s `r:<slug>` filter would silently match nothing.
+  Because that key is one value per repo, `codeintel index` now refuses a
+  second slug for an already-indexed repo path, naming the conflicting slug
+  and the `codeintel forget` remedy.
+
+### Added
+
+- `getIndexStatus` reports `searchCoverage: {expected, indexed, complete}` —
+  the count of git-tracked files at last index time compared against what
+  Zoekt's live index actually holds for that repo. This is the check that
+  would have caught the incident above: a search index missing shards after
+  a successful publish now reports `complete: false` instead of silently
+  answering with partial results. When it can't be computed (e.g.
+  `zoekt-webserver` isn't running, or the repo predates this field),
+  `searchCoverage` is `null` with a `searchCoverageReason` explaining why.
+
 ## [0.3.2] - 2026-08-04
 
 ### Added
