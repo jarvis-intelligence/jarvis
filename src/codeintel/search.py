@@ -104,6 +104,7 @@ def zoekt_repo_documents(
     `client` is injectable (a real `httpx.Client`, or one backed by
     `httpx.MockTransport` in tests); defaults to a short-lived real client.
     """
+    owns_client = client is None
     client = client or httpx.Client()
     try:
         response = client.post(
@@ -114,6 +115,10 @@ def zoekt_repo_documents(
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise ZoektUnavailableError(f"zoekt-webserver /api/list failed: {exc}") from exc
+    finally:
+        if owns_client:
+            client.close()
+
     for entry in (response.json().get("List", {}).get("Repos") or []):
         if entry.get("Repository", {}).get("Name") == repo:
             return entry.get("Stats", {}).get("Documents")
