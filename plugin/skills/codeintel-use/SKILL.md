@@ -58,7 +58,7 @@ Before any structural tool call, check freshness:
    - **indexed + fresh** → call the structural tool now.
    - **indexed + stale** → run `codeintel reindex <slug>`, then call the tool.
    - **not indexed** → fall back to grep for this query; offer to index (`codeintel index <path>`).
-3. For **text** search (not structure), use grep or `searchCode` — no preference between them.
+3. For **text** search (not structure), use grep or `searchCode` — no preference between them, except `searchCode` indexes git HEAD, so an uncommitted edit or new untracked file is grep-only until it's committed.
 
 ## Gotchas
 

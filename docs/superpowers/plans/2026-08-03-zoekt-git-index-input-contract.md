@@ -1813,6 +1813,11 @@ Not part of the code change — run once after Task 11 is merged and released.
 
 - [ ] **Step 1: Reinstall the binaries**
 
+Wait until the `build-zoekt` GitHub Actions workflow has republished the release assets under
+its (unchanged) pin tag before running this — the release-asset tag does not change with this
+PR, so `setup.sh` will fail with "archive did not contain both binaries" until that workflow
+completes after merge.
+
 ```bash
 ./setup.sh
 command -v zoekt-git-index

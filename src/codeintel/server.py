@@ -282,7 +282,9 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
     """Whether `repo` has a published index, and its freshness. Pass
     `repo_path` (the repo's local git working directory) to compare the
     published commit against `git rev-parse HEAD`; omitted, freshness is
-    reported without a staleness comparison."""
+    reported without a staleness comparison. `searchCoverage` reflects git
+    HEAD at last index time, not the working tree — it does not account for
+    uncommitted or untracked changes."""
     try:
         indexed, freshness = _service().get_index_status(repo, repo_path)
     except Exception as exc:

@@ -8,6 +8,7 @@ Subcommands: index, list, status, reindex, forget, watch.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -494,14 +495,20 @@ def _sweep_zoekt_tmp_orphans(slug: str, root: Path | None = None) -> list[Path]:
 
     Slug-scoped like `_remove_zoekt_shards`: the `_v` in the glob stops "api"
     from matching "api-gateway"'s files.
+
+    Runs between a successful `zoekt-git-index` run and `_publish_atomically`,
+    so any failure here must never propagate: an `EACCES`/`EBUSY`/`EPERM` on
+    `unlink()` would otherwise bubble up to `index_repo()`'s outer handler and
+    discard a fully-successful publish over a cleanup-step failure.
     """
     zoekt_dir = config.data_dir(root) / ".zoekt"
     if not zoekt_dir.is_dir():
         return []
     removed: list[Path] = []
     for tmp in sorted(zoekt_dir.glob(f"{slug}_v*.zoekt*.tmp")):
-        tmp.unlink(missing_ok=True)
-        removed.append(tmp)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+            removed.append(tmp)
     return removed
 
 
@@ -675,11 +682,16 @@ def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
 def _reject_duplicate_slug_for_path(registry: Registry, slug: str, repo_path: Path) -> None:
     """One slug per repo path.
 
-    `zoekt.name` lives in a repo's `.git/config` — one value per repo. Two
-    slugs pointing at the same path cannot both be searchable: the second
-    index overwrites the first's pinned name, and `r:<first-slug>` then
-    returns zero hits with no error. Three slugs also meant paying for three
-    near-identical shards of the same content.
+    `_pin_zoekt_repo_name` re-pins `zoekt.name` before every single index run,
+    so two slugs indexing the same path don't actually corrupt each other's
+    shard name — each stays correctly pinned at the moment it runs. The rule
+    exists for three other reasons instead: (a) duplicate disk usage from
+    indexing near-identical content twice under two slugs, (b) ambiguity
+    about which slug is "the" search index for that path, and (c) on a
+    linked worktree, `git config` writes to the repo's *shared* config
+    (see CLAUDE.md's `zoekt.name` caveat), so two slugs on two worktrees of
+    the same repo could otherwise race to set it — this per-path check
+    prevents the common single-worktree case.
 
     Compares resolved paths because rows written before this check existed
     may hold unresolved ones. Same slug at the same path is the normal

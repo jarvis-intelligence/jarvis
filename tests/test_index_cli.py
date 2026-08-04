@@ -448,12 +448,15 @@ def test_index_repo_end_to_end_atomic_swap_under_open_reader(tmp_path: Path):
     data_root = tmp_path / "data"
     slug = index_repo(repo_dir, root=data_root)
 
+    from codeintel.index_cli import _tracked_blob_count
+
     registry = Registry(data_root / "registry.db")
     try:
         entry = registry.get(slug)
         assert entry is not None
         assert entry.status == "indexed"
         assert entry.commit_sha is not None
+        assert entry.tracked_files == _tracked_blob_count(repo_dir)
     finally:
         registry.close()
 
@@ -1955,8 +1958,29 @@ def test_sweep_zoekt_tmp_orphans_is_safe_when_absent(tmp_path: Path):
     assert _sweep_zoekt_tmp_orphans("nothing-here", root=tmp_path) == []
 
 
+def test_sweep_zoekt_tmp_orphans_survives_unlink_errors(tmp_path: Path, monkeypatch):
+    """The sweep runs between a successful zoekt-git-index run and the
+    atomic publish -- an EACCES/EBUSY/EPERM on unlink() must never
+    propagate and discard an otherwise-successful publish."""
+    from codeintel.index_cli import _sweep_zoekt_tmp_orphans
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir(parents=True)
+    (zoekt_dir / "myslug_v16.00000.zoekt.tmp").write_bytes(b"x")
+
+    def _raise_permission_error(self: Path) -> None:
+        raise PermissionError("no")
+
+    monkeypatch.setattr(Path, "unlink", _raise_permission_error)
+
+    removed = _sweep_zoekt_tmp_orphans("myslug", root=tmp_path)
+
+    assert removed == []
+    assert (zoekt_dir / "myslug_v16.00000.zoekt.tmp").exists(), "unremovable file must be left in place"
+
+
 @pytest.mark.integration
-def test_zoekt_git_index_excludes_gitignored_content(tmp_path: Path):
+def test_zoekt_git_index_excludes_gitignored_content(tmp_path: Path, monkeypatch):
     """The whole point: gitignored junk is absent by construction, with no
     denylist to maintain.
 
@@ -1965,15 +1989,20 @@ def test_zoekt_git_index_excludes_gitignored_content(tmp_path: Path):
     the tracked content is findable) -- so this also spins up a real
     zoekt-webserver and queries it, the same way
     test_get_index_status_reports_incomplete_after_a_shard_is_deleted does.
+
+    Also covers the healthy/complete-coverage case of `_search_coverage_fields`
+    -- the shard-deletion test below only covers the incomplete case.
     """
     if shutil.which("zoekt-git-index") is None:
         pytest.skip("zoekt-git-index not on PATH")
     if shutil.which("zoekt-webserver") is None:
         pytest.skip("zoekt-webserver not on PATH")
 
+    from codeintel import config, server
     from codeintel.index_cli import (
         _pin_zoekt_repo_name, _tracked_blob_count, _zoekt_index_cmd,
     )
+    from codeintel.registry import Registry
     from codeintel.search import ZoektLifecycle, search_zoekt
 
     repo = tmp_path / "repo"
@@ -1997,11 +2026,23 @@ def test_zoekt_git_index_excludes_gitignored_content(tmp_path: Path):
     assert "attempting to index 2 total files" in result.stderr
     assert list(zoekt_dir.glob("covslug_v*.zoekt")), "shard must be named after the slug"
 
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("covslug", str(repo), "python", "abc", "indexed")
+        registry.mark_tracked_files("covslug", _tracked_blob_count(repo))
+    finally:
+        registry.close()
+
     lifecycle = ZoektLifecycle(index_dir=zoekt_dir, data_dir=tmp_path, port=6078)
     try:
         base_url = lifecycle.ensure_running()
         assert search_zoekt(base_url, "junktoken_beta") == [], "gitignored content must not be searchable"
         assert len(search_zoekt(base_url, "sourcetoken_alpha")) >= 1, "tracked content must be searchable"
+
+        monkeypatch.setattr(server, "_zoekt_base_url_if_running", lambda: base_url)
+        fields = server._search_coverage_fields("covslug")
+        assert fields["searchCoverage"]["complete"] is True
     finally:
         lifecycle.stop()
 

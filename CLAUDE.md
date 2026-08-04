@@ -84,7 +84,10 @@ tree** — uncommitted edits are navigable but not searchable until committed.
 zoekt derives the name from the `origin` remote URL, url-escaped, and `searchCode`'s `r:<slug>`
 filter silently matches nothing. `-shard_prefix_override` is not a substitute — it renames the
 shard file only. Because that key is per-repo, **one slug per repo path** is enforced at index
-time.
+time. Caveat: `git config` on a linked worktree writes to the repository's shared config, so
+`zoekt.name` is not actually per-worktree — two slugs indexing two worktrees of the same repo
+can race to set it. The one-slug-per-path check still prevents the common case (one slug, one
+path); this is a narrow edge case that self-heals on the next index.
 
 `<NNNNN>` in `<slug>_v16.<NNNNN>.zoekt` is a **shard ordinal, not a version** — a repo whose
 corpus exceeds `-shard_limit` (100 MiB) is split across several shards, all current. Reindexing
