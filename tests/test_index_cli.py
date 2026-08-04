@@ -30,6 +30,13 @@ _missing_swift = [b for b in _SWIFT_REQUIRED_BINARIES if shutil.which(b) is None
 _missing_java = [b for b in ("scip-java", "scip", "zoekt-git-index") if shutil.which(b) is None]
 
 
+def _fake_completed_process(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """A stand-in for `_run`'s real return value in tests that mock it out --
+    `_publish_search_only`/`index_repo` read `.stderr` off it for the
+    coverage-shortfall check, so a bare `None` return no longer suffices."""
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+
 def _init_git_repo(path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
@@ -1292,7 +1299,7 @@ def test_search_only_publishes_zoekt_without_a_scip_pointer(tmp_path: Path, monk
 
     monkeypatch.setattr("codeintel.index_cli.detect_language", lambda p: ("python", ["nope"]))
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd)
                         if cmd[0] in ("zoekt-git-index", "git") else _boom())
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage",
                         lambda *a, **k: False)
@@ -1337,7 +1344,7 @@ def test_search_only_tolerates_a_repo_with_no_indexable_language(tmp_path: Path,
     data_root = tmp_path / "data"
 
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None)
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd))
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
 
     slug = index_repo(repo_dir, root=data_root, search_only=True)
@@ -1371,7 +1378,7 @@ def test_search_only_reindex_reuses_persisted_flag_for_an_unknown_language_repo(
     data_root = tmp_path / "data"
 
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None)
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd))
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
 
     # First run: explicit --search-only, establishing the persisted row with
@@ -1446,7 +1453,7 @@ def test_search_only_publish_retires_a_previously_published_scip_index(tmp_path:
 
     monkeypatch.setattr("codeintel.index_cli.detect_language", lambda p: ("java", ["nope"]))
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd)
                         if cmd[0] in ("zoekt-git-index", "git") else (_ for _ in ()).throw(
                             AssertionError("the SCIP indexer must not run in search-only mode")))
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
@@ -1608,7 +1615,7 @@ def test_indexer_failure_with_known_signature_publishes_search_only(tmp_path: Pa
         # _publish_search_only must still be allowed to run for real.
         if step.endswith(" index"):
             raise IndexingError("error: No SCIP shards found. scip-java cannot index this")
-        return None
+        return _fake_completed_process(cmd)
 
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
     monkeypatch.setattr("codeintel.index_cli._run", _fake_run)
@@ -1877,3 +1884,72 @@ def test_forget_unpins_the_zoekt_repo_name(tmp_path: Path, monkeypatch, capsys):
 
     assert _cmd_forget(argparse.Namespace(slug="myslug")) == 0
     assert _git_config_value(repo, "zoekt.name") is None
+
+
+def test_parse_indexed_file_count_reads_the_indexer_log():
+    from codeintel.index_cli import _parse_indexed_file_count
+
+    output = (
+        "2026/08/03 22:26:52 attempting to index 133 total files "
+        "(0 via cat-file, 133 via go-git)\n"
+        "2026/08/03 22:26:53 finished shard /x/codeintel_v16.00000.zoekt: "
+        "6408345 index bytes (overhead 3.2), 133 files processed\n"
+    )
+
+    assert _parse_indexed_file_count(output) == 133
+
+
+def test_parse_indexed_file_count_returns_none_on_unknown_format():
+    """An upstream log change must degrade to "unknown", never fail a publish."""
+    from codeintel.index_cli import _parse_indexed_file_count
+
+    assert _parse_indexed_file_count("nothing recognisable here") is None
+
+
+def test_warn_on_coverage_shortfall_warns(capsys):
+    from codeintel.index_cli import _warn_on_coverage_shortfall
+
+    _warn_on_coverage_shortfall("myslug", 133, "attempting to index 100 total files")
+
+    assert "myslug" in capsys.readouterr().err
+
+
+def test_warn_on_coverage_shortfall_is_quiet_when_complete(capsys):
+    from codeintel.index_cli import _warn_on_coverage_shortfall
+
+    _warn_on_coverage_shortfall("myslug", 133, "attempting to index 133 total files")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_on_coverage_shortfall_is_quiet_when_unparseable(capsys):
+    from codeintel.index_cli import _warn_on_coverage_shortfall
+
+    _warn_on_coverage_shortfall("myslug", 133, "unrecognised")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_sweep_zoekt_tmp_orphans_removes_only_this_slugs_temp_files(tmp_path: Path):
+    """A killed zoekt run leaves a .tmp that is never usable and never
+    cleaned up; 545 MB of them accumulated once."""
+    from codeintel.index_cli import _sweep_zoekt_tmp_orphans
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir(parents=True)
+    (zoekt_dir / "myslug_v16.00000.zoekt").write_bytes(b"x")
+    (zoekt_dir / "myslug_v16.00001.zoekt.12345.tmp").write_bytes(b"x")
+    (zoekt_dir / "otherslug_v16.00000.zoekt.99.tmp").write_bytes(b"x")
+
+    removed = _sweep_zoekt_tmp_orphans("myslug", root=tmp_path)
+
+    assert len(removed) == 1
+    assert (zoekt_dir / "myslug_v16.00000.zoekt").exists(), "must not touch real shards"
+    assert not (zoekt_dir / "myslug_v16.00001.zoekt.12345.tmp").exists()
+    assert (zoekt_dir / "otherslug_v16.00000.zoekt.99.tmp").exists(), "must not touch other repos"
+
+
+def test_sweep_zoekt_tmp_orphans_is_safe_when_absent(tmp_path: Path):
+    from codeintel.index_cli import _sweep_zoekt_tmp_orphans
+
+    assert _sweep_zoekt_tmp_orphans("nothing-here", root=tmp_path) == []

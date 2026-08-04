@@ -449,6 +449,62 @@ def _zoekt_index_cmd(zoekt_dir: Path, repo_path: Path) -> list[str]:
     ]
 
 
+_INDEXED_FILE_COUNT_RE = re.compile(r"attempting to index (\d+) total files")
+
+
+def _parse_indexed_file_count(output: str) -> int | None:
+    """How many files `zoekt-git-index` reported indexing, or None when the
+    line is absent.
+
+    Returns None rather than raising so an upstream log-format change
+    degrades the coverage check to "unknown" instead of failing an otherwise
+    healthy publish. The authoritative post-index count comes from zoekt's
+    own `/api/list` at status time; this is the cheap index-time signal.
+    """
+    match = _INDEXED_FILE_COUNT_RE.search(output)
+    return int(match.group(1)) if match else None
+
+
+def _warn_on_coverage_shortfall(slug: str, expected: int, output: str) -> None:
+    """Warn when the indexer saw fewer files than git tracks.
+
+    Warns rather than failing: legitimate causes exist — zoekt skips files
+    over its 2 MB `-file_limit`, files exceeding `-max_trigram_count`, and
+    binaries. Mirrors how `index_has_navigation_data()` publishes a degraded
+    index with a warning instead of refusing.
+    """
+    indexed = _parse_indexed_file_count(output)
+    if indexed is None or indexed >= expected:
+        return
+    print(
+        f"warning: {slug} indexed {indexed} of {expected} git-tracked files — "
+        "searchCode results will be incomplete. Large files (>2MB) and binaries "
+        "are skipped by design; a larger gap suggests a problem.",
+        file=sys.stderr,
+    )
+
+
+def _sweep_zoekt_tmp_orphans(slug: str, root: Path | None = None) -> list[Path]:
+    """Delete stranded `.tmp` shards for `slug`.
+
+    `zoekt-git-index` writes `<name>.<n>.tmp` and renames on success, so a
+    killed run (Ctrl-C, OOM) strands a temp file that is never usable and was
+    never cleaned up — 545 MB of them accumulated once. A successful index is
+    the natural moment to sweep this repo's leftovers.
+
+    Slug-scoped like `_remove_zoekt_shards`: the `_v` in the glob stops "api"
+    from matching "api-gateway"'s files.
+    """
+    zoekt_dir = config.data_dir(root) / ".zoekt"
+    if not zoekt_dir.is_dir():
+        return []
+    removed: list[Path] = []
+    for tmp in sorted(zoekt_dir.glob(f"{slug}_v*.zoekt*.tmp")):
+        tmp.unlink(missing_ok=True)
+        removed.append(tmp)
+    return removed
+
+
 def _resolve_scheme(registry: Registry, slug: str, scheme: str | None) -> str | None:
     """`scheme=None` means "leave the persisted override alone" (e.g. a
     `codeintel watch` reindex, which never repeats `--scheme`) rather than
@@ -583,7 +639,7 @@ def _retire_scip_artifacts(slug: str, root: Path | None) -> None:
 
 
 def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
-                         semantic_include: tuple[str, ...]) -> bool:
+                         semantic_include: tuple[str, ...]) -> tuple[bool, int]:
     """Zoekt + semantic only: no SCIP indexer, no `scip expt-convert`, no graph
     population, and deliberately no `current` pointer. Without a pointer,
     `read_pointer` raises IndexNotFoundError and every navigation tool fails
@@ -595,20 +651,25 @@ def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
     fallback, which can trigger on a repo that indexed fine before (e.g. a
     Kotlin version bump hitting the ABI-mismatch signature on reindex).
 
-    Returns whether the semantic stage succeeded, matching
-    `_run_semantic_stage`'s contract; the caller records the registry row."""
+    Returns whether the semantic stage succeeded (matching
+    `_run_semantic_stage`'s contract) alongside the git-tracked file count;
+    the caller records both on the registry row."""
     _retire_scip_artifacts(slug, root)
     _pin_zoekt_repo_name(repo_path, slug)
     zoekt_dir = config.data_dir(root) / ".zoekt"
     zoekt_dir.mkdir(parents=True, exist_ok=True)
-    _run(_zoekt_index_cmd(zoekt_dir, repo_path), cwd=repo_path, step="zoekt-git-index")
+    tracked = _tracked_blob_count(repo_path)
+    result = _run(_zoekt_index_cmd(zoekt_dir, repo_path), cwd=repo_path,
+                  step="zoekt-git-index")
+    _warn_on_coverage_shortfall(slug, tracked, result.stderr)
+    _sweep_zoekt_tmp_orphans(slug, root)
     semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
     print(
         f"note: {slug} published search-only — searchCode and semanticSearch work, "
         "navigation tools do not (no SCIP index).",
         file=sys.stderr,
     )
-    return semantic_ok
+    return semantic_ok, tracked
 
 
 def _reject_duplicate_slug_for_path(registry: Registry, slug: str, repo_path: Path) -> None:
@@ -708,10 +769,11 @@ def index_repo(
                         scheme_override=scheme, semantic_include=semantic_include,
                         language_override=language_override, search_only=True)
         try:
-            semantic_ok = _publish_search_only(repo_path, slug, root, semantic_include)
+            semantic_ok, tracked = _publish_search_only(repo_path, slug, root, semantic_include)
             registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
                             scheme_override=scheme, semantic_include=semantic_include,
                             language_override=language_override, search_only=True)
+            registry.mark_tracked_files(slug, tracked)
             if semantic_ok:
                 registry.mark_semantic_indexed(slug)
         except Exception as exc:
@@ -745,10 +807,11 @@ def index_repo(
                     "will not repeat the build.",
                     file=sys.stderr,
                 )
-                semantic_ok = _publish_search_only(repo_path, slug, root, semantic_include)
+                semantic_ok, tracked = _publish_search_only(repo_path, slug, root, semantic_include)
                 registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
                                 scheme_override=scheme, semantic_include=semantic_include,
                                 language_override=language_override, search_only=True)
+                registry.mark_tracked_files(slug, tracked)
                 if semantic_ok:
                     registry.mark_semantic_indexed(slug)
                 return slug
@@ -775,8 +838,11 @@ def index_repo(
             zoekt_dir = config.data_dir(root) / ".zoekt"
             zoekt_dir.mkdir(parents=True, exist_ok=True)
             _pin_zoekt_repo_name(repo_path, slug)
-            _run(_zoekt_index_cmd(zoekt_dir, repo_path), cwd=repo_path,
-                 step="zoekt-git-index")
+            tracked = _tracked_blob_count(repo_path)
+            zoekt_result = _run(_zoekt_index_cmd(zoekt_dir, repo_path), cwd=repo_path,
+                                step="zoekt-git-index")
+            _warn_on_coverage_shortfall(slug, tracked, zoekt_result.stderr)
+            _sweep_zoekt_tmp_orphans(slug, root)
 
             semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
 
@@ -792,6 +858,7 @@ def index_repo(
         final_status = "indexed" if has_nav else PARTIAL_STATUS
         registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme,
                         semantic_include=semantic_include, language_override=language_override)
+        registry.mark_tracked_files(slug, tracked)
         if semantic_ok:
             registry.mark_semantic_indexed(slug)
         if not has_nav:
