@@ -580,6 +580,35 @@ def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
     return semantic_ok
 
 
+def _reject_duplicate_slug_for_path(registry: Registry, slug: str, repo_path: Path) -> None:
+    """One slug per repo path.
+
+    `zoekt.name` lives in a repo's `.git/config` — one value per repo. Two
+    slugs pointing at the same path cannot both be searchable: the second
+    index overwrites the first's pinned name, and `r:<first-slug>` then
+    returns zero hits with no error. Three slugs also meant paying for three
+    near-identical shards of the same content.
+
+    Compares resolved paths because rows written before this check existed
+    may hold unresolved ones. Same slug at the same path is the normal
+    reindex/watch case and passes.
+    """
+    for existing in registry.list():
+        if existing.slug == slug:
+            continue
+        try:
+            same = Path(existing.path).resolve() == repo_path
+        except OSError:
+            # A registered path that no longer exists cannot collide.
+            continue
+        if same:
+            raise IndexingError(
+                f"{repo_path} is already indexed as {existing.slug!r}. "
+                f"One slug per repo — run `codeintel forget {existing.slug}` first, "
+                f"or reindex that slug instead."
+            )
+
+
 def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None,
     scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
@@ -610,6 +639,11 @@ def index_repo(
     check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
+    try:
+        _reject_duplicate_slug_for_path(registry, slug, repo_path)
+    except Exception:
+        registry.close()
+        raise
     # Resolved before language detection (not after, alongside scheme/
     # semantic_include) because the except branch below reads it: a
     # `codeintel reindex`/`watch` of a persisted search-only repo never

@@ -302,6 +302,71 @@ def test_index_repo_rejects_dotdot_slug_before_touching_disk(tmp_path: Path):
     assert not (tmp_path / "data").exists()
 
 
+def test_index_repo_rejects_a_second_slug_for_the_same_path(tmp_path: Path, monkeypatch):
+    """zoekt.name is one value per repo, so a second slug for one path would
+    overwrite the first's name and silently break `r:<first-slug>`."""
+    from codeintel import config
+    from codeintel.index_cli import IndexingError, index_repo
+    from codeintel.registry import Registry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n")
+    _init_git_repo(repo)
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("first", str(repo.resolve()), "python", "abc", "indexed")
+    finally:
+        registry.close()
+
+    with pytest.raises(IndexingError, match="already indexed as 'first'"):
+        index_repo(repo, slug="second")
+
+
+def test_index_repo_allows_reindexing_the_same_slug(tmp_path: Path, monkeypatch):
+    """The normal reindex/watch path: same slug, same path, must not trip."""
+    from codeintel import config
+    from codeintel.index_cli import _reject_duplicate_slug_for_path
+    from codeintel.registry import Registry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n")
+    _init_git_repo(repo)
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("same", str(repo.resolve()), "python", "abc", "indexed")
+        _reject_duplicate_slug_for_path(registry, "same", repo.resolve())  # must not raise
+    finally:
+        registry.close()
+
+
+def test_reject_duplicate_slug_compares_resolved_paths(tmp_path: Path, monkeypatch):
+    """Rows written before this change may hold unresolved paths; a trailing
+    "/." or symlinked parent must still be recognised as the same repo."""
+    from codeintel import config
+    from codeintel.index_cli import IndexingError, _reject_duplicate_slug_for_path
+    from codeintel.registry import Registry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n")
+    _init_git_repo(repo)
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("first", f"{repo}/.", "python", "abc", "indexed")
+        with pytest.raises(IndexingError, match="already indexed as 'first'"):
+            _reject_duplicate_slug_for_path(registry, "second", repo.resolve())
+    finally:
+        registry.close()
+
+
 def test_java_indexer_env_disables_gradle_parallelism(monkeypatch):
     from codeintel.index_cli import _java_indexer_env
 
