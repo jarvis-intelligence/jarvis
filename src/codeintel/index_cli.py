@@ -1,5 +1,5 @@
 """`codeintel` CLI: detect language -> run the matching SCIP indexer ->
-`scip expt-convert` -> populate package graph -> zoekt-index -> atomic
+`scip expt-convert` -> populate package graph -> zoekt-git-index -> atomic
 pointer swap -> registry update.
 
 Subcommands: index, list, status, reindex, forget, watch.
@@ -321,14 +321,33 @@ def _git_head(repo_path: Path) -> str:
     return result.stdout.strip()
 
 
-def _run(cmd: list[str], *, cwd: Path, step: str, env: dict[str, str] | None = None) -> None:
+def _run(cmd: list[str], *, cwd: Path, step: str,
+         env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """`env`, when given, is merged OVER a copy of `os.environ` rather than
     replacing it — a bare replacement would drop PATH and break the very
-    subprocess lookup that finds the indexer."""
+    subprocess lookup that finds the indexer.
+
+    Returns the completed process so callers can read output on success;
+    `zoekt-git-index` reports its file count on stderr, which the search
+    coverage check parses.
+
+    A missing executable raises `FileNotFoundError`, not a non-zero exit, so
+    it is translated into an `IndexingError` naming `setup.sh` — the same
+    remedy `_scip_version_output` gives. This matters most for
+    `zoekt-git-index`: every install predating the switch has `zoekt-index`
+    instead, and there is deliberately no fallback to it, because falling back
+    would silently reintroduce indexing of gitignored content.
+    """
     merged = {**os.environ, **env} if env else None
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=merged)
+    try:
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=merged)
+    except FileNotFoundError as exc:
+        raise IndexingError(
+            f"{step} failed: {cmd[0]} not found on PATH — run setup.sh"
+        ) from exc
     if result.returncode != 0:
         raise IndexingError(f"{step} failed ({' '.join(cmd)}):\n{result.stdout}\n{result.stderr}")
+    return result
 
 
 def _publish_atomically(target_dir: Path, versioned_name: str, sha: str) -> None:
@@ -400,17 +419,34 @@ def index_has_navigation_data(conn: sqlite3.Connection) -> bool:
     return chunks > 0 and mentions > 0
 
 
-def _write_zoekt_meta(scratch: Path, slug: str) -> Path:
-    """Write the `.meta` file that names the Zoekt shard after `slug`.
+def _zoekt_index_cmd(zoekt_dir: Path, repo_path: Path) -> list[str]:
+    """The `zoekt-git-index` invocation shared by both publish paths.
 
-    Without this, zoekt-index derives the repository name from the indexed
-    directory's basename. `searchCode(repo=<slug>)` builds a Zoekt `r:<slug>`
-    filter, so a slug that differs from the directory name matches nothing
-    and the tool returns zero hits with no error -- a silent wrong answer.
+    `zoekt-git-index`, not `zoekt-index`: it walks the git tree and reads
+    blobs by SHA, so gitignored content — `.venv/`, `node_modules/`,
+    vendored checkouts — is absent by construction rather than by a
+    hand-maintained denylist. This is upstream's recommended tool for local
+    git repos, and the same reasoning `detect_language()` already applies:
+    read git, not the filesystem.
+
+    Consequence: search reflects HEAD, while SCIP navigation reflects the
+    working tree. Uncommitted edits are searchable only after a commit.
+
+    `-incremental=false`: the default (true) skips indexing when the shard is
+    newer than refs, which would refuse to repair an already-published
+    incomplete shard. codeintel's registry owns the when-to-reindex decision.
+
+    `-submodules=false`: submodules are indexed under their own slugs, so
+    including them here would duplicate content across two indexes and make
+    the coverage expectation from `_tracked_blob_count` unreachable.
     """
-    meta_path = scratch / "zoekt.meta.json"
-    meta_path.write_text(json.dumps({"Name": slug}), encoding="utf-8")
-    return meta_path
+    return [
+        "zoekt-git-index",
+        "-index", str(zoekt_dir),
+        "-incremental=false",
+        "-submodules=false",
+        str(repo_path),
+    ]
 
 
 def _resolve_scheme(registry: Registry, slug: str, scheme: str | None) -> str | None:
@@ -562,15 +598,10 @@ def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
     Returns whether the semantic stage succeeded, matching
     `_run_semantic_stage`'s contract; the caller records the registry row."""
     _retire_scip_artifacts(slug, root)
-    with tempfile.TemporaryDirectory(prefix="codeintel-index-") as scratch:
-        zoekt_dir = config.data_dir(root) / ".zoekt"
-        zoekt_dir.mkdir(parents=True, exist_ok=True)
-        meta_path = _write_zoekt_meta(Path(scratch), slug)
-        _run(
-            ["zoekt-index", "-index", str(zoekt_dir), "-meta", str(meta_path), str(repo_path)],
-            cwd=repo_path,
-            step="zoekt-index",
-        )
+    _pin_zoekt_repo_name(repo_path, slug)
+    zoekt_dir = config.data_dir(root) / ".zoekt"
+    zoekt_dir.mkdir(parents=True, exist_ok=True)
+    _run(_zoekt_index_cmd(zoekt_dir, repo_path), cwd=repo_path, step="zoekt-git-index")
     semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
     print(
         f"note: {slug} published search-only — searchCode and semanticSearch work, "
@@ -627,7 +658,7 @@ def index_repo(
     still records the effective language, so `list`/`status` show what was
     actually indexed.
 
-    `zoekt-index` runs BEFORE the pointer swap: if it fails, no repo was
+    `zoekt-git-index` runs BEFORE the pointer swap: if it fails, no repo was
     ever left half-published — the previous version (if any) is still the
     live `current` pointer, matching the `failed` status. Only once both
     the SCIP index and the Zoekt shard are ready does `_publish_atomically`
@@ -743,12 +774,9 @@ def index_repo(
 
             zoekt_dir = config.data_dir(root) / ".zoekt"
             zoekt_dir.mkdir(parents=True, exist_ok=True)
-            meta_path = _write_zoekt_meta(Path(scratch), slug)
-            _run(
-                ["zoekt-index", "-index", str(zoekt_dir), "-meta", str(meta_path), str(repo_path)],
-                cwd=repo_path,
-                step="zoekt-index",
-            )
+            _pin_zoekt_repo_name(repo_path, slug)
+            _run(_zoekt_index_cmd(zoekt_dir, repo_path), cwd=repo_path,
+                 step="zoekt-git-index")
 
             semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
 

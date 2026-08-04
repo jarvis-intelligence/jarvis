@@ -21,13 +21,13 @@ FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_py_repo"
 SWIFT_FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_swift_repo"
 JAVA_FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_java_repo"
 
-_REQUIRED_BINARIES = ["scip-python", "scip", "zoekt-index"]
+_REQUIRED_BINARIES = ["scip-python", "scip", "zoekt-git-index"]
 _missing = [b for b in _REQUIRED_BINARIES if shutil.which(b) is None]
 
-_SWIFT_REQUIRED_BINARIES = ["scip-swift", "scip", "zoekt-index"]
+_SWIFT_REQUIRED_BINARIES = ["scip-swift", "scip", "zoekt-git-index"]
 _missing_swift = [b for b in _SWIFT_REQUIRED_BINARIES if shutil.which(b) is None]
 
-_missing_java = [b for b in ("scip-java", "scip", "zoekt-index") if shutil.which(b) is None]
+_missing_java = [b for b in ("scip-java", "scip", "zoekt-git-index") if shutil.which(b) is None]
 
 
 def _init_git_repo(path: Path) -> None:
@@ -468,7 +468,7 @@ def test_index_repo_end_to_end_atomic_swap_under_open_reader(tmp_path: Path):
     reader.close()
 
     zoekt_shards = list((data_root / ".zoekt").glob("*.zoekt"))
-    assert zoekt_shards, "zoekt-index should have written at least one shard"
+    assert zoekt_shards, "zoekt-git-index should have written at least one shard"
 
 
 @pytest.mark.integration
@@ -648,14 +648,47 @@ def test_check_scip_version_tolerates_unparseable(monkeypatch):
     cli.check_scip_version()  # must not raise
 
 
-def test_write_zoekt_meta_contains_slug(tmp_path: Path):
-    import json as _json
+def test_zoekt_index_cmd_uses_git_index_with_pinned_flags(tmp_path: Path):
+    """-incremental=false because the default would refuse to repair an
+    already-published incomplete shard. -submodules=false because submodules
+    are indexed as their own slugs, and including them here would both
+    duplicate content and make the coverage expectation unreachable."""
+    from codeintel.index_cli import _zoekt_index_cmd
 
-    from codeintel.index_cli import _write_zoekt_meta
+    cmd = _zoekt_index_cmd(tmp_path / ".zoekt", tmp_path / "repo")
 
-    meta_path = _write_zoekt_meta(tmp_path, "my-slug")
-    assert meta_path.is_file()
-    assert _json.loads(meta_path.read_text())["Name"] == "my-slug"
+    assert cmd[0] == "zoekt-git-index"
+    assert "-incremental=false" in cmd
+    assert "-submodules=false" in cmd
+    assert "-meta" not in cmd, "zoekt-git-index has no -meta flag"
+    assert cmd[-1] == str(tmp_path / "repo")
+
+
+def test_write_zoekt_meta_is_gone():
+    """Replaced by _pin_zoekt_repo_name — zoekt-git-index takes no -meta."""
+    import codeintel.index_cli as index_cli
+
+    assert not hasattr(index_cli, "_write_zoekt_meta")
+
+
+def test_run_returns_the_completed_process(tmp_path: Path):
+    """Coverage parsing needs the indexer's stderr, which _run previously
+    discarded on success."""
+    from codeintel.index_cli import _run
+
+    result = _run(["echo", "hello"], cwd=tmp_path, step="echo")
+
+    assert result.stdout.strip() == "hello"
+
+
+def test_run_turns_a_missing_binary_into_a_setup_remedy(tmp_path: Path):
+    """A missing binary raised a bare FileNotFoundError, which says nothing
+    about how to fix it. Matters most for the zoekt-index -> zoekt-git-index
+    rename: existing installs must re-run setup.sh to get the new binary."""
+    from codeintel.index_cli import IndexingError, _run
+
+    with pytest.raises(IndexingError, match="setup.sh"):
+        _run(["definitely-not-a-real-binary"], cwd=tmp_path, step="fake step")
 
 
 @pytest.mark.integration
@@ -1260,7 +1293,7 @@ def test_search_only_publishes_zoekt_without_a_scip_pointer(tmp_path: Path, monk
     monkeypatch.setattr("codeintel.index_cli.detect_language", lambda p: ("python", ["nope"]))
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
     monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None
-                        if cmd[0] == "zoekt-index" else _boom())
+                        if cmd[0] in ("zoekt-git-index", "git") else _boom())
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage",
                         lambda *a, **k: False)
 
@@ -1414,7 +1447,7 @@ def test_search_only_publish_retires_a_previously_published_scip_index(tmp_path:
     monkeypatch.setattr("codeintel.index_cli.detect_language", lambda p: ("java", ["nope"]))
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
     monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None
-                        if cmd[0] == "zoekt-index" else (_ for _ in ()).throw(
+                        if cmd[0] in ("zoekt-git-index", "git") else (_ for _ in ()).throw(
                             AssertionError("the SCIP indexer must not run in search-only mode")))
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
 
@@ -1571,7 +1604,7 @@ def test_indexer_failure_with_known_signature_publishes_search_only(tmp_path: Pa
 
     def _fake_run(cmd, *, cwd, step, env=None):
         # " index" (leading space) matches only the indexer step (e.g.
-        # "scip-python index"), not the later "zoekt-index" step that
+        # "scip-python index"), not the later "zoekt-git-index" step that
         # _publish_search_only must still be allowed to run for real.
         if step.endswith(" index"):
             raise IndexingError("error: No SCIP shards found. scip-java cannot index this")
@@ -1604,7 +1637,7 @@ def test_indexer_failure_without_known_signature_still_fails(tmp_path: Path, mon
 
     def _fake_run(cmd, *, cwd, step, env=None):
         # " index" (leading space) matches only the indexer step (e.g.
-        # "scip-python index"), not the later "zoekt-index" step that
+        # "scip-python index"), not the later "zoekt-git-index" step that
         # _publish_search_only must still be allowed to run for real.
         if step.endswith(" index"):
             raise IndexingError("error: could not resolve dependency com.example:thing:1.0")
