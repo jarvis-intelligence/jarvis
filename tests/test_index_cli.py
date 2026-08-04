@@ -1953,3 +1953,94 @@ def test_sweep_zoekt_tmp_orphans_is_safe_when_absent(tmp_path: Path):
     from codeintel.index_cli import _sweep_zoekt_tmp_orphans
 
     assert _sweep_zoekt_tmp_orphans("nothing-here", root=tmp_path) == []
+
+
+@pytest.mark.integration
+def test_zoekt_git_index_excludes_gitignored_content(tmp_path: Path):
+    """The whole point: gitignored junk is absent by construction, with no
+    denylist to maintain."""
+    if shutil.which("zoekt-git-index") is None:
+        pytest.skip("zoekt-git-index not on PATH")
+
+    from codeintel.index_cli import (
+        _pin_zoekt_repo_name, _tracked_blob_count, _zoekt_index_cmd,
+    )
+
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "junkdir").mkdir()
+    (repo / ".gitignore").write_text("junkdir/\n")
+    (repo / "src" / "a.py").write_text("sourcetoken_alpha = 1\n")
+    (repo / "junkdir" / "big.txt").write_text("junktoken_beta\n")
+    _init_git_repo(repo)
+    _pin_zoekt_repo_name(repo, "covslug")
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir()
+    result = subprocess.run(
+        _zoekt_index_cmd(zoekt_dir, repo), cwd=repo, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    # .gitignore + src/a.py == 2; junkdir/big.txt is untracked.
+    assert _tracked_blob_count(repo) == 2
+    assert "attempting to index 2 total files" in result.stderr
+    assert list(zoekt_dir.glob("covslug_v*.zoekt")), "shard must be named after the slug"
+
+
+@pytest.mark.integration
+def test_get_index_status_reports_incomplete_after_a_shard_is_deleted(tmp_path: Path, monkeypatch):
+    """The incident, reproduced: a successful index whose shards are then
+    deleted must report complete: false instead of quietly answering with
+    partial results.
+
+    `-shard_limit 120` forces a multi-shard index on a tiny repo, so this is
+    deterministic and fast rather than needing a 100 MB corpus.
+    """
+    if shutil.which("zoekt-git-index") is None:
+        pytest.skip("zoekt-git-index not on PATH")
+    if shutil.which("zoekt-webserver") is None:
+        pytest.skip("zoekt-webserver not on PATH")
+
+    from codeintel import config, server
+    from codeintel.index_cli import _pin_zoekt_repo_name, _tracked_blob_count
+    from codeintel.registry import Registry
+    from codeintel.search import ZoektLifecycle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in range(6):
+        (repo / f"f{i}.txt").write_text(f"token_{i:02d} padding padding padding padding\n")
+    _init_git_repo(repo)
+    _pin_zoekt_repo_name(repo, "incidentslug")
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir()
+    subprocess.run(
+        ["zoekt-git-index", "-index", str(zoekt_dir), "-incremental=false",
+         "-submodules=false", "-shard_limit", "120", str(repo)],
+        cwd=repo, check=True, capture_output=True, text=True,
+    )
+    shards = sorted(zoekt_dir.glob("incidentslug_v*.zoekt"))
+    assert len(shards) > 1, "need a multi-shard index to delete from"
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("incidentslug", str(repo), "python", "abc", "indexed")
+        registry.mark_tracked_files("incidentslug", _tracked_blob_count(repo))
+    finally:
+        registry.close()
+
+    shards[0].unlink()  # the deletion that caused the incident
+
+    lifecycle = ZoektLifecycle(index_dir=zoekt_dir, data_dir=tmp_path, port=6079)
+    try:
+        base_url = lifecycle.ensure_running()
+        monkeypatch.setattr(server, "_zoekt_base_url_if_running", lambda: base_url)
+        fields = server._search_coverage_fields("incidentslug")
+    finally:
+        lifecycle.stop()
+
+    assert fields["searchCoverage"]["complete"] is False
+    assert fields["searchCoverage"]["indexed"] < fields["searchCoverage"]["expected"]
