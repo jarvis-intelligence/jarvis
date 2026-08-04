@@ -1958,13 +1958,23 @@ def test_sweep_zoekt_tmp_orphans_is_safe_when_absent(tmp_path: Path):
 @pytest.mark.integration
 def test_zoekt_git_index_excludes_gitignored_content(tmp_path: Path):
     """The whole point: gitignored junk is absent by construction, with no
-    denylist to maintain."""
+    denylist to maintain.
+
+    The tracked-file count and the indexer's own log line are real signals,
+    but neither directly proves the junk is unreachable via search (or that
+    the tracked content is findable) -- so this also spins up a real
+    zoekt-webserver and queries it, the same way
+    test_get_index_status_reports_incomplete_after_a_shard_is_deleted does.
+    """
     if shutil.which("zoekt-git-index") is None:
         pytest.skip("zoekt-git-index not on PATH")
+    if shutil.which("zoekt-webserver") is None:
+        pytest.skip("zoekt-webserver not on PATH")
 
     from codeintel.index_cli import (
         _pin_zoekt_repo_name, _tracked_blob_count, _zoekt_index_cmd,
     )
+    from codeintel.search import ZoektLifecycle, search_zoekt
 
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
@@ -1986,6 +1996,14 @@ def test_zoekt_git_index_excludes_gitignored_content(tmp_path: Path):
     assert _tracked_blob_count(repo) == 2
     assert "attempting to index 2 total files" in result.stderr
     assert list(zoekt_dir.glob("covslug_v*.zoekt")), "shard must be named after the slug"
+
+    lifecycle = ZoektLifecycle(index_dir=zoekt_dir, data_dir=tmp_path, port=6078)
+    try:
+        base_url = lifecycle.ensure_running()
+        assert search_zoekt(base_url, "junktoken_beta") == [], "gitignored content must not be searchable"
+        assert len(search_zoekt(base_url, "sourcetoken_alpha")) >= 1, "tracked content must be searchable"
+    finally:
+        lifecycle.stop()
 
 
 @pytest.mark.integration
