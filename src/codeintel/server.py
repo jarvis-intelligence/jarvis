@@ -18,7 +18,7 @@ from codeintel.graph import GraphStore, blast_radius
 from codeintel.index_reader import IndexNotFoundError
 from codeintel.query import FreshnessSnapshot, QueryService
 from codeintel.registry import SEARCH_ONLY_STATUS
-from codeintel.search import ZoektLifecycle, search_zoekt
+from codeintel.search import ZoektLifecycle, search_zoekt, zoekt_repo_documents
 from codeintel.symbols import AmbiguousSymbolError
 
 mcp = FastMCP("codeintel")
@@ -78,6 +78,59 @@ def _registry_status(repo: str) -> str | None:
     except Exception:
         return None
     return entry.status if entry is not None else None
+
+
+def _search_coverage_fields(repo: str) -> dict[str, Any]:
+    """Whether Zoekt currently holds as many documents as git tracked at the
+    last index.
+
+    This is what makes a truncated index visible. The shards that were lost
+    in the August 2026 incident were deleted *after* a successful index, so
+    no index-time check could have caught it — only a comparison made when
+    the index is consulted.
+
+    Never raises: a coverage probe must not turn a working status response
+    into an error. Any failure reports `null` with a reason.
+    """
+    try:
+        from codeintel.registry import Registry
+
+        registry = Registry(config.data_dir() / "registry.db")
+        try:
+            entry = registry.get(repo)
+        finally:
+            registry.close()
+        if entry is None or entry.tracked_files is None:
+            return {
+                "searchCoverage": None,
+                "searchCoverageReason": (
+                    "no tracked-file count recorded — reindex this repo to enable "
+                    "the coverage check"
+                ),
+            }
+        base_url = _zoekt_base_url_if_running()
+        if base_url is None:
+            return {
+                "searchCoverage": None,
+                "searchCoverageReason": "zoekt-webserver not running",
+            }
+        indexed = zoekt_repo_documents(base_url, repo)
+        if indexed is None:
+            return {
+                "searchCoverage": None,
+                "searchCoverageReason": f"zoekt has no index for {repo}",
+            }
+        return {
+            "searchCoverage": {
+                "expected": entry.tracked_files,
+                "indexed": indexed,
+                # Greater-than is legitimate (multi-branch content), so this is
+                # a floor check, not equality.
+                "complete": indexed >= entry.tracked_files,
+            }
+        }
+    except Exception as exc:
+        return {"searchCoverage": None, "searchCoverageReason": str(exc)}
 
 
 def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
@@ -235,7 +288,7 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
     except Exception as exc:
         return {"error": str(exc)}
     return {"repo": repo, "indexed": indexed, "status": _registry_status(repo),
-            **_freshness_fields(freshness)}
+            **_freshness_fields(freshness), **_search_coverage_fields(repo)}
 
 
 @mcp.tool(name="searchCode")
@@ -268,6 +321,12 @@ def _zoekt_base_url_or_none() -> str | None:
         return _zoekt().ensure_running()
     except Exception:
         return None
+
+
+def _zoekt_base_url_if_running() -> str | None:
+    """Module-level indirection so `_search_coverage_fields` is testable
+    without a real webserver."""
+    return _zoekt().base_url_if_running()
 
 
 @mcp.tool(name="semanticSearch")
