@@ -17,7 +17,7 @@ uv sync --extra semantic             # + lancedb/sentence-transformers/tree-sitt
 
 uv run pytest                        # all tests
 uv run pytest -m "not integration"   # unit only — no external binaries required
-uv run pytest -m integration         # integration only — runs real scip-python/scip/zoekt-index
+uv run pytest -m integration         # integration only — runs real scip-python/scip/zoekt-git-index
 uv run pytest tests/test_query.py::test_go_to_definition_returns_location   # single test
 
 uv run codeintel index /path/to/repo [--slug name] [--scheme name] [--language name] [--semantic-include path]
@@ -33,7 +33,7 @@ claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run c
 
 Required on `PATH` for anything beyond unit tests: one language indexer per repo
 (`scip-typescript` / `scip-python` / `scip-java` / `scip-swift`), `scip` (for `scip expt-convert`),
-and `zoekt-index` / `zoekt-webserver`. Integration tests are gated on these and skip cleanly if absent.
+and `zoekt-git-index` / `zoekt-webserver`. Integration tests are gated on these and skip cleanly if absent.
 
 ## Architecture
 
