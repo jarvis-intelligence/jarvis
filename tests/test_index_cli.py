@@ -1631,3 +1631,56 @@ def test_bare_name_resolution_against_a_real_index(tmp_path: Path):
 
     # Idempotence: rung 1 returns a full symbol unchanged.
     assert service.resolve_symbol(slug, resolved) == resolved
+
+
+def test_tracked_blob_count_counts_tracked_files(tmp_path: Path):
+    from codeintel.index_cli import _tracked_blob_count
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "b.py").write_text("y = 2\n")
+    _init_git_repo(tmp_path)
+
+    assert _tracked_blob_count(tmp_path) == 2
+
+
+def test_tracked_blob_count_ignores_untracked_files(tmp_path: Path):
+    from codeintel.index_cli import _tracked_blob_count
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+    (tmp_path / "untracked.py").write_text("z = 3\n")
+
+    assert _tracked_blob_count(tmp_path) == 1
+
+
+def test_tracked_blob_count_excludes_submodule_gitlinks(tmp_path: Path):
+    """A submodule is one mode-160000 gitlink entry, not a file. Because
+    zoekt-git-index runs with -submodules=false it never descends into it, so
+    counting the gitlink would make the expectation permanently unreachable."""
+    from codeintel.index_cli import _tracked_blob_count
+
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    (inner / "lib.py").write_text("v = 1\n")
+    _init_git_repo(inner)
+
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    (outer / "a.py").write_text("x = 1\n")
+    _init_git_repo(outer)
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+         str(inner), "inner"],
+        cwd=outer, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "commit", "-q", "-m", "add submodule"], cwd=outer, check=True)
+
+    # a.py + .gitmodules == 2; the `inner` gitlink is excluded.
+    assert _tracked_blob_count(outer) == 2
+
+
+def test_tracked_blob_count_raises_for_non_git_directory(tmp_path: Path):
+    from codeintel.index_cli import NotAGitRepositoryError, _tracked_blob_count
+
+    with pytest.raises(NotAGitRepositoryError):
+        _tracked_blob_count(tmp_path)

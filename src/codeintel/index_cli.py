@@ -257,6 +257,38 @@ def _git_tracked_files(repo_path: Path) -> list[str]:
     return [name for name in result.stdout.split("\0") if name]
 
 
+_GITLINK_MODE = "160000"
+
+
+def _tracked_blob_count(repo_path: Path) -> int:
+    """How many git-tracked blobs exist at HEAD — the number of files
+    `zoekt-git-index` should index, and so the expected search coverage.
+
+    Not built on `_git_tracked_files`: that uses plain `ls-files -z`, which
+    emits paths with no mode, and a submodule gitlink is indistinguishable
+    from a file in that output. `-s` prefixes each entry with
+    `<mode> <sha> <stage>\\t`, letting mode 160000 (gitlink) be dropped —
+    required because `-submodules=false` means zoekt never descends into a
+    submodule, so counting its gitlink would make the expectation unreachable.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "ls-files", "-s", "-z"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise NotAGitRepositoryError(
+            f"{repo_path} is not a git repository (git ls-files -s: {result.stderr.strip()})"
+        )
+    count = 0
+    for entry in result.stdout.split("\0"):
+        if not entry:
+            continue
+        if not entry.startswith(f"{_GITLINK_MODE} "):
+            count += 1
+    return count
+
+
 def _git_head(repo_path: Path) -> str:
     """Current commit SHA.
 
