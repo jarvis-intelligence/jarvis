@@ -32,85 +32,25 @@ CREATE TABLE IF NOT EXISTS repos (
     semantic_indexed_at TEXT,
     semantic_include TEXT,
     language_override TEXT,
-    search_only INTEGER NOT NULL DEFAULT 0
+    search_only INTEGER NOT NULL DEFAULT 0,
+    tracked_files INTEGER
 )
 """
 
 
-def _ensure_scheme_override_column(conn: sqlite3.Connection) -> None:
-    """Idempotent migration for databases created before this column
-    existed. `ALTER TABLE ... ADD COLUMN` on a column that already exists
-    raises `sqlite3.OperationalError` with a "duplicate column name"
-    message -- caught and ignored, since that means a previous run (or a
-    fresh `_SCHEMA` create) already added it. Any other `OperationalError`
-    (e.g. "database is locked" from a concurrent `codeintel watch`
-    reindex) is re-raised rather than silently swallowed -- otherwise a
-    lock timeout during migration would look identical to "column already
-    exists" while actually leaving the column missing."""
+def _ensure_column(conn: sqlite3.Connection, name: str, decl: str) -> None:
+    """Idempotent `ALTER TABLE repos ADD COLUMN` for databases created before
+    `name` existed.
+
+    A "duplicate column name" `OperationalError` means a previous run (or a
+    fresh `_SCHEMA` create) already added it, so it is ignored. Any other
+    `OperationalError` -- notably "database is locked" from a concurrent
+    `codeintel watch` reindex -- is re-raised rather than swallowed: a lock
+    timeout during migration would otherwise look identical to "already
+    exists" while actually leaving the column missing.
+    """
     try:
-        conn.execute("ALTER TABLE repos ADD COLUMN scheme_override TEXT")
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name" not in str(exc):
-            raise
-
-
-def _ensure_semantic_indexed_at_column(conn: sqlite3.Connection) -> None:
-    """Idempotent migration for databases created before this column
-    existed. `ALTER TABLE ... ADD COLUMN` on a column that already exists
-    raises `sqlite3.OperationalError` with a "duplicate column name"
-    message -- caught and ignored, since that means a previous run (or a
-    fresh `_SCHEMA` create) already added it. Any other `OperationalError`
-    (e.g. "database is locked" from a concurrent `codeintel watch`
-    reindex) is re-raised rather than silently swallowed -- otherwise a
-    lock timeout during migration would look identical to "column already
-    exists" while actually leaving the column missing."""
-    try:
-        conn.execute("ALTER TABLE repos ADD COLUMN semantic_indexed_at TEXT")
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name" not in str(exc):
-            raise
-
-
-def _ensure_semantic_include_column(conn: sqlite3.Connection) -> None:
-    """Idempotent migration for databases created before this column
-    existed. Same contract as `_ensure_scheme_override_column`: a
-    "duplicate column name" error means a previous run (or a fresh
-    `_SCHEMA` create) already added it, so it is ignored; any other
-    `OperationalError` (e.g. "database is locked" from a concurrent
-    `codeintel watch` reindex) is re-raised rather than swallowed."""
-    try:
-        conn.execute("ALTER TABLE repos ADD COLUMN semantic_include TEXT")
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name" not in str(exc):
-            raise
-
-
-def _ensure_language_override_column(conn: sqlite3.Connection) -> None:
-    """Idempotent migration for databases created before this column
-    existed. Same contract as `_ensure_scheme_override_column`: a
-    "duplicate column name" error means a previous run (or a fresh
-    `_SCHEMA` create) already added it, so it is ignored; any other
-    `OperationalError` (e.g. "database is locked" from a concurrent
-    `codeintel watch` reindex) is re-raised rather than swallowed."""
-    try:
-        conn.execute("ALTER TABLE repos ADD COLUMN language_override TEXT")
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name" not in str(exc):
-            raise
-
-
-def _ensure_search_only_column(conn: sqlite3.Connection) -> None:
-    """Idempotent migration for databases created before this column existed.
-    Same contract as `_ensure_scheme_override_column`: a "duplicate column
-    name" error means a previous run (or a fresh `_SCHEMA` create) already
-    added it, so it is ignored; any other `OperationalError` (e.g. "database is
-    locked" from a concurrent `codeintel watch` reindex) is re-raised."""
-    try:
-        conn.execute("ALTER TABLE repos ADD COLUMN search_only INTEGER NOT NULL DEFAULT 0")
+        conn.execute(f"ALTER TABLE repos ADD COLUMN {name} {decl}")
         conn.commit()
     except sqlite3.OperationalError as exc:
         if "duplicate column name" not in str(exc):
@@ -141,12 +81,13 @@ class RegisteredRepo:
     semantic_include: tuple[str, ...] = ()
     language_override: str | None = None
     search_only: bool = False
+    tracked_files: int | None = None
 
 
 def _row_to_repo(row: tuple) -> RegisteredRepo:
     (slug, path, language, commit_sha, last_indexed, status,
      scheme_override, semantic_indexed_at, semantic_include, language_override,
-     search_only) = row
+     search_only, tracked_files) = row
     return RegisteredRepo(
         slug=slug,
         path=path,
@@ -159,6 +100,7 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
         semantic_include=_split_include(semantic_include),
         language_override=language_override,
         search_only=bool(search_only),
+        tracked_files=tracked_files,
     )
 
 
@@ -173,11 +115,12 @@ class Registry:
         self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute(_SCHEMA)
         self._conn.commit()
-        _ensure_scheme_override_column(self._conn)
-        _ensure_semantic_indexed_at_column(self._conn)
-        _ensure_semantic_include_column(self._conn)
-        _ensure_language_override_column(self._conn)
-        _ensure_search_only_column(self._conn)
+        _ensure_column(self._conn, "scheme_override", "TEXT")
+        _ensure_column(self._conn, "semantic_indexed_at", "TEXT")
+        _ensure_column(self._conn, "semantic_include", "TEXT")
+        _ensure_column(self._conn, "language_override", "TEXT")
+        _ensure_column(self._conn, "search_only", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(self._conn, "tracked_files", "INTEGER")
 
     def upsert(
         self,
@@ -233,7 +176,7 @@ class Registry:
     def get(self, slug: str) -> RegisteredRepo | None:
         row = self._conn.execute(
             "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, "
-            "semantic_indexed_at, semantic_include, language_override, search_only "
+            "semantic_indexed_at, semantic_include, language_override, search_only, tracked_files "
             "FROM repos WHERE slug = ?",
             (slug,),
         ).fetchone()
@@ -242,10 +185,22 @@ class Registry:
     def list(self) -> list[RegisteredRepo]:
         rows = self._conn.execute(
             "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, "
-            "semantic_indexed_at, semantic_include, language_override, search_only "
+            "semantic_indexed_at, semantic_include, language_override, search_only, tracked_files "
             "FROM repos ORDER BY slug"
         ).fetchall()
         return [_row_to_repo(row) for row in rows]
+
+    def mark_tracked_files(self, slug: str, count: int) -> None:
+        """Record how many git-tracked blobs the last successful index saw.
+
+        Deliberately not a column on `upsert`: a reindex upserts `indexing`
+        before the count is known, and `upsert`'s ON CONFLICT list would then
+        reset it to NULL.
+        """
+        self._conn.execute(
+            "UPDATE repos SET tracked_files = ? WHERE slug = ?", (count, slug)
+        )
+        self._conn.commit()
 
     def forget(self, slug: str) -> bool:
         cursor = self._conn.execute("DELETE FROM repos WHERE slug = ?", (slug,))
