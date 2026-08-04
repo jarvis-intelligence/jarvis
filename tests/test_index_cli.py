@@ -1684,3 +1684,98 @@ def test_tracked_blob_count_raises_for_non_git_directory(tmp_path: Path):
 
     with pytest.raises(NotAGitRepositoryError):
         _tracked_blob_count(tmp_path)
+
+
+def _git_config_value(repo_path: Path, key: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "config", "--get", key],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def test_pin_zoekt_repo_name_sets_the_slug(tmp_path: Path):
+    from codeintel.index_cli import _pin_zoekt_repo_name
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    _pin_zoekt_repo_name(tmp_path, "myslug")
+
+    assert _git_config_value(tmp_path, "zoekt.name") == "myslug"
+
+
+def test_pin_zoekt_repo_name_is_idempotent(tmp_path: Path):
+    from codeintel.index_cli import _pin_zoekt_repo_name
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    _pin_zoekt_repo_name(tmp_path, "first")
+    _pin_zoekt_repo_name(tmp_path, "second")
+
+    assert _git_config_value(tmp_path, "zoekt.name") == "second"
+
+
+def test_pin_zoekt_repo_name_raises_for_non_git_directory(tmp_path: Path):
+    """Must fail loudly: an unpinned name makes zoekt derive one from the
+    origin remote URL, and `r:<slug>` then returns zero hits with no error."""
+    from codeintel.index_cli import IndexingError, _pin_zoekt_repo_name
+
+    with pytest.raises(IndexingError):
+        _pin_zoekt_repo_name(tmp_path, "myslug")
+
+
+def test_unpin_zoekt_repo_name_removes_the_key(tmp_path: Path):
+    from codeintel.index_cli import _pin_zoekt_repo_name, _unpin_zoekt_repo_name
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+    _pin_zoekt_repo_name(tmp_path, "myslug")
+
+    _unpin_zoekt_repo_name(tmp_path)
+
+    assert _git_config_value(tmp_path, "zoekt.name") is None
+
+
+def test_unpin_zoekt_repo_name_tolerates_a_missing_key(tmp_path: Path):
+    """git config --unset exits 5 when the key is absent. Repos indexed
+    before this change have no zoekt.name, and `forget` must still succeed."""
+    from codeintel.index_cli import _unpin_zoekt_repo_name
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    _unpin_zoekt_repo_name(tmp_path)  # must not raise
+
+
+def test_unpin_zoekt_repo_name_tolerates_a_missing_directory(tmp_path: Path):
+    """`forget` must work after the user has deleted the repo from disk."""
+    from codeintel.index_cli import _unpin_zoekt_repo_name
+
+    _unpin_zoekt_repo_name(tmp_path / "gone")  # must not raise
+
+
+def test_forget_unpins_the_zoekt_repo_name(tmp_path: Path, monkeypatch, capsys):
+    import argparse
+
+    from codeintel import config
+    from codeintel.index_cli import _cmd_forget, _pin_zoekt_repo_name
+    from codeintel.registry import Registry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n")
+    _init_git_repo(repo)
+    _pin_zoekt_repo_name(repo, "myslug")
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(data_dir))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("myslug", str(repo), "python", "abc", "indexed")
+    finally:
+        registry.close()
+
+    assert _cmd_forget(argparse.Namespace(slug="myslug")) == 0
+    assert _git_config_value(repo, "zoekt.name") is None

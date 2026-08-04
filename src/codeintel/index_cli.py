@@ -816,6 +816,43 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     ))
 
 
+def _pin_zoekt_repo_name(repo_path: Path, slug: str) -> None:
+    """Pin the Zoekt repository name to `slug` via `git config zoekt.name`.
+
+    `zoekt-git-index` has no `-meta` flag, so this replaces
+    `_write_zoekt_meta`. Its name resolution order is: `zoekt.name` git
+    config, else the `origin` remote URL url-escaped (e.g.
+    `github.com%2Fowner%2Frepo`), else the directory basename. Every real repo
+    has a remote, so without this `searchCode`'s `r:<slug>` filter matches
+    nothing and the tool returns zero hits with no error — a silent wrong
+    answer.
+
+    `-shard_prefix_override` is NOT a substitute: it renames the shard file
+    while leaving the indexed repository name untouched.
+
+    Raises rather than warning: publishing an index whose name cannot be
+    pinned produces exactly the silent failure this exists to prevent.
+    """
+    _run(["git", "-C", str(repo_path), "config", "zoekt.name", slug],
+         cwd=repo_path, step="git config zoekt.name")
+
+
+def _unpin_zoekt_repo_name(repo_path: Path) -> None:
+    """Remove the `zoekt.name` pin, so `forget` leaves no footprint in the
+    user's repo.
+
+    Best-effort by design: `git config --unset` exits 5 when the key is
+    absent (a repo indexed before pinning existed) and non-zero when the
+    directory is gone (the user deleted the repo). Neither should fail a
+    `forget` whose real work — dropping the registry row, index, and shards —
+    has nothing to do with this key.
+    """
+    subprocess.run(
+        ["git", "-C", str(repo_path), "config", "--unset", "zoekt.name"],
+        capture_output=True, text=True, check=False,
+    )
+
+
 def _remove_zoekt_shards(slug: str, root: Path | None = None) -> list[Path]:
     """Delete the Zoekt shards belonging to `slug`.
 
@@ -844,12 +881,15 @@ def _cmd_forget(args: argparse.Namespace) -> int:
         return 1
     registry = Registry(config.data_dir() / "registry.db")
     try:
+        entry = registry.get(slug)
         existed = registry.forget(slug)
     finally:
         registry.close()
     if not existed:
         print(f"error: no such repo: {slug}", file=sys.stderr)
         return 1
+    if entry is not None:
+        _unpin_zoekt_repo_name(Path(entry.path))
     index_dir = config.index_dir(slug)
     if index_dir.exists():
         shutil.rmtree(index_dir)
