@@ -464,16 +464,36 @@ def test_search_coverage_fields_is_null_when_never_recorded(monkeypatch, tmp_pat
 
 def test_search_coverage_fields_never_raises(monkeypatch, tmp_path):
     """A coverage probe failure must not replace a working status response
-    with an error."""
-    from codeintel import server
+    with an error.
+
+    `tracked_files` must be recorded first -- otherwise the function
+    short-circuits at the "no tracked-file count recorded" branch before it
+    ever reaches `_zoekt_base_url_if_running()`, and the test would pass
+    vacuously without exercising the try/except at all. `call_count` makes
+    that structurally impossible: the assertion below fails if the raiser
+    was never invoked.
+    """
+    from codeintel import config, server
+    from codeintel.registry import Registry
 
     monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("myslug", "/repos/mine", "python", "abc", "indexed")
+        registry.mark_tracked_files("myslug", 133)
+    finally:
+        registry.close()
+
+    call_count = 0
 
     def boom() -> str:
+        nonlocal call_count
+        call_count += 1
         raise RuntimeError("kaboom")
 
     monkeypatch.setattr(server, "_zoekt_base_url_if_running", boom)
 
     fields = server._search_coverage_fields("myslug")
 
+    assert call_count == 1, "the raiser was never reached -- test is vacuous"
     assert fields["searchCoverage"] is None
