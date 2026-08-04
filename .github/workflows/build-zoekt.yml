@@ -48,18 +48,22 @@ jobs:
           go mod init zoekt-build
           # Resolve the pinned commit to a module version and fetch it.
           GOFLAGS=-mod=mod go get "github.com/sourcegraph/zoekt@${ZOEKT_COMMIT}"
+          # zoekt-git-index pulls deps zoekt-index does not (automaxprocs,
+          # cloud.google.com/go/profiler). Without this the build fails with
+          # "missing go.sum entry".
+          GOFLAGS=-mod=mod go get "github.com/sourcegraph/zoekt/cmd/zoekt-git-index@${ZOEKT_COMMIT}"
 
           for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
             os=${target%/*}
             arch=${target#*/}
             stage="../dist/stage-${os}-${arch}"
             mkdir -p "$stage"
-            for cmd in zoekt-index zoekt-webserver; do
+            for cmd in zoekt-git-index zoekt-webserver; do
               GOFLAGS=-mod=mod GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
                 go build -trimpath -o "${stage}/${cmd}" \
                 "github.com/sourcegraph/zoekt/cmd/${cmd}"
             done
-            tar -czf "../dist/zoekt-${os}-${arch}.tar.gz" -C "$stage" zoekt-index zoekt-webserver
+            tar -czf "../dist/zoekt-${os}-${arch}.tar.gz" -C "$stage" zoekt-git-index zoekt-webserver
             rm -rf "$stage"
           done
 
@@ -78,11 +82,11 @@ jobs:
           set -eux
           mkdir -p smoke
           tar -xzf dist/zoekt-linux-amd64.tar.gz -C smoke
-          # zoekt-index has no -version flag and `-h` exits non-zero, so capture
+          # zoekt-git-index has no -version flag and `-h` exits non-zero, so capture
           # to a file and grep separately rather than piping -- a piped form
           # would silently depend on pipefail being unset.
-          smoke/zoekt-index -h >index-help.txt 2>&1 || true
-          grep -q "zoekt-index" index-help.txt
+          smoke/zoekt-git-index -h >index-help.txt 2>&1 || true
+          grep -q "zoekt-git-index" index-help.txt
           smoke/zoekt-webserver -version
 
       - name: Publish release
@@ -97,5 +101,5 @@ jobs:
           else
             gh release create "$tag" dist/*.tar.gz dist/*.sha256 \
               --title "zoekt @ ${ZOEKT_COMMIT}" \
-              --notes "zoekt-index and zoekt-webserver cross-compiled from sourcegraph/zoekt@${ZOEKT_COMMIT}. Consumed by setup.sh."
+              --notes "zoekt-git-index and zoekt-webserver cross-compiled from sourcegraph/zoekt@${ZOEKT_COMMIT}. Consumed by setup.sh."
           fi
