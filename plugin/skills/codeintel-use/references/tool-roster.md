@@ -24,8 +24,8 @@ Returns: `{"symbol": ..., "resolvedSymbol"?: ..., "incomingCalls": [...], "outgo
 Single-level super/subtypes for `symbol`. Same `symbol`-resolution behavior as `goToDefinition`. **Returns an `error` on real indexes** — upstream `scip expt-convert` never populates `relationships`. Treat the error as "unavailable", not as "no supertypes".
 
 ### getIndexStatus(repo, repo_path=None) → dict
-Whether `repo` has a published index, plus freshness. Pass `repo_path` (the repo's local git dir) to compare the published commit against `git rev-parse HEAD`.
-Returns: `{"repo": ..., "indexed": bool, "freshness": {...}}`. Without `repo_path`, freshness is reported without a staleness check (never `stale: true` without evidence).
+Whether `repo` has a published index, plus freshness and search coverage. Pass `repo_path` (the repo's local git dir) to compare the published commit against `git rev-parse HEAD`.
+Returns: `{"repo": ..., "indexed": bool, "status": ..., "freshness": {...}, "searchCoverage": {...} | None, "searchCoverageReason": str}`. Without `repo_path`, freshness is reported without a staleness check (never `stale: true` without evidence). `searchCoverage` is `{"expected": int, "indexed": int, "complete": bool}` comparing git-tracked files at last index time against what Zoekt currently holds (catches shards lost after a successful index); when it can't be computed (e.g. zoekt-webserver not running), it's `None` and `searchCoverageReason` explains why.
 
 ### searchCode(query, repo=None) → dict
 Lexical search via an embedded Zoekt index (lazy-started on first call). `repo`, if given, is applied as a Zoekt `r:` filter scoping results to that one indexed repo.

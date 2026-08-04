@@ -377,3 +377,123 @@ def test_unknown_symbol_returns_error_not_empty_references():
     result = server.find_references(REPO, "NoSuchSymbol")
     assert "no symbol named" in result["error"]
     assert "references" not in result
+
+
+def test_search_coverage_fields_reports_complete_when_counts_match(monkeypatch, tmp_path):
+    from codeintel import config, server
+    from codeintel.registry import Registry
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("myslug", "/repos/mine", "python", "abc", "indexed")
+        registry.mark_tracked_files("myslug", 133)
+    finally:
+        registry.close()
+
+    monkeypatch.setattr(server, "_zoekt_base_url_if_running", lambda: "http://x")
+    monkeypatch.setattr(server, "zoekt_repo_documents", lambda url, repo: 133)
+
+    assert server._search_coverage_fields("myslug") == {
+        "searchCoverage": {"expected": 133, "indexed": 133, "complete": True}
+    }
+
+
+def test_search_coverage_fields_reports_incomplete_after_shard_loss(monkeypatch, tmp_path):
+    """The incident: shards deleted after a successful index. Search kept
+    answering with partial results and nothing reported a problem."""
+    from codeintel import config, server
+    from codeintel.registry import Registry
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("myslug", "/repos/mine", "python", "abc", "indexed")
+        registry.mark_tracked_files("myslug", 1307)
+    finally:
+        registry.close()
+
+    monkeypatch.setattr(server, "_zoekt_base_url_if_running", lambda: "http://x")
+    monkeypatch.setattr(server, "zoekt_repo_documents", lambda url, repo: 615)
+
+    fields = server._search_coverage_fields("myslug")
+
+    assert fields["searchCoverage"] == {"expected": 1307, "indexed": 615, "complete": False}
+
+
+def test_search_coverage_fields_is_null_when_webserver_is_down(monkeypatch, tmp_path):
+    from codeintel import config, server
+    from codeintel.registry import Registry
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("myslug", "/repos/mine", "python", "abc", "indexed")
+        registry.mark_tracked_files("myslug", 133)
+    finally:
+        registry.close()
+
+    monkeypatch.setattr(server, "_zoekt_base_url_if_running", lambda: None)
+
+    fields = server._search_coverage_fields("myslug")
+
+    assert fields["searchCoverage"] is None
+    assert "not running" in fields["searchCoverageReason"]
+
+
+def test_search_coverage_fields_is_null_when_never_recorded(monkeypatch, tmp_path):
+    """Repos indexed before tracked_files existed have no expectation to
+    compare against; report unknown rather than guessing."""
+    from codeintel import config, server
+    from codeintel.registry import Registry
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("myslug", "/repos/mine", "python", "abc", "indexed")
+    finally:
+        registry.close()
+
+    monkeypatch.setattr(server, "_zoekt_base_url_if_running", lambda: "http://x")
+
+    fields = server._search_coverage_fields("myslug")
+
+    assert fields["searchCoverage"] is None
+    assert "reindex" in fields["searchCoverageReason"]
+
+
+def test_search_coverage_fields_never_raises(monkeypatch, tmp_path):
+    """A coverage probe failure must not replace a working status response
+    with an error.
+
+    `tracked_files` must be recorded first -- otherwise the function
+    short-circuits at the "no tracked-file count recorded" branch before it
+    ever reaches `_zoekt_base_url_if_running()`, and the test would pass
+    vacuously without exercising the try/except at all. `call_count` makes
+    that structurally impossible: the assertion below fails if the raiser
+    was never invoked.
+    """
+    from codeintel import config, server
+    from codeintel.registry import Registry
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("myslug", "/repos/mine", "python", "abc", "indexed")
+        registry.mark_tracked_files("myslug", 133)
+    finally:
+        registry.close()
+
+    call_count = 0
+
+    def boom() -> str:
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(server, "_zoekt_base_url_if_running", boom)
+
+    fields = server._search_coverage_fields("myslug")
+
+    assert call_count == 1, "the raiser was never reached -- test is vacuous"
+    assert fields["searchCoverage"] is None

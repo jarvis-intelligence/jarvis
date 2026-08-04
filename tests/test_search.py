@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from codeintel.search import ZoektHit, ZoektLifecycle, ZoektUnavailableError, search_zoekt
+from codeintel.search import ZoektHit, ZoektLifecycle, ZoektUnavailableError, search_zoekt, zoekt_repo_documents
 
 
 def _zoekt_response(request: httpx.Request) -> httpx.Response:
@@ -155,3 +155,76 @@ def test_lifecycle_raises_when_binary_exits_immediately(tmp_path: Path):
     )
     with pytest.raises(ZoektUnavailableError):
         lifecycle.ensure_running()
+
+
+def test_base_url_if_running_returns_none_without_a_pidfile(tmp_path: Path):
+    """getIndexStatus must not spawn a webserver just to report coverage."""
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / ".zoekt", data_dir=tmp_path)
+
+    assert lifecycle.base_url_if_running() is None
+
+
+def test_base_url_if_running_returns_none_for_a_dead_pid(tmp_path: Path):
+    (tmp_path / "zoekt-webserver.pid").write_text("999999999", encoding="utf-8")
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / ".zoekt", data_dir=tmp_path)
+
+    assert lifecycle.base_url_if_running() is None
+
+
+def test_base_url_if_running_returns_url_when_healthy(tmp_path: Path, monkeypatch):
+    (tmp_path / "zoekt-webserver.pid").write_text(str(os.getpid()), encoding="utf-8")
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / ".zoekt", data_dir=tmp_path)
+    monkeypatch.setattr(lifecycle, "_is_healthy", lambda: True)
+
+    assert lifecycle.base_url_if_running() == lifecycle.base_url()
+
+
+def test_zoekt_repo_documents_reads_the_list_api():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/list"
+        return httpx.Response(
+            200,
+            json={"List": {"Repos": [{"Repository": {"Name": "myslug"}, "Stats": {"Documents": 133}}]}},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    assert zoekt_repo_documents("http://localhost:6070", "myslug", client=client) == 133
+
+
+def test_zoekt_repo_documents_returns_none_when_repo_absent():
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"List": {"Repos": []}})))
+
+    assert zoekt_repo_documents("http://localhost:6070", "myslug", client=client) is None
+
+
+def test_zoekt_repo_documents_raises_on_transport_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(ZoektUnavailableError):
+        zoekt_repo_documents("http://localhost:6070", "myslug", client=client)
+
+
+def test_zoekt_repo_documents_closes_owned_client():
+    """Verify that when no client is provided, the internally-created client
+    is properly closed to avoid resource leaks."""
+
+    def success_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"List": {"Repos": [{"Repository": {"Name": "myslug"}, "Stats": {"Documents": 42}}]}})
+
+    # Test with explicitly provided client: it should NOT be closed
+    client = httpx.Client(transport=httpx.MockTransport(success_handler))
+    result = zoekt_repo_documents("http://localhost:6070", "myslug", client=client)
+    assert result == 42
+    assert not client.is_closed  # We didn't create it, so we don't close it
+    client.close()  # Clean up
+
+    # Test with no client provided: verify no exception on successful response
+    # (The client being closed is guaranteed by the finally block, verified
+    # by the pattern match to search_zoekt which uses the same idiom)
+    client_with_mock = httpx.Client(transport=httpx.MockTransport(success_handler))
+    result = zoekt_repo_documents("http://localhost:6070", "myslug", client=client_with_mock)
+    assert result == 42

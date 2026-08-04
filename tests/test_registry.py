@@ -4,12 +4,7 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import Mock
 
-from codeintel.registry import (
-    Registry,
-    _ensure_language_override_column,
-    _ensure_scheme_override_column,
-    _ensure_search_only_column,
-)
+from codeintel.registry import Registry
 
 
 def test_upsert_then_get_roundtrips(tmp_path: Path):
@@ -101,35 +96,6 @@ def test_scheme_override_survives_reopen_of_pre_existing_db(tmp_path: Path):
     reopened.close()
 
 
-def test_ensure_scheme_override_column_re_raises_non_duplicate_errors():
-    """Verify that _ensure_scheme_override_column discriminates on error message.
-    It should only swallow "duplicate column name" errors (idempotent), but
-    re-raise other OperationalErrors like "database is locked" so they don't
-    silently hide as "column already exists"."""
-    # Mock connection that raises "database is locked" for ALTER TABLE
-    mock_conn = Mock(spec=sqlite3.Connection)
-    locked_error = sqlite3.OperationalError("database is locked")
-    mock_conn.execute.side_effect = locked_error
-
-    # Verify the error is re-raised, not swallowed
-    try:
-        _ensure_scheme_override_column(mock_conn)
-        assert False, "Expected OperationalError to be re-raised"
-    except sqlite3.OperationalError as exc:
-        assert str(exc) == "database is locked"
-
-
-def test_ensure_scheme_override_column_swallows_duplicate_column_error():
-    """Verify that _ensure_scheme_override_column swallows only
-    "duplicate column name" errors, leaving the migration idempotent."""
-    mock_conn = Mock(spec=sqlite3.Connection)
-    # SQLite's actual error message for duplicate column
-    dup_column_error = sqlite3.OperationalError("duplicate column name: scheme_override")
-    mock_conn.execute.side_effect = dup_column_error
-
-    # Should not raise — error is swallowed
-    _ensure_scheme_override_column(mock_conn)
-    # If we reach here, the test passed (no exception was raised)
 
 
 def test_mark_semantic_indexed_sets_timestamp(tmp_path: Path):
@@ -237,28 +203,6 @@ def test_language_override_column_added_to_preexisting_db(tmp_path: Path):
     reopened.close()
 
 
-def test_ensure_language_override_column_re_raises_non_duplicate_errors():
-    """Only "duplicate column name" is idempotent-safe to swallow. A
-    "database is locked" from a concurrent `codeintel watch` reindex must
-    propagate -- swallowing it would leave the column missing while looking
-    like a successful migration."""
-    mock_conn = Mock(spec=sqlite3.Connection)
-    mock_conn.execute.side_effect = sqlite3.OperationalError("database is locked")
-
-    try:
-        _ensure_language_override_column(mock_conn)
-        assert False, "Expected OperationalError to be re-raised"
-    except sqlite3.OperationalError as exc:
-        assert str(exc) == "database is locked"
-
-
-def test_ensure_language_override_column_swallows_duplicate_column_error():
-    mock_conn = Mock(spec=sqlite3.Connection)
-    mock_conn.execute.side_effect = sqlite3.OperationalError(
-        "duplicate column name: language_override"
-    )
-
-    _ensure_language_override_column(mock_conn)  # must not raise
 
 
 def test_upsert_round_trips_search_only(tmp_path):
@@ -317,25 +261,62 @@ def test_search_only_column_migrates_onto_an_existing_database(tmp_path):
         registry.close()
 
 
-def test_ensure_search_only_column_re_raises_non_duplicate_errors():
-    """Only "duplicate column name" is idempotent-safe to swallow. A
-    "database is locked" from a concurrent `codeintel watch` reindex must
-    propagate -- swallowing it would leave the column missing while looking
-    like a successful migration."""
-    mock_conn = Mock(spec=sqlite3.Connection)
-    mock_conn.execute.side_effect = sqlite3.OperationalError("database is locked")
 
+
+def test_ensure_column_is_idempotent(tmp_path: Path):
+    """Second call must not raise: "duplicate column name" means a previous
+    run (or a fresh _SCHEMA create) already added it."""
+    import sqlite3
+
+    from codeintel.registry import _ensure_column
+
+    conn = sqlite3.connect(tmp_path / "r.db")
+    conn.execute("CREATE TABLE repos (slug TEXT PRIMARY KEY)")
+    _ensure_column(conn, "extra_col", "TEXT")
+    _ensure_column(conn, "extra_col", "TEXT")
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(repos)")}
+    conn.close()
+    assert "extra_col" in cols
+
+
+def test_ensure_column_reraises_non_duplicate_errors(tmp_path: Path):
+    """A lock timeout must not be swallowed as "already exists" -- that
+    would leave the column missing while looking like success."""
+    import sqlite3
+
+    import pytest
+
+    from codeintel.registry import _ensure_column
+
+    conn = sqlite3.connect(tmp_path / "r.db")
+    with pytest.raises(sqlite3.OperationalError):
+        _ensure_column(conn, "c", "TEXT")  # no `repos` table exists
+    conn.close()
+
+
+def test_tracked_files_defaults_to_none_and_round_trips(tmp_path: Path):
+    from codeintel.registry import Registry
+
+    registry = Registry(tmp_path / "registry.db")
     try:
-        _ensure_search_only_column(mock_conn)
-        assert False, "Expected OperationalError to be re-raised"
-    except sqlite3.OperationalError as exc:
-        assert str(exc) == "database is locked"
+        registry.upsert("myslug", "/repos/mine", "python", "abc", "indexed")
+        assert registry.get("myslug").tracked_files is None
+        registry.mark_tracked_files("myslug", 133)
+        assert registry.get("myslug").tracked_files == 133
+    finally:
+        registry.close()
 
 
-def test_ensure_search_only_column_swallows_duplicate_column_error():
-    mock_conn = Mock(spec=sqlite3.Connection)
-    mock_conn.execute.side_effect = sqlite3.OperationalError(
-        "duplicate column name: search_only"
-    )
+def test_mark_tracked_files_survives_a_later_upsert(tmp_path: Path):
+    """upsert's ON CONFLICT list must not clobber tracked_files -- a reindex
+    upserts status before the new count is known."""
+    from codeintel.registry import Registry
 
-    _ensure_search_only_column(mock_conn)  # must not raise
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("myslug", "/repos/mine", "python", "abc", "indexed")
+        registry.mark_tracked_files("myslug", 133)
+        registry.upsert("myslug", "/repos/mine", "python", "def", "indexing")
+        assert registry.get("myslug").tracked_files == 133
+    finally:
+        registry.close()

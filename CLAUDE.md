@@ -17,7 +17,7 @@ uv sync --extra semantic             # + lancedb/sentence-transformers/tree-sitt
 
 uv run pytest                        # all tests
 uv run pytest -m "not integration"   # unit only — no external binaries required
-uv run pytest -m integration         # integration only — runs real scip-python/scip/zoekt-index
+uv run pytest -m integration         # integration only — runs real scip-python/scip/zoekt-git-index
 uv run pytest tests/test_query.py::test_go_to_definition_returns_location   # single test
 
 uv run codeintel index /path/to/repo [--slug name] [--scheme name] [--language name] [--semantic-include path]
@@ -33,7 +33,7 @@ claude mcp add codeintel --scope user -- uv --directory /path/to/codeintel run c
 
 Required on `PATH` for anything beyond unit tests: one language indexer per repo
 (`scip-typescript` / `scip-python` / `scip-java` / `scip-swift`), `scip` (for `scip expt-convert`),
-and `zoekt-index` / `zoekt-webserver`. Integration tests are gated on these and skip cleanly if absent.
+and `zoekt-git-index` / `zoekt-webserver`. Integration tests are gated on these and skip cleanly if absent.
 
 ## Architecture
 
@@ -51,7 +51,8 @@ Three engines sit behind the MCP server, each backed by its own storage:
   resolution has no practical value in Swift repos — it works for Python/TypeScript/Java/Kotlin.
 - **Search** (`search.py`) — `searchCode` via a real `httpx` client to `zoekt-webserver`.
   `ZoektLifecycle` lazily spawns the webserver on first call (pidfile-tracked, killed at exit);
-  never spawn it elsewhere.
+  never spawn it elsewhere. `base_url_if_running()` is the non-spawning variant, used by
+  `getIndexStatus`'s coverage check so a status call never starts a server as a side effect.
 - **Graph** (`graph.py` + `registry.py`) — package dependency graph (`packages`/`edges` in
   `registry.db`) driving `blastRadius` (2-hop BFS). `populate_graph_for_repo()` clears a repo's
   outgoing edges before recomputing — rebuild-not-accumulate, so retracted dependencies don't linger.
@@ -65,10 +66,36 @@ Three engines sit behind the MCP server, each backed by its own storage:
 **Index pipeline** (`index_cli.py`, `index_repo()`): detect language by extension plurality
 **across git-tracked files** (ties broken by fixed priority `.ts→.tsx→.py→.java→.kt→.swift`; one language per repo, no
 multi-language merge) → run the matching indexer → `scip expt-convert` → populate the graph →
-`zoekt-index` → **atomic publish**: write the new versioned `index-<sha>.db`, and only once graph +
+`zoekt-git-index` → **atomic publish**: write the new versioned `index-<sha>.db`, and only once graph +
 Zoekt both succeed, flip the `current` pointer file via `os.replace()`. A query already reading the
 old file is never interrupted; a failure anywhere leaves the previous index live. Never mutate a
 published `index-<sha>.db` in place — queries always open it `mode=ro&immutable=1`.
+
+**Search indexes git, not the filesystem — and indexes HEAD.** `zoekt-git-index` walks the git
+tree and reads blobs by SHA, so gitignored content (`.venv/`, `node_modules/`, vendored
+checkouts) is excluded by construction rather than by a denylist. This is the same
+read-git-not-the-filesystem rule `detect_language()` follows, for the same reason: a filesystem
+walk once made codeintel's own Zoekt index 241 MB / 7353 documents for a repo with 133 tracked
+files. The trade-off is that **search reflects HEAD while SCIP navigation reflects the working
+tree** — uncommitted edits are navigable but not searchable until committed.
+
+`zoekt-git-index` has no `-meta` flag, so the Zoekt repository name is pinned with
+`git config zoekt.name <slug>` (`_pin_zoekt_repo_name`); `forget` unsets it. Without the pin,
+zoekt derives the name from the `origin` remote URL, url-escaped, and `searchCode`'s `r:<slug>`
+filter silently matches nothing. `-shard_prefix_override` is not a substitute — it renames the
+shard file only. Because that key is per-repo, **one slug per repo path** is enforced at index
+time. Caveat: `git config` on a linked worktree writes to the repository's shared config, so
+`zoekt.name` is not actually per-worktree — two slugs indexing two worktrees of the same repo
+can race to set it. The one-slug-per-path check still prevents the common case (one slug, one
+path); this is a narrow edge case that self-heals on the next index.
+
+`<NNNNN>` in `<slug>_v16.<NNNNN>.zoekt` is a **shard ordinal, not a version** — a repo whose
+corpus exceeds `-shard_limit` (100 MiB) is split across several shards, all current. Reindexing
+overwrites shards in place and `zoekt-git-index` deletes its own surplus, so there is nothing to
+garbage-collect; deleting all but the highest-numbered shard destroys most of a large repo's
+index. `getIndexStatus`'s `searchCoverage` compares the `tracked_files` recorded at index time
+against zoekt's live `Documents` precisely so that kind of loss is reported instead of silently
+serving partial results.
 
 **Language detection reads git, not the filesystem:** `detect_language()` counts extensions across
 `git ls-files`, not a `rglob` walk. A walk also counts gitignored scratch directories — vendored

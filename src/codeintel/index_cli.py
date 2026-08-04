@@ -1,5 +1,5 @@
 """`codeintel` CLI: detect language -> run the matching SCIP indexer ->
-`scip expt-convert` -> populate package graph -> zoekt-index -> atomic
+`scip expt-convert` -> populate package graph -> zoekt-git-index -> atomic
 pointer swap -> registry update.
 
 Subcommands: index, list, status, reindex, forget, watch.
@@ -8,6 +8,7 @@ Subcommands: index, list, status, reindex, forget, watch.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -257,6 +258,38 @@ def _git_tracked_files(repo_path: Path) -> list[str]:
     return [name for name in result.stdout.split("\0") if name]
 
 
+_GITLINK_MODE = "160000"
+
+
+def _tracked_blob_count(repo_path: Path) -> int:
+    """How many git-tracked blobs exist at HEAD — the number of files
+    `zoekt-git-index` should index, and so the expected search coverage.
+
+    Not built on `_git_tracked_files`: that uses plain `ls-files -z`, which
+    emits paths with no mode, and a submodule gitlink is indistinguishable
+    from a file in that output. `-s` prefixes each entry with
+    `<mode> <sha> <stage>\\t`, letting mode 160000 (gitlink) be dropped —
+    required because `-submodules=false` means zoekt never descends into a
+    submodule, so counting its gitlink would make the expectation unreachable.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "ls-files", "-s", "-z"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise NotAGitRepositoryError(
+            f"{repo_path} is not a git repository (git ls-files -s: {result.stderr.strip()})"
+        )
+    count = 0
+    for entry in result.stdout.split("\0"):
+        if not entry:
+            continue
+        if not entry.startswith(f"{_GITLINK_MODE} "):
+            count += 1
+    return count
+
+
 def _git_head(repo_path: Path) -> str:
     """Current commit SHA.
 
@@ -289,14 +322,33 @@ def _git_head(repo_path: Path) -> str:
     return result.stdout.strip()
 
 
-def _run(cmd: list[str], *, cwd: Path, step: str, env: dict[str, str] | None = None) -> None:
+def _run(cmd: list[str], *, cwd: Path, step: str,
+         env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """`env`, when given, is merged OVER a copy of `os.environ` rather than
     replacing it — a bare replacement would drop PATH and break the very
-    subprocess lookup that finds the indexer."""
+    subprocess lookup that finds the indexer.
+
+    Returns the completed process so callers can read output on success;
+    `zoekt-git-index` reports its file count on stderr, which the search
+    coverage check parses.
+
+    A missing executable raises `FileNotFoundError`, not a non-zero exit, so
+    it is translated into an `IndexingError` naming `setup.sh` — the same
+    remedy `_scip_version_output` gives. This matters most for
+    `zoekt-git-index`: every install predating the switch has `zoekt-index`
+    instead, and there is deliberately no fallback to it, because falling back
+    would silently reintroduce indexing of gitignored content.
+    """
     merged = {**os.environ, **env} if env else None
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=merged)
+    try:
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=merged)
+    except FileNotFoundError as exc:
+        raise IndexingError(
+            f"{step} failed: {cmd[0]} not found on PATH — run setup.sh"
+        ) from exc
     if result.returncode != 0:
         raise IndexingError(f"{step} failed ({' '.join(cmd)}):\n{result.stdout}\n{result.stderr}")
+    return result
 
 
 def _publish_atomically(target_dir: Path, versioned_name: str, sha: str) -> None:
@@ -368,17 +420,96 @@ def index_has_navigation_data(conn: sqlite3.Connection) -> bool:
     return chunks > 0 and mentions > 0
 
 
-def _write_zoekt_meta(scratch: Path, slug: str) -> Path:
-    """Write the `.meta` file that names the Zoekt shard after `slug`.
+def _zoekt_index_cmd(zoekt_dir: Path, repo_path: Path) -> list[str]:
+    """The `zoekt-git-index` invocation shared by both publish paths.
 
-    Without this, zoekt-index derives the repository name from the indexed
-    directory's basename. `searchCode(repo=<slug>)` builds a Zoekt `r:<slug>`
-    filter, so a slug that differs from the directory name matches nothing
-    and the tool returns zero hits with no error -- a silent wrong answer.
+    `zoekt-git-index`, not `zoekt-index`: it walks the git tree and reads
+    blobs by SHA, so gitignored content — `.venv/`, `node_modules/`,
+    vendored checkouts — is absent by construction rather than by a
+    hand-maintained denylist. This is upstream's recommended tool for local
+    git repos, and the same reasoning `detect_language()` already applies:
+    read git, not the filesystem.
+
+    Consequence: search reflects HEAD, while SCIP navigation reflects the
+    working tree. Uncommitted edits are searchable only after a commit.
+
+    `-incremental=false`: the default (true) skips indexing when the shard is
+    newer than refs, which would refuse to repair an already-published
+    incomplete shard. codeintel's registry owns the when-to-reindex decision.
+
+    `-submodules=false`: submodules are indexed under their own slugs, so
+    including them here would duplicate content across two indexes and make
+    the coverage expectation from `_tracked_blob_count` unreachable.
     """
-    meta_path = scratch / "zoekt.meta.json"
-    meta_path.write_text(json.dumps({"Name": slug}), encoding="utf-8")
-    return meta_path
+    return [
+        "zoekt-git-index",
+        "-index", str(zoekt_dir),
+        "-incremental=false",
+        "-submodules=false",
+        str(repo_path),
+    ]
+
+
+_INDEXED_FILE_COUNT_RE = re.compile(r"attempting to index (\d+) total files")
+
+
+def _parse_indexed_file_count(output: str) -> int | None:
+    """How many files `zoekt-git-index` reported indexing, or None when the
+    line is absent.
+
+    Returns None rather than raising so an upstream log-format change
+    degrades the coverage check to "unknown" instead of failing an otherwise
+    healthy publish. The authoritative post-index count comes from zoekt's
+    own `/api/list` at status time; this is the cheap index-time signal.
+    """
+    match = _INDEXED_FILE_COUNT_RE.search(output)
+    return int(match.group(1)) if match else None
+
+
+def _warn_on_coverage_shortfall(slug: str, expected: int, output: str) -> None:
+    """Warn when the indexer saw fewer files than git tracks.
+
+    Warns rather than failing: legitimate causes exist — zoekt skips files
+    over its 2 MB `-file_limit`, files exceeding `-max_trigram_count`, and
+    binaries. Mirrors how `index_has_navigation_data()` publishes a degraded
+    index with a warning instead of refusing.
+    """
+    indexed = _parse_indexed_file_count(output)
+    if indexed is None or indexed >= expected:
+        return
+    print(
+        f"warning: {slug} indexed {indexed} of {expected} git-tracked files — "
+        "searchCode results will be incomplete. Large files (>2MB) and binaries "
+        "are skipped by design; a larger gap suggests a problem.",
+        file=sys.stderr,
+    )
+
+
+def _sweep_zoekt_tmp_orphans(slug: str, root: Path | None = None) -> list[Path]:
+    """Delete stranded `.tmp` shards for `slug`.
+
+    `zoekt-git-index` writes `<name>.<n>.tmp` and renames on success, so a
+    killed run (Ctrl-C, OOM) strands a temp file that is never usable and was
+    never cleaned up — 545 MB of them accumulated once. A successful index is
+    the natural moment to sweep this repo's leftovers.
+
+    Slug-scoped like `_remove_zoekt_shards`: the `_v` in the glob stops "api"
+    from matching "api-gateway"'s files.
+
+    Runs between a successful `zoekt-git-index` run and `_publish_atomically`,
+    so any failure here must never propagate: an `EACCES`/`EBUSY`/`EPERM` on
+    `unlink()` would otherwise bubble up to `index_repo()`'s outer handler and
+    discard a fully-successful publish over a cleanup-step failure.
+    """
+    zoekt_dir = config.data_dir(root) / ".zoekt"
+    if not zoekt_dir.is_dir():
+        return []
+    removed: list[Path] = []
+    for tmp in sorted(zoekt_dir.glob(f"{slug}_v*.zoekt*.tmp")):
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+            removed.append(tmp)
+    return removed
 
 
 def _resolve_scheme(registry: Registry, slug: str, scheme: str | None) -> str | None:
@@ -515,7 +646,7 @@ def _retire_scip_artifacts(slug: str, root: Path | None) -> None:
 
 
 def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
-                         semantic_include: tuple[str, ...]) -> bool:
+                         semantic_include: tuple[str, ...]) -> tuple[bool, int]:
     """Zoekt + semantic only: no SCIP indexer, no `scip expt-convert`, no graph
     population, and deliberately no `current` pointer. Without a pointer,
     `read_pointer` raises IndexNotFoundError and every navigation tool fails
@@ -527,25 +658,59 @@ def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
     fallback, which can trigger on a repo that indexed fine before (e.g. a
     Kotlin version bump hitting the ABI-mismatch signature on reindex).
 
-    Returns whether the semantic stage succeeded, matching
-    `_run_semantic_stage`'s contract; the caller records the registry row."""
+    Returns whether the semantic stage succeeded (matching
+    `_run_semantic_stage`'s contract) alongside the git-tracked file count;
+    the caller records both on the registry row."""
     _retire_scip_artifacts(slug, root)
-    with tempfile.TemporaryDirectory(prefix="codeintel-index-") as scratch:
-        zoekt_dir = config.data_dir(root) / ".zoekt"
-        zoekt_dir.mkdir(parents=True, exist_ok=True)
-        meta_path = _write_zoekt_meta(Path(scratch), slug)
-        _run(
-            ["zoekt-index", "-index", str(zoekt_dir), "-meta", str(meta_path), str(repo_path)],
-            cwd=repo_path,
-            step="zoekt-index",
-        )
+    _pin_zoekt_repo_name(repo_path, slug)
+    zoekt_dir = config.data_dir(root) / ".zoekt"
+    zoekt_dir.mkdir(parents=True, exist_ok=True)
+    tracked = _tracked_blob_count(repo_path)
+    result = _run(_zoekt_index_cmd(zoekt_dir, repo_path), cwd=repo_path,
+                  step="zoekt-git-index")
+    _warn_on_coverage_shortfall(slug, tracked, result.stderr)
+    _sweep_zoekt_tmp_orphans(slug, root)
     semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
     print(
         f"note: {slug} published search-only — searchCode and semanticSearch work, "
         "navigation tools do not (no SCIP index).",
         file=sys.stderr,
     )
-    return semantic_ok
+    return semantic_ok, tracked
+
+
+def _reject_duplicate_slug_for_path(registry: Registry, slug: str, repo_path: Path) -> None:
+    """One slug per repo path.
+
+    `_pin_zoekt_repo_name` re-pins `zoekt.name` before every single index run,
+    so two slugs indexing the same path don't actually corrupt each other's
+    shard name — each stays correctly pinned at the moment it runs. The rule
+    exists for three other reasons instead: (a) duplicate disk usage from
+    indexing near-identical content twice under two slugs, (b) ambiguity
+    about which slug is "the" search index for that path, and (c) on a
+    linked worktree, `git config` writes to the repo's *shared* config
+    (see CLAUDE.md's `zoekt.name` caveat), so two slugs on two worktrees of
+    the same repo could otherwise race to set it — this per-path check
+    prevents the common single-worktree case.
+
+    Compares resolved paths because rows written before this check existed
+    may hold unresolved ones. Same slug at the same path is the normal
+    reindex/watch case and passes.
+    """
+    for existing in registry.list():
+        if existing.slug == slug:
+            continue
+        try:
+            same = Path(existing.path).resolve() == repo_path
+        except OSError:
+            # A registered path that no longer exists cannot collide.
+            continue
+        if same:
+            raise IndexingError(
+                f"{repo_path} is already indexed as {existing.slug!r}. "
+                f"One slug per repo — run `codeintel forget {existing.slug}` first, "
+                f"or reindex that slug instead."
+            )
 
 
 def index_repo(
@@ -566,7 +731,7 @@ def index_repo(
     still records the effective language, so `list`/`status` show what was
     actually indexed.
 
-    `zoekt-index` runs BEFORE the pointer swap: if it fails, no repo was
+    `zoekt-git-index` runs BEFORE the pointer swap: if it fails, no repo was
     ever left half-published — the previous version (if any) is still the
     live `current` pointer, matching the `failed` status. Only once both
     the SCIP index and the Zoekt shard are ready does `_publish_atomically`
@@ -578,6 +743,11 @@ def index_repo(
     check_scip_version()
 
     registry = Registry(config.data_dir(root) / "registry.db")
+    try:
+        _reject_duplicate_slug_for_path(registry, slug, repo_path)
+    except Exception:
+        registry.close()
+        raise
     # Resolved before language detection (not after, alongside scheme/
     # semantic_include) because the except branch below reads it: a
     # `codeintel reindex`/`watch` of a persisted search-only repo never
@@ -611,10 +781,11 @@ def index_repo(
                         scheme_override=scheme, semantic_include=semantic_include,
                         language_override=language_override, search_only=True)
         try:
-            semantic_ok = _publish_search_only(repo_path, slug, root, semantic_include)
+            semantic_ok, tracked = _publish_search_only(repo_path, slug, root, semantic_include)
             registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
                             scheme_override=scheme, semantic_include=semantic_include,
                             language_override=language_override, search_only=True)
+            registry.mark_tracked_files(slug, tracked)
             if semantic_ok:
                 registry.mark_semantic_indexed(slug)
         except Exception as exc:
@@ -648,10 +819,11 @@ def index_repo(
                     "will not repeat the build.",
                     file=sys.stderr,
                 )
-                semantic_ok = _publish_search_only(repo_path, slug, root, semantic_include)
+                semantic_ok, tracked = _publish_search_only(repo_path, slug, root, semantic_include)
                 registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
                                 scheme_override=scheme, semantic_include=semantic_include,
                                 language_override=language_override, search_only=True)
+                registry.mark_tracked_files(slug, tracked)
                 if semantic_ok:
                     registry.mark_semantic_indexed(slug)
                 return slug
@@ -677,12 +849,12 @@ def index_repo(
 
             zoekt_dir = config.data_dir(root) / ".zoekt"
             zoekt_dir.mkdir(parents=True, exist_ok=True)
-            meta_path = _write_zoekt_meta(Path(scratch), slug)
-            _run(
-                ["zoekt-index", "-index", str(zoekt_dir), "-meta", str(meta_path), str(repo_path)],
-                cwd=repo_path,
-                step="zoekt-index",
-            )
+            _pin_zoekt_repo_name(repo_path, slug)
+            tracked = _tracked_blob_count(repo_path)
+            zoekt_result = _run(_zoekt_index_cmd(zoekt_dir, repo_path), cwd=repo_path,
+                                step="zoekt-git-index")
+            _warn_on_coverage_shortfall(slug, tracked, zoekt_result.stderr)
+            _sweep_zoekt_tmp_orphans(slug, root)
 
             semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
 
@@ -698,6 +870,7 @@ def index_repo(
         final_status = "indexed" if has_nav else PARTIAL_STATUS
         registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme,
                         semantic_include=semantic_include, language_override=language_override)
+        registry.mark_tracked_files(slug, tracked)
         if semantic_ok:
             registry.mark_semantic_indexed(slug)
         if not has_nav:
@@ -784,6 +957,43 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     ))
 
 
+def _pin_zoekt_repo_name(repo_path: Path, slug: str) -> None:
+    """Pin the Zoekt repository name to `slug` via `git config zoekt.name`.
+
+    `zoekt-git-index` has no `-meta` flag, so this replaces
+    `_write_zoekt_meta`. Its name resolution order is: `zoekt.name` git
+    config, else the `origin` remote URL url-escaped (e.g.
+    `github.com%2Fowner%2Frepo`), else the directory basename. Every real repo
+    has a remote, so without this `searchCode`'s `r:<slug>` filter matches
+    nothing and the tool returns zero hits with no error — a silent wrong
+    answer.
+
+    `-shard_prefix_override` is NOT a substitute: it renames the shard file
+    while leaving the indexed repository name untouched.
+
+    Raises rather than warning: publishing an index whose name cannot be
+    pinned produces exactly the silent failure this exists to prevent.
+    """
+    _run(["git", "-C", str(repo_path), "config", "zoekt.name", slug],
+         cwd=repo_path, step="git config zoekt.name")
+
+
+def _unpin_zoekt_repo_name(repo_path: Path) -> None:
+    """Remove the `zoekt.name` pin, so `forget` leaves no footprint in the
+    user's repo.
+
+    Best-effort by design: `git config --unset` exits 5 when the key is
+    absent (a repo indexed before pinning existed) and non-zero when the
+    directory is gone (the user deleted the repo). Neither should fail a
+    `forget` whose real work — dropping the registry row, index, and shards —
+    has nothing to do with this key.
+    """
+    subprocess.run(
+        ["git", "-C", str(repo_path), "config", "--unset", "zoekt.name"],
+        capture_output=True, text=True, check=False,
+    )
+
+
 def _remove_zoekt_shards(slug: str, root: Path | None = None) -> list[Path]:
     """Delete the Zoekt shards belonging to `slug`.
 
@@ -812,12 +1022,15 @@ def _cmd_forget(args: argparse.Namespace) -> int:
         return 1
     registry = Registry(config.data_dir() / "registry.db")
     try:
+        entry = registry.get(slug)
         existed = registry.forget(slug)
     finally:
         registry.close()
     if not existed:
         print(f"error: no such repo: {slug}", file=sys.stderr)
         return 1
+    if entry is not None:
+        _unpin_zoekt_repo_name(Path(entry.path))
     index_dir = config.index_dir(slug)
     if index_dir.exists():
         shutil.rmtree(index_dir)

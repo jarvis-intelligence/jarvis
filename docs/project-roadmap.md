@@ -364,13 +364,15 @@ Currently supported:
 
 ### Garbage Collection for Old Indexes
 
-Currently: All old `index-<sha>.db` files are kept on disk indefinitely.
+Currently: `_publish_atomically` already deletes the superseded `index-<sha>.db` and its metadata
+on every pointer flip. Zoekt shards are overwritten in place by `zoekt-git-index`, which also
+removes its own surplus shards, and stranded `.tmp` files are swept after each successful index.
+Since indexing moved to the git tree, a shard holds only tracked source, so there is no
+accumulation to collect.
 
-**Improvement:** A `codeintel gc` command could:
-- Delete indexes older than N days or beyond M versions per repo
-- Free up disk space
-
-**Status:** Not planned; disk is cheap for single-user tool. Add if users report bloat.
+**Status:** Not planned, and no longer needed for disk reasons. A `codeintel gc` command would
+have nothing to reclaim. Note that "keep only the newest shard" is actively harmful: `<NNNNN>` is
+a shard ordinal, not a version.
 
 ---
 

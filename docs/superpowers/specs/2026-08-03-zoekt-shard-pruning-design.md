@@ -1,7 +1,12 @@
 # Zoekt Shard Pruning on Publish
 
 **Date:** 2026-08-03
-**Status:** Approved (design)
+**Status:** SUPERSEDED — rejected, do not implement. Its premise is wrong:
+`NNNNN` is a shard ordinal, not a version counter, so keeping only the highest
+deletes most of a multi-shard repo. See
+`plans/reports/spec-verification-0803-1134-zoekt-shard-pruning-report.md` for the
+verification, and `2026-08-03-zoekt-indexing-input-contract-design.md` for the
+replacement design.
 **Scope:** `src/codeintel/index_cli.py`, `tests/test_index_cli.py`, `docs/project-roadmap.md`
 
 ## Problem

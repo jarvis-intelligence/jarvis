@@ -577,7 +577,7 @@ def test_zoekt_pin_matches_committed_file():
 def test_install_zoekt_skips_when_both_binaries_present(tmp_path):
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
-    for name in ("zoekt-index", "zoekt-webserver"):
+    for name in ("zoekt-git-index", "zoekt-webserver"):
         stub = fake_bin / name
         stub.write_text("#!/bin/sh\ntrue\n")
         stub.chmod(0o755)
@@ -594,12 +594,12 @@ def test_install_zoekt_extracts_both_binaries(tmp_path):
     """Verify both members land, using a local tarball over file://."""
     stage = tmp_path / "stage"
     stage.mkdir()
-    for name in ("zoekt-index", "zoekt-webserver"):
+    for name in ("zoekt-git-index", "zoekt-webserver"):
         p = stage / name
         p.write_text("#!/bin/sh\ntrue\n")
     tar_path = tmp_path / "zoekt-darwin-arm64.tar.gz"
     with tarfile.open(tar_path, "w:gz") as tf:
-        for name in ("zoekt-index", "zoekt-webserver"):
+        for name in ("zoekt-git-index", "zoekt-webserver"):
             tf.add(stage / name, arcname=name)
     sha_path = tmp_path / "zoekt-darwin-arm64.tar.gz.sha256"
     digest = hashlib.sha256(tar_path.read_bytes()).hexdigest()
@@ -615,9 +615,9 @@ def test_install_zoekt_extracts_both_binaries(tmp_path):
         },
     )
     assert result.returncode == 0, result.stderr
-    assert (bin_path / "zoekt-index").is_file()
+    assert (bin_path / "zoekt-git-index").is_file()
     assert (bin_path / "zoekt-webserver").is_file()
-    assert (bin_path / "zoekt-index").stat().st_mode & 0o111
+    assert (bin_path / "zoekt-git-index").stat().st_mode & 0o111
 
 
 # ------------------------------------------------------ scip-swift installer ----

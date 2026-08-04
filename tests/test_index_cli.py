@@ -21,13 +21,20 @@ FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_py_repo"
 SWIFT_FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_swift_repo"
 JAVA_FIXTURE_REPO = Path(__file__).parent / "fixtures" / "mini_java_repo"
 
-_REQUIRED_BINARIES = ["scip-python", "scip", "zoekt-index"]
+_REQUIRED_BINARIES = ["scip-python", "scip", "zoekt-git-index"]
 _missing = [b for b in _REQUIRED_BINARIES if shutil.which(b) is None]
 
-_SWIFT_REQUIRED_BINARIES = ["scip-swift", "scip", "zoekt-index"]
+_SWIFT_REQUIRED_BINARIES = ["scip-swift", "scip", "zoekt-git-index"]
 _missing_swift = [b for b in _SWIFT_REQUIRED_BINARIES if shutil.which(b) is None]
 
-_missing_java = [b for b in ("scip-java", "scip", "zoekt-index") if shutil.which(b) is None]
+_missing_java = [b for b in ("scip-java", "scip", "zoekt-git-index") if shutil.which(b) is None]
+
+
+def _fake_completed_process(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """A stand-in for `_run`'s real return value in tests that mock it out --
+    `_publish_search_only`/`index_repo` read `.stderr` off it for the
+    coverage-shortfall check, so a bare `None` return no longer suffices."""
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
 
 def _init_git_repo(path: Path) -> None:
@@ -302,6 +309,71 @@ def test_index_repo_rejects_dotdot_slug_before_touching_disk(tmp_path: Path):
     assert not (tmp_path / "data").exists()
 
 
+def test_index_repo_rejects_a_second_slug_for_the_same_path(tmp_path: Path, monkeypatch):
+    """zoekt.name is one value per repo, so a second slug for one path would
+    overwrite the first's name and silently break `r:<first-slug>`."""
+    from codeintel import config
+    from codeintel.index_cli import IndexingError, index_repo
+    from codeintel.registry import Registry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n")
+    _init_git_repo(repo)
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("first", str(repo.resolve()), "python", "abc", "indexed")
+    finally:
+        registry.close()
+
+    with pytest.raises(IndexingError, match="already indexed as 'first'"):
+        index_repo(repo, slug="second")
+
+
+def test_index_repo_allows_reindexing_the_same_slug(tmp_path: Path, monkeypatch):
+    """The normal reindex/watch path: same slug, same path, must not trip."""
+    from codeintel import config
+    from codeintel.index_cli import _reject_duplicate_slug_for_path
+    from codeintel.registry import Registry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n")
+    _init_git_repo(repo)
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("same", str(repo.resolve()), "python", "abc", "indexed")
+        _reject_duplicate_slug_for_path(registry, "same", repo.resolve())  # must not raise
+    finally:
+        registry.close()
+
+
+def test_reject_duplicate_slug_compares_resolved_paths(tmp_path: Path, monkeypatch):
+    """Rows written before this change may hold unresolved paths; a trailing
+    "/." or symlinked parent must still be recognised as the same repo."""
+    from codeintel import config
+    from codeintel.index_cli import IndexingError, _reject_duplicate_slug_for_path
+    from codeintel.registry import Registry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n")
+    _init_git_repo(repo)
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path / "data"))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("first", f"{repo}/.", "python", "abc", "indexed")
+        with pytest.raises(IndexingError, match="already indexed as 'first'"):
+            _reject_duplicate_slug_for_path(registry, "second", repo.resolve())
+    finally:
+        registry.close()
+
+
 def test_java_indexer_env_disables_gradle_parallelism(monkeypatch):
     from codeintel.index_cli import _java_indexer_env
 
@@ -376,12 +448,15 @@ def test_index_repo_end_to_end_atomic_swap_under_open_reader(tmp_path: Path):
     data_root = tmp_path / "data"
     slug = index_repo(repo_dir, root=data_root)
 
+    from codeintel.index_cli import _tracked_blob_count
+
     registry = Registry(data_root / "registry.db")
     try:
         entry = registry.get(slug)
         assert entry is not None
         assert entry.status == "indexed"
         assert entry.commit_sha is not None
+        assert entry.tracked_files == _tracked_blob_count(repo_dir)
     finally:
         registry.close()
 
@@ -403,7 +478,7 @@ def test_index_repo_end_to_end_atomic_swap_under_open_reader(tmp_path: Path):
     reader.close()
 
     zoekt_shards = list((data_root / ".zoekt").glob("*.zoekt"))
-    assert zoekt_shards, "zoekt-index should have written at least one shard"
+    assert zoekt_shards, "zoekt-git-index should have written at least one shard"
 
 
 @pytest.mark.integration
@@ -583,14 +658,47 @@ def test_check_scip_version_tolerates_unparseable(monkeypatch):
     cli.check_scip_version()  # must not raise
 
 
-def test_write_zoekt_meta_contains_slug(tmp_path: Path):
-    import json as _json
+def test_zoekt_index_cmd_uses_git_index_with_pinned_flags(tmp_path: Path):
+    """-incremental=false because the default would refuse to repair an
+    already-published incomplete shard. -submodules=false because submodules
+    are indexed as their own slugs, and including them here would both
+    duplicate content and make the coverage expectation unreachable."""
+    from codeintel.index_cli import _zoekt_index_cmd
 
-    from codeintel.index_cli import _write_zoekt_meta
+    cmd = _zoekt_index_cmd(tmp_path / ".zoekt", tmp_path / "repo")
 
-    meta_path = _write_zoekt_meta(tmp_path, "my-slug")
-    assert meta_path.is_file()
-    assert _json.loads(meta_path.read_text())["Name"] == "my-slug"
+    assert cmd[0] == "zoekt-git-index"
+    assert "-incremental=false" in cmd
+    assert "-submodules=false" in cmd
+    assert "-meta" not in cmd, "zoekt-git-index has no -meta flag"
+    assert cmd[-1] == str(tmp_path / "repo")
+
+
+def test_write_zoekt_meta_is_gone():
+    """Replaced by _pin_zoekt_repo_name — zoekt-git-index takes no -meta."""
+    import codeintel.index_cli as index_cli
+
+    assert not hasattr(index_cli, "_write_zoekt_meta")
+
+
+def test_run_returns_the_completed_process(tmp_path: Path):
+    """Coverage parsing needs the indexer's stderr, which _run previously
+    discarded on success."""
+    from codeintel.index_cli import _run
+
+    result = _run(["echo", "hello"], cwd=tmp_path, step="echo")
+
+    assert result.stdout.strip() == "hello"
+
+
+def test_run_turns_a_missing_binary_into_a_setup_remedy(tmp_path: Path):
+    """A missing binary raised a bare FileNotFoundError, which says nothing
+    about how to fix it. Matters most for the zoekt-index -> zoekt-git-index
+    rename: existing installs must re-run setup.sh to get the new binary."""
+    from codeintel.index_cli import IndexingError, _run
+
+    with pytest.raises(IndexingError, match="setup.sh"):
+        _run(["definitely-not-a-real-binary"], cwd=tmp_path, step="fake step")
 
 
 @pytest.mark.integration
@@ -1194,8 +1302,8 @@ def test_search_only_publishes_zoekt_without_a_scip_pointer(tmp_path: Path, monk
 
     monkeypatch.setattr("codeintel.index_cli.detect_language", lambda p: ("python", ["nope"]))
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None
-                        if cmd[0] == "zoekt-index" else _boom())
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd)
+                        if cmd[0] in ("zoekt-git-index", "git") else _boom())
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage",
                         lambda *a, **k: False)
 
@@ -1239,7 +1347,7 @@ def test_search_only_tolerates_a_repo_with_no_indexable_language(tmp_path: Path,
     data_root = tmp_path / "data"
 
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None)
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd))
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
 
     slug = index_repo(repo_dir, root=data_root, search_only=True)
@@ -1273,7 +1381,7 @@ def test_search_only_reindex_reuses_persisted_flag_for_an_unknown_language_repo(
     data_root = tmp_path / "data"
 
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None)
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd))
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
 
     # First run: explicit --search-only, establishing the persisted row with
@@ -1348,8 +1456,8 @@ def test_search_only_publish_retires_a_previously_published_scip_index(tmp_path:
 
     monkeypatch.setattr("codeintel.index_cli.detect_language", lambda p: ("java", ["nope"]))
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: None
-                        if cmd[0] == "zoekt-index" else (_ for _ in ()).throw(
+    monkeypatch.setattr("codeintel.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd)
+                        if cmd[0] in ("zoekt-git-index", "git") else (_ for _ in ()).throw(
                             AssertionError("the SCIP indexer must not run in search-only mode")))
     monkeypatch.setattr("codeintel.index_cli._run_semantic_stage", lambda *a, **k: False)
 
@@ -1506,11 +1614,11 @@ def test_indexer_failure_with_known_signature_publishes_search_only(tmp_path: Pa
 
     def _fake_run(cmd, *, cwd, step, env=None):
         # " index" (leading space) matches only the indexer step (e.g.
-        # "scip-python index"), not the later "zoekt-index" step that
+        # "scip-python index"), not the later "zoekt-git-index" step that
         # _publish_search_only must still be allowed to run for real.
         if step.endswith(" index"):
             raise IndexingError("error: No SCIP shards found. scip-java cannot index this")
-        return None
+        return _fake_completed_process(cmd)
 
     monkeypatch.setattr("codeintel.index_cli.check_scip_version", lambda: None)
     monkeypatch.setattr("codeintel.index_cli._run", _fake_run)
@@ -1539,7 +1647,7 @@ def test_indexer_failure_without_known_signature_still_fails(tmp_path: Path, mon
 
     def _fake_run(cmd, *, cwd, step, env=None):
         # " index" (leading space) matches only the indexer step (e.g.
-        # "scip-python index"), not the later "zoekt-index" step that
+        # "scip-python index"), not the later "zoekt-git-index" step that
         # _publish_search_only must still be allowed to run for real.
         if step.endswith(" index"):
             raise IndexingError("error: could not resolve dependency com.example:thing:1.0")
@@ -1631,3 +1739,367 @@ def test_bare_name_resolution_against_a_real_index(tmp_path: Path):
 
     # Idempotence: rung 1 returns a full symbol unchanged.
     assert service.resolve_symbol(slug, resolved) == resolved
+
+
+def test_tracked_blob_count_counts_tracked_files(tmp_path: Path):
+    from codeintel.index_cli import _tracked_blob_count
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "b.py").write_text("y = 2\n")
+    _init_git_repo(tmp_path)
+
+    assert _tracked_blob_count(tmp_path) == 2
+
+
+def test_tracked_blob_count_ignores_untracked_files(tmp_path: Path):
+    from codeintel.index_cli import _tracked_blob_count
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+    (tmp_path / "untracked.py").write_text("z = 3\n")
+
+    assert _tracked_blob_count(tmp_path) == 1
+
+
+def test_tracked_blob_count_excludes_submodule_gitlinks(tmp_path: Path):
+    """A submodule is one mode-160000 gitlink entry, not a file. Because
+    zoekt-git-index runs with -submodules=false it never descends into it, so
+    counting the gitlink would make the expectation permanently unreachable."""
+    from codeintel.index_cli import _tracked_blob_count
+
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    (inner / "lib.py").write_text("v = 1\n")
+    _init_git_repo(inner)
+
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    (outer / "a.py").write_text("x = 1\n")
+    _init_git_repo(outer)
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+         str(inner), "inner"],
+        cwd=outer, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "commit", "-q", "-m", "add submodule"], cwd=outer, check=True)
+
+    # a.py + .gitmodules == 2; the `inner` gitlink is excluded.
+    assert _tracked_blob_count(outer) == 2
+
+
+def test_tracked_blob_count_raises_for_non_git_directory(tmp_path: Path):
+    from codeintel.index_cli import NotAGitRepositoryError, _tracked_blob_count
+
+    with pytest.raises(NotAGitRepositoryError):
+        _tracked_blob_count(tmp_path)
+
+
+def _git_config_value(repo_path: Path, key: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "config", "--get", key],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def test_pin_zoekt_repo_name_sets_the_slug(tmp_path: Path):
+    from codeintel.index_cli import _pin_zoekt_repo_name
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    _pin_zoekt_repo_name(tmp_path, "myslug")
+
+    assert _git_config_value(tmp_path, "zoekt.name") == "myslug"
+
+
+def test_pin_zoekt_repo_name_is_idempotent(tmp_path: Path):
+    from codeintel.index_cli import _pin_zoekt_repo_name
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    _pin_zoekt_repo_name(tmp_path, "first")
+    _pin_zoekt_repo_name(tmp_path, "second")
+
+    assert _git_config_value(tmp_path, "zoekt.name") == "second"
+
+
+def test_pin_zoekt_repo_name_raises_for_non_git_directory(tmp_path: Path):
+    """Must fail loudly: an unpinned name makes zoekt derive one from the
+    origin remote URL, and `r:<slug>` then returns zero hits with no error."""
+    from codeintel.index_cli import IndexingError, _pin_zoekt_repo_name
+
+    with pytest.raises(IndexingError):
+        _pin_zoekt_repo_name(tmp_path, "myslug")
+
+
+def test_unpin_zoekt_repo_name_removes_the_key(tmp_path: Path):
+    from codeintel.index_cli import _pin_zoekt_repo_name, _unpin_zoekt_repo_name
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+    _pin_zoekt_repo_name(tmp_path, "myslug")
+
+    _unpin_zoekt_repo_name(tmp_path)
+
+    assert _git_config_value(tmp_path, "zoekt.name") is None
+
+
+def test_unpin_zoekt_repo_name_tolerates_a_missing_key(tmp_path: Path):
+    """git config --unset exits 5 when the key is absent. Repos indexed
+    before this change have no zoekt.name, and `forget` must still succeed."""
+    from codeintel.index_cli import _unpin_zoekt_repo_name
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    _unpin_zoekt_repo_name(tmp_path)  # must not raise
+
+
+def test_unpin_zoekt_repo_name_tolerates_a_missing_directory(tmp_path: Path):
+    """`forget` must work after the user has deleted the repo from disk."""
+    from codeintel.index_cli import _unpin_zoekt_repo_name
+
+    _unpin_zoekt_repo_name(tmp_path / "gone")  # must not raise
+
+
+def test_forget_unpins_the_zoekt_repo_name(tmp_path: Path, monkeypatch, capsys):
+    import argparse
+
+    from codeintel import config
+    from codeintel.index_cli import _cmd_forget, _pin_zoekt_repo_name
+    from codeintel.registry import Registry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n")
+    _init_git_repo(repo)
+    _pin_zoekt_repo_name(repo, "myslug")
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(data_dir))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("myslug", str(repo), "python", "abc", "indexed")
+    finally:
+        registry.close()
+
+    assert _cmd_forget(argparse.Namespace(slug="myslug")) == 0
+    assert _git_config_value(repo, "zoekt.name") is None
+
+
+def test_parse_indexed_file_count_reads_the_indexer_log():
+    from codeintel.index_cli import _parse_indexed_file_count
+
+    output = (
+        "2026/08/03 22:26:52 attempting to index 133 total files "
+        "(0 via cat-file, 133 via go-git)\n"
+        "2026/08/03 22:26:53 finished shard /x/codeintel_v16.00000.zoekt: "
+        "6408345 index bytes (overhead 3.2), 133 files processed\n"
+    )
+
+    assert _parse_indexed_file_count(output) == 133
+
+
+def test_parse_indexed_file_count_returns_none_on_unknown_format():
+    """An upstream log change must degrade to "unknown", never fail a publish."""
+    from codeintel.index_cli import _parse_indexed_file_count
+
+    assert _parse_indexed_file_count("nothing recognisable here") is None
+
+
+def test_warn_on_coverage_shortfall_warns(capsys):
+    from codeintel.index_cli import _warn_on_coverage_shortfall
+
+    _warn_on_coverage_shortfall("myslug", 133, "attempting to index 100 total files")
+
+    assert "myslug" in capsys.readouterr().err
+
+
+def test_warn_on_coverage_shortfall_is_quiet_when_complete(capsys):
+    from codeintel.index_cli import _warn_on_coverage_shortfall
+
+    _warn_on_coverage_shortfall("myslug", 133, "attempting to index 133 total files")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_on_coverage_shortfall_is_quiet_when_unparseable(capsys):
+    from codeintel.index_cli import _warn_on_coverage_shortfall
+
+    _warn_on_coverage_shortfall("myslug", 133, "unrecognised")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_sweep_zoekt_tmp_orphans_removes_only_this_slugs_temp_files(tmp_path: Path):
+    """A killed zoekt run leaves a .tmp that is never usable and never
+    cleaned up; 545 MB of them accumulated once."""
+    from codeintel.index_cli import _sweep_zoekt_tmp_orphans
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir(parents=True)
+    (zoekt_dir / "myslug_v16.00000.zoekt").write_bytes(b"x")
+    (zoekt_dir / "myslug_v16.00001.zoekt.12345.tmp").write_bytes(b"x")
+    (zoekt_dir / "otherslug_v16.00000.zoekt.99.tmp").write_bytes(b"x")
+
+    removed = _sweep_zoekt_tmp_orphans("myslug", root=tmp_path)
+
+    assert len(removed) == 1
+    assert (zoekt_dir / "myslug_v16.00000.zoekt").exists(), "must not touch real shards"
+    assert not (zoekt_dir / "myslug_v16.00001.zoekt.12345.tmp").exists()
+    assert (zoekt_dir / "otherslug_v16.00000.zoekt.99.tmp").exists(), "must not touch other repos"
+
+
+def test_sweep_zoekt_tmp_orphans_is_safe_when_absent(tmp_path: Path):
+    from codeintel.index_cli import _sweep_zoekt_tmp_orphans
+
+    assert _sweep_zoekt_tmp_orphans("nothing-here", root=tmp_path) == []
+
+
+def test_sweep_zoekt_tmp_orphans_survives_unlink_errors(tmp_path: Path, monkeypatch):
+    """The sweep runs between a successful zoekt-git-index run and the
+    atomic publish -- an EACCES/EBUSY/EPERM on unlink() must never
+    propagate and discard an otherwise-successful publish."""
+    from codeintel.index_cli import _sweep_zoekt_tmp_orphans
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir(parents=True)
+    (zoekt_dir / "myslug_v16.00000.zoekt.tmp").write_bytes(b"x")
+
+    def _raise_permission_error(self: Path) -> None:
+        raise PermissionError("no")
+
+    monkeypatch.setattr(Path, "unlink", _raise_permission_error)
+
+    removed = _sweep_zoekt_tmp_orphans("myslug", root=tmp_path)
+
+    assert removed == []
+    assert (zoekt_dir / "myslug_v16.00000.zoekt.tmp").exists(), "unremovable file must be left in place"
+
+
+@pytest.mark.integration
+def test_zoekt_git_index_excludes_gitignored_content(tmp_path: Path, monkeypatch):
+    """The whole point: gitignored junk is absent by construction, with no
+    denylist to maintain.
+
+    The tracked-file count and the indexer's own log line are real signals,
+    but neither directly proves the junk is unreachable via search (or that
+    the tracked content is findable) -- so this also spins up a real
+    zoekt-webserver and queries it, the same way
+    test_get_index_status_reports_incomplete_after_a_shard_is_deleted does.
+
+    Also covers the healthy/complete-coverage case of `_search_coverage_fields`
+    -- the shard-deletion test below only covers the incomplete case.
+    """
+    if shutil.which("zoekt-git-index") is None:
+        pytest.skip("zoekt-git-index not on PATH")
+    if shutil.which("zoekt-webserver") is None:
+        pytest.skip("zoekt-webserver not on PATH")
+
+    from codeintel import config, server
+    from codeintel.index_cli import (
+        _pin_zoekt_repo_name, _tracked_blob_count, _zoekt_index_cmd,
+    )
+    from codeintel.registry import Registry
+    from codeintel.search import ZoektLifecycle, search_zoekt
+
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "junkdir").mkdir()
+    (repo / ".gitignore").write_text("junkdir/\n")
+    (repo / "src" / "a.py").write_text("sourcetoken_alpha = 1\n")
+    (repo / "junkdir" / "big.txt").write_text("junktoken_beta\n")
+    _init_git_repo(repo)
+    _pin_zoekt_repo_name(repo, "covslug")
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir()
+    result = subprocess.run(
+        _zoekt_index_cmd(zoekt_dir, repo), cwd=repo, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    # .gitignore + src/a.py == 2; junkdir/big.txt is untracked.
+    assert _tracked_blob_count(repo) == 2
+    assert "attempting to index 2 total files" in result.stderr
+    assert list(zoekt_dir.glob("covslug_v*.zoekt")), "shard must be named after the slug"
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("covslug", str(repo), "python", "abc", "indexed")
+        registry.mark_tracked_files("covslug", _tracked_blob_count(repo))
+    finally:
+        registry.close()
+
+    lifecycle = ZoektLifecycle(index_dir=zoekt_dir, data_dir=tmp_path, port=6078)
+    try:
+        base_url = lifecycle.ensure_running()
+        assert search_zoekt(base_url, "junktoken_beta") == [], "gitignored content must not be searchable"
+        assert len(search_zoekt(base_url, "sourcetoken_alpha")) >= 1, "tracked content must be searchable"
+
+        monkeypatch.setattr(server, "_zoekt_base_url_if_running", lambda: base_url)
+        fields = server._search_coverage_fields("covslug")
+        assert fields["searchCoverage"]["complete"] is True
+    finally:
+        lifecycle.stop()
+
+
+@pytest.mark.integration
+def test_get_index_status_reports_incomplete_after_a_shard_is_deleted(tmp_path: Path, monkeypatch):
+    """The incident, reproduced: a successful index whose shards are then
+    deleted must report complete: false instead of quietly answering with
+    partial results.
+
+    `-shard_limit 120` forces a multi-shard index on a tiny repo, so this is
+    deterministic and fast rather than needing a 100 MB corpus.
+    """
+    if shutil.which("zoekt-git-index") is None:
+        pytest.skip("zoekt-git-index not on PATH")
+    if shutil.which("zoekt-webserver") is None:
+        pytest.skip("zoekt-webserver not on PATH")
+
+    from codeintel import config, server
+    from codeintel.index_cli import _pin_zoekt_repo_name, _tracked_blob_count
+    from codeintel.registry import Registry
+    from codeintel.search import ZoektLifecycle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in range(6):
+        (repo / f"f{i}.txt").write_text(f"token_{i:02d} padding padding padding padding\n")
+    _init_git_repo(repo)
+    _pin_zoekt_repo_name(repo, "incidentslug")
+
+    zoekt_dir = tmp_path / ".zoekt"
+    zoekt_dir.mkdir()
+    subprocess.run(
+        ["zoekt-git-index", "-index", str(zoekt_dir), "-incremental=false",
+         "-submodules=false", "-shard_limit", "120", str(repo)],
+        cwd=repo, check=True, capture_output=True, text=True,
+    )
+    shards = sorted(zoekt_dir.glob("incidentslug_v*.zoekt"))
+    assert len(shards) > 1, "need a multi-shard index to delete from"
+
+    monkeypatch.setenv("CODEINTEL_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("incidentslug", str(repo), "python", "abc", "indexed")
+        registry.mark_tracked_files("incidentslug", _tracked_blob_count(repo))
+    finally:
+        registry.close()
+
+    shards[0].unlink()  # the deletion that caused the incident
+
+    lifecycle = ZoektLifecycle(index_dir=zoekt_dir, data_dir=tmp_path, port=6079)
+    try:
+        base_url = lifecycle.ensure_running()
+        monkeypatch.setattr(server, "_zoekt_base_url_if_running", lambda: base_url)
+        fields = server._search_coverage_fields("incidentslug")
+    finally:
+        lifecycle.stop()
+
+    assert fields["searchCoverage"]["complete"] is False
+    assert fields["searchCoverage"]["indexed"] < fields["searchCoverage"]["expected"]

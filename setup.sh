@@ -437,11 +437,16 @@ zoekt_asset_name() {
 # zoekt ships as one tarball containing both binaries. Upstream
 # sourcegraph/zoekt publishes no releases at all, so these come from
 # codeintel's own releases (see .github/workflows/build-zoekt.yml).
+#
+# zoekt-git-index, not zoekt-index: codeintel indexes from the git tree so
+# gitignored content never enters the index. Nothing calls zoekt-index any
+# more, and it is deliberately not installed as a fallback — falling back
+# would silently reintroduce junk indexing.
 install_zoekt() {
 	_os=$1
 	_arch=$2
 
-	if [ "${FORCE:-0}" != "1" ] && already_installed zoekt-index && already_installed zoekt-webserver; then
+	if [ "${FORCE:-0}" != "1" ] && already_installed zoekt-git-index && already_installed zoekt-webserver; then
 		log_info "zoekt: already installed, skipping"
 		return 0
 	fi
@@ -468,13 +473,13 @@ install_zoekt() {
 	if ! verify_sha256 "${_tmp}/z.tar.gz" "$_expected"; then
 		rm -rf "$_tmp"; trap - EXIT; return 1
 	fi
-	if ! tar -xzf "${_tmp}/z.tar.gz" -C "$_tmp" zoekt-index zoekt-webserver 2>/dev/null; then
+	if ! tar -xzf "${_tmp}/z.tar.gz" -C "$_tmp" zoekt-git-index zoekt-webserver 2>/dev/null; then
 		log_error "zoekt: archive did not contain both binaries"
 		rm -rf "$_tmp"; trap - EXIT; return 1
 	fi
 
 	ensure_bin_dir
-	for _b in zoekt-index zoekt-webserver; do
+	for _b in zoekt-git-index zoekt-webserver; do
 		mv "${_tmp}/${_b}" "$(bin_dir)/${_b}"
 		chmod +x "$(bin_dir)/${_b}"
 	done
