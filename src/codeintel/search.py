@@ -91,6 +91,35 @@ def search_zoekt(
     return hits
 
 
+def zoekt_repo_documents(
+    base_url: str, repo: str, *, client: httpx.Client | None = None, timeout_seconds: float = 5.0
+) -> int | None:
+    """How many documents zoekt currently holds for `repo`, or None when
+    zoekt does not know that repo at all.
+
+    Authoritative in a way the indexer's own log is not: it reflects the
+    shards on disk *now*, so it detects shards deleted after a successful
+    index — the failure mode that made a truncated index look healthy.
+
+    `client` is injectable (a real `httpx.Client`, or one backed by
+    `httpx.MockTransport` in tests); defaults to a short-lived real client.
+    """
+    client = client or httpx.Client()
+    try:
+        response = client.post(
+            f"{base_url.rstrip('/')}/api/list",
+            json={"Q": f"r:{repo}"},
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ZoektUnavailableError(f"zoekt-webserver /api/list failed: {exc}") from exc
+    for entry in (response.json().get("List", {}).get("Repos") or []):
+        if entry.get("Repository", {}).get("Name") == repo:
+            return entry.get("Stats", {}).get("Documents")
+    return None
+
+
 class ZoektLifecycle:
     """Lazy-spawns `zoekt-webserver -index <index_dir> -rpc -listen :<port>`
     on first `ensure_running()` call. A pidfile under `data_dir` survives
@@ -120,6 +149,20 @@ class ZoektLifecycle:
 
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self._port}"
+
+    def base_url_if_running(self) -> str | None:
+        """The base URL of an already-healthy webserver, or None — never
+        spawns one.
+
+        `getIndexStatus` reports search coverage, which needs zoekt's
+        `/api/list`, but a status call must stay cheap: spawning a webserver
+        as a side effect of asking for status would be surprising. In
+        practice the server is already up whenever searches are happening.
+        """
+        pid = self._read_pidfile()
+        if pid is None or not self._pid_alive(pid) or not self._is_healthy():
+            return None
+        return self.base_url()
 
     def _pid_alive(self, pid: int) -> bool:
         try:
