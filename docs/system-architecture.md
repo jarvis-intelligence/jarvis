@@ -13,13 +13,11 @@ The system is built around four core engines:
 
 ### Layered Architecture (primary view)
 
-![jarvis layered architecture](assets/jarvis-full-architecture-with-swift.png)
+![jarvis layered architecture](assets/jarvis-layers.png)
 
-*Editable source: [`assets/jarvis-full-architecture-with-swift.drawio`](assets/jarvis-full-architecture-with-swift.drawio) — also exported as `.svg` and as an XML-embedded `.drawio.png`*
-
-*Note: this diagram predates the Semantic engine. See
-[`assets/semantic-search-architecture.png`](assets/semantic-search-architecture.png) for the
-up-to-date semantic indexing/query flow.*
+*Editable source: [`assets/jarvis-layers.dot`](assets/jarvis-layers.dot) (Graphviz) — also exported as
+`assets/jarvis-layers.svg`. Regenerate with
+`dot -Tpng -o docs/assets/jarvis-layers.png docs/assets/jarvis-layers.dot`.*
 
 Seven layers, top to bottom. **Storage (layer 4) is the seam**: the runtime only ever reads
 down into it, the indexing pipeline only ever writes up into it, and the two halves share no
@@ -39,17 +37,10 @@ Layer 6→7 is where Swift differs from every other language: the other three in
 an ordinary runtime, while `scip-swift` needs Xcode and the iOS SDK, which Apple ships for macOS
 only.
 
-### Component Diagram (runtime detail)
+### Runtime Detail
 
-![jarvis overview](assets/jarvis-architecture.png)
+Expanding layers 1–4 of the table above, the runtime path is:
 
-*Editable source: [`assets/jarvis-architecture.excalidraw`](assets/jarvis-architecture.excalidraw)*
-
-*Note: this diagram predates the Semantic engine. See
-[`assets/semantic-search-architecture.png`](assets/semantic-search-architecture.png) for the
-up-to-date semantic indexing/query flow.*
-
-Diagram shows:
 - **Client**: Claude Code / Cursor / any MCP client → MCP stdio
 - **Server** (`server.py`): FastMCP dispatcher → 9 tools
 - **Query Engine** (`query.py`): Reads SCIP index SQLite (documents/chunks/global_symbols)
@@ -62,15 +53,8 @@ Diagram shows:
 
 ## Indexing Pipeline & Publishing
 
-![jarvis index pipeline and package graph](assets/jarvis-system-architecture.png)
-
-*Editable source: [`assets/jarvis-system-architecture.excalidraw`](assets/jarvis-system-architecture.excalidraw)*
-
-*Note: this diagram predates the semantic indexing stage. See
-[`assets/semantic-search-architecture.png`](assets/semantic-search-architecture.png) for the
-up-to-date pipeline including chunk/embed/store.*
-
-Diagram shows the full indexing lifecycle from file changes → published index:
+The full indexing lifecycle, from file changes → published index (layers 5–7 of the table above,
+writing up into the storage seam):
 
 ### The Pipeline (index_cli.py)
 

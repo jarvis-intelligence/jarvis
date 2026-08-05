@@ -535,67 +535,67 @@ a:focus-visible, .btn:focus-visible {
 
   <hr class="rule">
 
-  <!-- ================= HOW IT WORKS: full-width figures ================= -->
+  <!-- ================= HOW IT WORKS ================= -->
   <section id="how">
     <div class="wrap">
       <div class="sec-head">
         <h2>How it works</h2>
         <p class="lede">
-          Three views of the same system: what runs at index time, what runs at
-          query time, and what the agent actually talks to.
+          Seven layers, with storage in the middle. The runtime half only reads
+          down into it; the indexing half only writes up into it. The two halves
+          share no other contract.
         </p>
       </div>
 
       <figure class="fig">
         <div class="fig-plate">
-          <img src="assets/jarvis-core-components.svg"
-               alt="Index pipeline as a six-stage timeline: language indexer, scip expt-convert, populate graph, zoekt-index, optional semantic index, then atomic publish. Below it, embedding generation flows from tree-sitter chunking through hash dedup and bge-m3 embedding into a LanceDB table, alongside the four storage locations under the jarvis data directory.">
+          <img src="assets/jarvis-layers.svg"
+               alt="Seven layers with storage in the middle. The runtime half, on the left, flows from clients (Claude Code, Cursor, any MCP host) to the MCP server (server.py, FastMCP stdio, nine tools) to the engines (query.py, search.py, graph.py, semantic.py with chunker and embeddings), then reads storage with mode=ro and immutable=1. The indexing half, on the right, flows from the external toolchain (Node/npm, Python, JDK, and for Swift, Xcode plus the iOS SDK) to the language indexers (scip-typescript, scip-python, scip-java, scip-swift) to indexing orchestration (index_cli.py: detect, index, convert, graph plus zoekt, atomic publish), then writes storage with an atomic os.replace. Storage itself holds index-sha.db plus a current pointer, .zoekt shards, registry.db, and lancedb.">
         </div>
         <figcaption>
-          <b>Core components and data flow.</b>
-          Language is detected by extension plurality across
-          <code class="inline">git ls-files</code>, not a filesystem walk, because
-          a walk also counts gitignored scratch directories that can outnumber a
-          repo's own code. The semantic stage is the one stage allowed to fail
-          without blocking the publish.
+          <b>Storage is the seam.</b>
+          Layer 6 to 7 is where Swift differs from every other language: the
+          other three indexers need only an ordinary runtime, while
+          <code class="inline">scip-swift</code> needs Xcode and the iOS SDK,
+          which Apple ships for macOS only.
         </figcaption>
-        <a class="fig-open" href="assets/jarvis-core-components.svg">Open the full-size diagram</a>
-      </figure>
-
-      <figure class="fig">
-        <div class="fig-plate">
-          <img src="assets/jarvis-query-engine.svg"
-               alt="Two independent query paths side by side beneath the agent, divided by a dashed line labelled no router, no fallback, no query classification. Left path: QueryService to index_reader to scip_decoder to the read-only index database. Right path: embed query, then LanceDB vector top-30 and Zoekt trigram top-30 in parallel, fused by reciprocal rank fusion at k equals 60, then truncated and limited.">
-        </div>
-        <figcaption>
-          <b>Two query paths, and no router between them.</b>
-          The structural path returns exact ranges. The hybrid path fuses vector
-          and lexical hits with reciprocal rank fusion. Nothing classifies your
-          query or silently falls back: the agent picks the tool, which means you
-          can predict which one ran.
-        </figcaption>
-        <a class="fig-open" href="assets/jarvis-query-engine.svg">Open the full-size diagram</a>
-      </figure>
-
-      <figure class="fig">
-        <div class="fig-plate">
-          <img src="assets/jarvis-agent-integration.svg"
-               alt="MCP client on the left connected to server.py by stdio JSON-RPC, with a dashed result arrow returning. On the right, nine MCP tools in a flat grid with typeHierarchy marked non-functional. Below, the response contract: uniform error payload, fixed result caps, and replacing grep and glob and read loops.">
-        </div>
-        <figcaption>
-          <b>Agent integration.</b>
-          Nine flat tools over stdio JSON-RPC. Every tool reports failure the
-          same way, as an <code class="inline">{"error": "..."}</code> payload
-          rather than a transport error, so a query bug never takes the server
-          down mid-session.
-        </figcaption>
-        <a class="fig-open" href="assets/jarvis-agent-integration.svg">Open the full-size diagram</a>
+        <a class="fig-open" href="assets/jarvis-layers.svg">Open the full-size diagram</a>
         <p class="fig-note">
-          Diagram sources are the matching
-          <code class="inline">.excalidraw</code> files in
-          <code class="inline">docs/assets/</code>.
+          Diagram source is
+          <code class="inline">docs/assets/jarvis-layers.dot</code> (Graphviz).
         </p>
       </figure>
+
+      <div class="guarantees">
+        <div class="g-item">
+          <h3>Indexing reads git, not the filesystem</h3>
+          <p>
+            Language is detected by extension plurality across
+            <code class="inline">git ls-files</code>, not a filesystem walk,
+            because a walk also counts gitignored scratch directories that can
+            outnumber a repo's own code. The semantic stage is the one stage
+            allowed to fail without blocking the publish.
+          </p>
+        </div>
+        <div class="g-item">
+          <h3>Two query paths, and no router between them</h3>
+          <p>
+            The structural path returns exact ranges. The hybrid path fuses
+            vector and lexical hits with reciprocal rank fusion. Nothing
+            classifies your query or silently falls back: the agent picks the
+            tool, which means you can predict which one ran.
+          </p>
+        </div>
+        <div class="g-item">
+          <h3>Nine flat tools over stdio JSON-RPC</h3>
+          <p>
+            Every tool reports failure the same way, as an
+            <code class="inline">{"error": "..."}</code> payload rather than a
+            transport error, so a query bug never takes the server down
+            mid-session.
+          </p>
+        </div>
+      </div>
     </div>
   </section>
 

@@ -128,17 +128,12 @@ uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers/tree-
 
 ## Why it's built this way
 
-**Overview** — client, server, the 3 engines (Query / Search / Graph), and storage:
+**Storage is the seam.** The runtime half only ever reads down into it; the
+indexing half only ever writes up into it; the two share no other contract:
 
-![jarvis overview](docs/assets/jarvis-architecture.png)
+![jarvis layered architecture](docs/assets/jarvis-layers.png)
 
-**Index pipeline & package graph** — how `jarvis index` builds and publishes
-an index, how the package dependency graph feeds `blastRadius`, and how
-`jarvis watch` debounces a burst of edits into one reindex:
-
-![jarvis index pipeline and package graph](docs/assets/jarvis-system-architecture.png)
-
-Three things worth reading the diagrams for:
+Three things worth reading the diagram for:
 
 - **The runtime path never writes.** Queries open a published `index-<sha>.db`
   read-only (`mode=ro&immutable=1`). Index files are never mutated in place.
@@ -152,9 +147,10 @@ Three things worth reading the diagrams for:
   edge is retracted — `blastRadius` always reflects each repo's *last* index
   run.
 
-Editable sources:
-[`docs/assets/jarvis-architecture.excalidraw`](docs/assets/jarvis-architecture.excalidraw) ·
-[`docs/assets/jarvis-system-architecture.excalidraw`](docs/assets/jarvis-system-architecture.excalidraw)
+Editable source:
+[`docs/assets/jarvis-layers.dot`](docs/assets/jarvis-layers.dot) (Graphviz).
+Layer-by-layer detail, the full index pipeline, and the semantic path are in
+[`docs/system-architecture.md`](docs/system-architecture.md).
 
 Core query/search logic is ported from an internal reference implementation;
 the enterprise shell (FastAPI, Postgres, hosted-git auth, Cloud Build) is

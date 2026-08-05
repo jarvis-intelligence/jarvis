@@ -1,0 +1,44 @@
+digraph jarvis_layers {
+    rankdir=TB;
+    bgcolor="white";
+    fontname="Helvetica";
+    labelloc="t";
+    fontsize=20;
+    label="jarvis — 7-Layer Architecture (Storage is the seam)";
+    node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=12, margin="0.18,0.10"];
+    edge [color="#666666", arrowsize=0.7];
+
+    /* ---------- Runtime half (reads down) ---------- */
+    subgraph cluster_runtime {
+        label="RUNTIME HALF  (reads storage, never writes)";
+        fontname="Helvetica-Bold"; fontsize=14; color="#2563eb"; style="rounded"; bgcolor="#eff6ff";
+
+        L1 [label="L1 · Clients\nClaude Code · Cursor · any MCP host", fillcolor="#dbeafe", color="#2563eb"];
+        L2 [label="L2 · MCP Server\nserver.py — FastMCP stdio, 9 tools", fillcolor="#bfdbfe", color="#2563eb"];
+        L3 [label="L3 · Engines\nquery.py · search.py · graph.py · semantic.py (+chunker, embeddings)", fillcolor="#93c5fd", color="#2563eb"];
+    }
+
+    /* ---------- Storage seam ---------- */
+    L4 [label="L4 · STORAGE  (the seam)\nindex-<sha>.db + current pointer · .zoekt/ shards · registry.db · lancedb/", shape=box, style="filled,bold", fillcolor="#fde68a", color="#b45309", fontsize=13, margin="0.22,0.14"];
+
+    /* ---------- Indexing half (writes up) ---------- */
+    subgraph cluster_index {
+        label="INDEXING HALF  (writes storage, never reads on query path)";
+        fontname="Helvetica-Bold"; fontsize=14; color="#16a34a"; style="rounded"; bgcolor="#f0fdf4";
+
+        L5 [label="L5 · Indexing orchestration\nindex_cli.py — detect → index → convert → graph+zoekt → atomic publish", fillcolor="#bbf7d0", color="#16a34a"];
+        L6 [label="L6 · Language indexers\nscip-typescript · scip-python · scip-java · scip-swift", fillcolor="#86efac", color="#16a34a"];
+        L7 [label="L7 · External toolchain\nNode/npm · Python · JDK · (Swift) Xcode + iOS SDK", fillcolor="#4ade80", color="#16a34a"];
+    }
+
+    /* ---------- Reads flow downward ---------- */
+    L1 -> L2 -> L3;
+    L3 -> L4 [label="  reads (mode=ro&immutable=1)", fontname="Helvetica-Oblique", fontsize=10, fontcolor="#2563eb"];
+
+    /* ---------- Writes flow upward ---------- */
+    L7 -> L6 -> L5;
+    L5 -> L4 [label="  writes (atomic os.replace)", fontname="Helvetica-Oblique", fontsize=10, fontcolor="#16a34a"];
+
+    /* keep storage in the middle visually */
+    { rank=same; L4; }
+}
