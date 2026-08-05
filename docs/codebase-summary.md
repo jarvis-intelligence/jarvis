@@ -9,16 +9,19 @@ jarvis/
 ├── docs/                    # Documentation
 ├── docs/assets/             # Architecture diagrams
 ├── plans/                   # Implementation plans
-├── plugin/                  # Claude Code plugin (marketplace + MCP registration)
+├── plugin/                  # Shared plugin payload (skills + MCP registration)
 │   ├── .claude-plugin/
-│   │   └── plugin.json      # Plugin manifest (name, version, description)
+│   │   └── plugin.json      # Claude plugin manifest (name, version, description)
 │   ├── .mcp.json            # MCP server registration for plugin installs
 │   └── skills/              # Plugin skills (jarvis-setup, jarvis-use, jarvis-issues)
 ├── .claude-plugin/
-│   └── marketplace.json     # Plugin marketplace declaration (root)
-├── .github/workflows/       # CI: build-zoekt.yml, publish-pypi.yml, publish-mcp-registry.yml, setup-smoke.yml, test.yml
+│   └── marketplace.json     # Plugin marketplace declaration (root, versionless)
+├── .codex-plugin/
+│   └── plugin.json          # Codex plugin manifest — same plugin/skills/, + Codex interface metadata
+├── .github/workflows/       # CI: build-zoekt, publish-pypi, publish-mcp-registry,
+│                            #     sync-public-distribution, setup-smoke, test
 ├── scripts/                 # Utilities
-│   └── check_versions.py    # Version consistency guard (4 files kept in sync)
+│   └── check_versions.py    # Version consistency guard (5 fields across 4 files)
 ├── setup.sh                 # Dependency bootstrapper (scip, zoekt, indexers)
 ├── ZOEKT_COMMIT             # Pinned upstream sourcegraph/zoekt commit
 ├── pyproject.toml           # uv-managed project config
@@ -91,7 +94,7 @@ jarvis/
 | `test_index_cli.py` | index_cli.py | Full pipeline (e-2-e); marked `@pytest.mark.integration` — calls real scip-python/scip/zoekt binaries |
 | `test_index_status.py` | index_cli.py + query.py | Freshness snapshot, staleness detection |
 | `test_setup_sh.py` | setup.sh | Sources the script under `dash` (not `sh` — macOS `/bin/sh` accepts bashisms) and tests each function in isolation |
-| `test_check_versions.py` | scripts/check_versions.py | Version consistency across `pyproject.toml`, `server.json`, `plugin/.claude-plugin/plugin.json`; MCP Registry floor version check |
+| `test_check_versions.py` | scripts/check_versions.py | Version consistency across `pyproject.toml`, `server.json` (×2), `plugin/.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`; `plugin/.mcp.json` floor version check |
 
 ### Fixtures (`tests/fixtures/`)
 
@@ -136,9 +139,10 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `.github/workflows/build-zoekt.yml` | `ZOEKT_COMMIT` change or manual dispatch | Cross-compiles `zoekt-index`/`zoekt-webserver` for macOS+Linux (arm64/amd64) and publishes them to this repo's releases — upstream `sourcegraph/zoekt` ships no binaries at all |
+| `.github/workflows/build-zoekt.yml` | `ZOEKT_COMMIT` change or manual dispatch | Cross-compiles `zoekt-index`/`zoekt-webserver` for macOS+Linux (arm64/amd64) and publishes them to the **public** `phuongddx/jarvis-dist` releases — upstream `sourcegraph/zoekt` ships no binaries at all, and this repo is private, so its own release assets 404 for an unauthenticated `setup.sh` |
 | `.github/workflows/publish-pypi.yml` | `release` event | Publishes versioned release to PyPI (`jarvis-mcp` package); uses GitHub Actions OIDC for auth |
-| `.github/workflows/publish-mcp-registry.yml` | `workflow_run` on publish-pypi completion | Publishes `server.json` to official MCP Registry (`io.github.phuongddx/jarvis-dist`); runs after PyPI publish succeeds; retries publish up to 6x for eventual consistency |
+| `.github/workflows/publish-mcp-registry.yml` | `workflow_run` on publish-pypi completion | Publishes `server.json` to official MCP Registry (`io.github.phuongddx/jarvis`); runs after PyPI publish succeeds; retries publish up to 6x for eventual consistency |
+| `.github/workflows/sync-public-distribution.yml` | `release: published` or manual | Overwrites `phuongddx/jarvis-dist` with the public distribution surface (`setup.sh`, `.claude-plugin/`, `plugin/`). That repo is a publication target, never edited by hand |
 | `.github/workflows/setup-smoke.yml` | `setup.sh`/test changes, PRs, manual | Runs `setup.sh` on `ubuntu-latest` (where `/bin/sh` is dash) and `macos-latest`: parse check, install, idempotency, full unit suite; path-filtered |
 | `.github/workflows/test.yml` | Every push/PR | Runs unit test suite (`pytest -m "not integration"`); installs `semantic` extra so `test_semantic.py` tests actually run; no path filter (runs on every change) |
 

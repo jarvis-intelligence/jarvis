@@ -81,15 +81,17 @@ External binaries (must be on `PATH`):
 
 ## Distribution
 
-jarvis is available through three discovery and installation channels:
+jarvis is available through four discovery and installation channels:
 
 **PyPI package:** `jarvis-mcp` — Install via `pip install jarvis-mcp` or `uv sync` from source. Published on every release via GitHub Actions OIDC auth.
 
 **Claude Code plugin:** Available via `/plugin marketplace add phuongddx/jarvis-dist` (plugin marketplace discovery) then `/plugin install jarvis@jarvis` (auto-registers the MCP server, alternative to manual `claude mcp add`). Plugin manifest and MCP registration live under `plugin/.claude-plugin/` and `plugin/.mcp.json`; skills are under `plugin/skills/`.
 
-**MCP Registry:** Official listing at [`io.github.phuongddx/jarvis-dist`](https://modelcontextprotocol.io/registry) — published via `server.json` (MCP Registry server descriptor) on every release, gated on PyPI publish success to ensure availability. Allows MCP clients (beyond Claude Code) to discover and install jarvis.
+**Codex plugin:** `.codex-plugin/plugin.json` (root) declares the same `plugin/skills/` tree for Codex, adding the interface metadata Codex requires (display name, category, capabilities, default prompts, icons) that the Claude manifest does not carry. Both manifests point at one shared skills directory, so a skill is authored once and served to both hosts.
 
-**Version consistency:** All four version fields (pyproject.toml, server.json, plugin manifest, MCP registration floor) are asserted identical by `scripts/check_versions.py`, run automatically in CI and as a test (`tests/test_check_versions.py`), preventing version drift across distribution channels.
+**MCP Registry:** Official listing at [`io.github.phuongddx/jarvis`](https://modelcontextprotocol.io/registry) — published via `server.json` (MCP Registry server descriptor) on every release, gated on PyPI publish success to ensure availability. Allows MCP clients (beyond Claude Code) to discover and install jarvis.
+
+**Version consistency:** Five version fields across four files (`pyproject.toml`, `server.json` ×2, `plugin/.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`) are asserted identical by `scripts/check_versions.py`, run automatically in CI and as a test (`tests/test_check_versions.py`), preventing version drift across distribution channels. `plugin/.mcp.json`'s `--from` specifier is checked separately: it is a compatibility *floor*, not a synced field, so the guard only asserts it is `<=` the release version — a floor ahead of the release would make the plugin resolve to nothing installable.
 
 ## Database Schema
 

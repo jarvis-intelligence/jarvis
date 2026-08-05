@@ -259,16 +259,42 @@ Published jarvis as a Claude Code plugin (marketplace discovery) and to the offi
 **New structure:**
 - `plugin/` directory: plugin manifest (`.claude-plugin/plugin.json`), MCP server registration (`.mcp.json`), and plugin skills (under `plugin/skills/`)
 - `.claude-plugin/marketplace.json` (root): declares this repo as a plugin marketplace
-- `server.json` (root): MCP Registry server descriptor (`io.github.phuongddx/jarvis-dist`)
+- `server.json` (root): MCP Registry server descriptor (`io.github.phuongddx/jarvis`)
 - `.github/workflows/publish-mcp-registry.yml`: publishes `server.json` to official MCP Registry after PyPI publish succeeds; retries up to 6x for eventual consistency
-- `scripts/check_versions.py`: asserts `pyproject.toml`, `server.json`, plugin manifest, and MCP registration floor all declare the same version (run via test + CI to prevent drift)
+- `scripts/check_versions.py`: asserts `pyproject.toml`, `server.json`, and the plugin manifests all declare the same version, and that the MCP registration floor is not ahead of it (run via test + CI to prevent drift)
 
 **Install flows:**
 - PyPI: `pip install jarvis-mcp` or `uv sync`
 - Plugin: `/plugin marketplace add phuongddx/jarvis-dist` → `/plugin install jarvis@jarvis`
-- MCP Registry: Claude Code directly discovers `io.github.phuongddx/jarvis-dist`
+- MCP Registry: Claude Code directly discovers `io.github.phuongddx/jarvis`
 
-**Version consistency:** Four version fields (pyproject.toml [project].version, server.json.version, server.json.packages[0].version, plugin/.claude-plugin/plugin.json.version) are asserted identical. `.claude-plugin/marketplace.json` deliberately omits a version field to avoid a fifth place drift could occur.
+**Version consistency:** Four version fields (pyproject.toml [project].version, server.json.version, server.json.packages[0].version, plugin/.claude-plugin/plugin.json.version) are asserted identical. `.claude-plugin/marketplace.json` deliberately omits a version field to avoid a fifth place drift could occur. (A fifth field, `.codex-plugin/plugin.json.version`, joined the guard later — see below.)
+
+### Post-Phase-4: Codex Plugin Channel (Landed, August 5)
+
+Added Codex as a fourth distribution channel alongside PyPI, the Claude Code plugin, and the MCP
+Registry. Both plugin hosts are served from **one** skills tree: `.codex-plugin/plugin.json` points
+at the same `plugin/skills/` directory the Claude manifest uses, so `jarvis-setup`, `jarvis-use`,
+and `jarvis-issues` are authored once. The Codex manifest carries the extra interface metadata Codex
+requires and Claude's does not — display name, category, capabilities, default prompts, brand
+colour, and icons.
+
+`scripts/check_versions.py` was extended to enforce `.codex-plugin/plugin.json.version` too,
+bringing the guard to **five version fields across four files**. The `plugin/.mcp.json` `--from`
+floor stays outside that equality check by design: it is the oldest package the plugin tolerates,
+so it may lag the release, and the guard only asserts it is not *ahead*.
+
+### Version Reset to 0.0.1 (August 5)
+
+The repository was reset to a single commit and the version renumbered to `0.0.1`. No code changed
+— every source file, test, and doc was byte-identical across the reset. The renumbering exists so
+release artifacts published from the new baseline cannot collide with the orphaned pre-reset tags
+(`v0.2.0`–`v0.5.0`, deleted from both the repository and GitHub Releases).
+
+Two consequences for anyone reading this roadmap as history: the phase narrative above predates the
+reset and is **not** recoverable from `git log`, which now starts at the single baseline commit; and
+the `0.x` version numbers referenced in earlier sections refer to those deleted tags, not to
+anything currently published. `CHANGELOG.md` retains the full pre-reset entries.
 
 ---
 

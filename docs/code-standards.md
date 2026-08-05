@@ -182,14 +182,14 @@ when it's missing.
 
 ### 9. Version-Consistency Guard Pattern
 
-**Pattern:** Multiple configuration files declare the same release version (pyproject.toml, server.json, plugin manifest). A dedicated script (`scripts/check_versions.py`) asserts they all match, run via an automated test (`tests/test_check_versions.py`) and CI, preventing manual discipline from drifting.
+**Pattern:** Multiple configuration files declare the same release version (`pyproject.toml`, `server.json`, the Claude plugin manifest, the Codex plugin manifest). A dedicated script (`scripts/check_versions.py`) asserts they all match, run via an automated test (`tests/test_check_versions.py`) and CI, preventing manual discipline from drifting.
 
 **Why:**
-- Four version sources (PyPI, MCP Registry descriptor, plugin manifest, MCP floor version) across three distribution channels can drift independently
+- Five version fields across four files (PyPI package, MCP Registry descriptor twice over, Claude plugin manifest, Codex plugin manifest) serving four distribution channels can drift independently
 - Manual updates are error-prone; automation catches drift before release
 - Test gates all CI pipelines — version mismatch fails the release
 
-**Implementation:** `check_versions.py` loads all four files, asserts version fields match, validates that the MCP floor version is <= current release (a floor ahead of the release would make the plugin uninstallable). Test wraps the script and runs on every CI push/PR.
+**Implementation:** `check_versions.py` loads all four files and asserts their five version fields match. It then validates `plugin/.mcp.json`'s `--from` floor separately, as a `<=` bound rather than an equality — that field is the *oldest* package the plugin tolerates, so it is deliberately allowed to lag, but a floor ahead of the release would make the plugin resolve to nothing installable. `.claude-plugin/marketplace.json` deliberately declares no version, so there is no fifth file to keep in sync. Test wraps the script and runs on every CI push/PR.
 
 **Convention:** When adding a new file that declares version information, add its path to the version-consistency guard. Treat version consistency as an invariant, not a todo.
 
