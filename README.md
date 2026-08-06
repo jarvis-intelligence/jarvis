@@ -14,7 +14,7 @@ no network, nothing leaves your machine.**
 
 ```bash
 # 1. External indexer binaries (scip, zoekt, per-language indexers)
-curl -fsSL https://raw.githubusercontent.com/phuongddx/jarvis-dist/main/setup.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
 
 # 2. jarvis itself
 uv tool install jarvis-mcp
@@ -27,7 +27,7 @@ jarvis index /path/to/your/repo
 registers itself:
 
 ```
-/plugin marketplace add phuongddx/jarvis-dist
+/plugin marketplace add jarvis-intelligence/jarvis-index
 /plugin install jarvis@jarvis
 ```
 
@@ -334,7 +334,7 @@ Three agent skills ship in the Claude Code plugin, under `plugin/skills/`:
 Install them, and register the MCP server, with:
 
 ```
-/plugin marketplace add phuongddx/jarvis-dist
+/plugin marketplace add jarvis-intelligence/jarvis-index
 /plugin install jarvis@jarvis
 ```
 

@@ -101,7 +101,7 @@ serving partial results.
 **Two repos: private development, public distribution.** This repo is private, and
 GitHub serves raw files, release assets, and marketplace metadata only to viewers of
 the owning repo — so every install path advertised from here 404s for a real user.
-`phuongddx/jarvis-dist` is a public repo holding the public distribution surface: a synced
+`jarvis-intelligence/jarvis-index` is a public repo holding the public distribution surface: a synced
 copy of `setup.sh`, the plugin definition (`.claude-plugin/` + `plugin/`), the zoekt
 release assets, and the issue tracker. It is a publication target, never edited by
 hand — `sync-public-distribution.yml` overwrites it on every release, and

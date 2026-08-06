@@ -7,8 +7,8 @@
     "email": "95doanphuong@gmail.com",
     "url": "https://github.com/phuongddx"
   },
-  "homepage": "https://github.com/phuongddx/jarvis-dist",
-  "repository": "https://github.com/phuongddx/jarvis-dist",
+  "homepage": "https://github.com/jarvis-intelligence/jarvis-index",
+  "repository": "https://github.com/jarvis-intelligence/jarvis-index",
   "license": "MIT",
   "keywords": [
     "mcp",
@@ -31,9 +31,9 @@
       "Where is this symbol defined?",
       "Index this repo for code navigation."
     ],
-    "websiteURL": "https://github.com/phuongddx/jarvis-dist",
-    "privacyPolicyURL": "https://github.com/phuongddx/jarvis-dist/blob/main/plugin/README.md#privacy",
-    "termsOfServiceURL": "https://github.com/phuongddx/jarvis-dist/blob/main/plugin/LICENSE",
+    "websiteURL": "https://github.com/jarvis-intelligence/jarvis-index",
+    "privacyPolicyURL": "https://github.com/jarvis-intelligence/jarvis-index/blob/main/plugin/README.md#privacy",
+    "termsOfServiceURL": "https://github.com/jarvis-intelligence/jarvis-index/blob/main/plugin/LICENSE",
     "brandColor": "#3B82F6",
     "composerIcon": "./plugin/assets/jarvis-small.svg",
     "logo": "./plugin/assets/app-icon.png",

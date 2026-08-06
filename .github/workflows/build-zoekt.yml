@@ -1,14 +1,14 @@
 # Cross-compiles zoekt for the platforms setup.sh supports and publishes the
-# binaries to phuongddx/jarvis-dist — a separate PUBLIC repo, not this one.
+# binaries to jarvis-intelligence/jarvis-index — a separate PUBLIC repo, not this one.
 #
 # Why this exists: upstream sourcegraph/zoekt publishes no releases and no tags,
 # so there is no prebuilt zoekt-git-index/zoekt-webserver to download on any
 # platform. setup.sh downloads from our own releases instead.
 #
-# Why jarvis-dist and not here: this repo is private, and GitHub serves release
+# Why jarvis-index and not here: this repo is private, and GitHub serves release
 # assets only to viewers of the owning repo — an unauthenticated `curl` against
 # a private repo's release 404s, which is exactly what every user's setup.sh run
-# would hit. jarvis-dist is public and holds nothing but published artifacts.
+# would hit. jarvis-index is public and holds nothing but published artifacts.
 #
 # Runs only when the pinned commit changes, or on manual dispatch — never on a
 # schedule, so upstream breakage can't land unannounced.
@@ -98,17 +98,17 @@ jobs:
         env:
           # JARVIS_DIST_TOKEN, not GITHUB_TOKEN: the default token cannot
           # write to a different repo. Fine-grained, Contents:write on
-          # phuongddx/jarvis-dist only.
+          # jarvis-intelligence/jarvis-index only.
           GH_TOKEN: ${{ secrets.JARVIS_DIST_TOKEN }}
           ZOEKT_COMMIT: ${{ steps.pin.outputs.commit }}
         run: |
           set -eu
           tag="zoekt-${ZOEKT_COMMIT}"
-          if gh release view "$tag" --repo phuongddx/jarvis-dist >/dev/null 2>&1; then
-            gh release upload "$tag" dist/*.tar.gz dist/*.sha256 --clobber --repo phuongddx/jarvis-dist
+          if gh release view "$tag" --repo jarvis-intelligence/jarvis-index >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.tar.gz dist/*.sha256 --clobber --repo jarvis-intelligence/jarvis-index
           else
             gh release create "$tag" dist/*.tar.gz dist/*.sha256 \
-              --repo phuongddx/jarvis-dist \
+              --repo jarvis-intelligence/jarvis-index \
               --title "zoekt @ ${ZOEKT_COMMIT}" \
               --notes "zoekt-git-index and zoekt-webserver cross-compiled from sourcegraph/zoekt@${ZOEKT_COMMIT}. Consumed by jarvis's setup.sh."
           fi

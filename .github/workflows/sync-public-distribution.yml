@@ -1,8 +1,8 @@
-# Publishes jarvis's public distribution surface into phuongddx/jarvis-dist.
+# Publishes jarvis's public distribution surface into jarvis-intelligence/jarvis-index.
 #
 # Why this exists: this repo is private, so raw.githubusercontent.com and the
 # plugin marketplace both 404 for anyone without access -- which is every real
-# user. jarvis-dist is public and holds only what a user needs to install and
+# user. jarvis-index is public and holds only what a user needs to install and
 # report bugs: the installer script, the Claude Code plugin definition, and
 # (via build-zoekt.yml) the prebuilt zoekt binaries.
 #
@@ -12,7 +12,7 @@
 # Release-triggered because plugin/.claude-plugin/plugin.json carries the
 # version: syncing on release keeps the published plugin matched to the
 # published PyPI package. A change landing on main without a release does not
-# reach jarvis-dist until the next release, which is intended.
+# reach jarvis-index until the next release, which is intended.
 name: sync-public-distribution
 
 on:
@@ -27,21 +27,21 @@ jobs:
       - name: Check out this repo
         uses: actions/checkout@v4
 
-      - name: Clone jarvis-dist
+      - name: Clone jarvis-index
         env:
-          # Fine-grained PAT, Contents:write on phuongddx/jarvis-dist only. The
+          # Fine-grained PAT, Contents:write on jarvis-intelligence/jarvis-index only. The
           # default GITHUB_TOKEN cannot write to another repo.
           GH_TOKEN: ${{ secrets.JARVIS_DIST_TOKEN }}
         run: |
           set -eu
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/phuongddx/jarvis-dist.git" "${RUNNER_TEMP}/jarvis"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/jarvis-intelligence/jarvis-index.git" "${RUNNER_TEMP}/jarvis"
 
-      - name: Copy the distribution surface over jarvis-dist's contents
+      - name: Copy the distribution surface over jarvis-index's contents
         run: |
           set -eu
           dest="${RUNNER_TEMP}/jarvis"
           # rsync --delete so a file removed here is removed there, but never
-          # touch .git or jarvis-dist's own README (which describes jarvis-dist
+          # touch .git or jarvis-index's own README (which describes jarvis-index
           # itself and has no counterpart in this repo).
           #
           # --ignore-times is load-bearing: rsync's default quick-check skips
@@ -50,7 +50,7 @@ jobs:
           # byte count identical, and the checkout and the clone materialize
           # within the same second on a fast runner — so the v0.5.1 sync
           # skipped the only changed file and reported "already up to date"
-          # while jarvis-dist served a stale version. Copy unconditionally;
+          # while jarvis-index served a stale version. Copy unconditionally;
           # the git-diff gate below already makes no-op releases push nothing.
           rsync -a --ignore-times --delete --exclude '.git/' setup.sh "${dest}/setup.sh"
           rsync -a --ignore-times --delete --exclude '.git/' .claude-plugin/ "${dest}/.claude-plugin/"
@@ -69,7 +69,7 @@ jobs:
           git add -A
           # An empty commit on a no-op release is noise, not a record.
           if git diff --cached --quiet; then
-            echo "jarvis-dist already up to date; nothing to push"
+            echo "jarvis-index already up to date; nothing to push"
             exit 0
           fi
           git commit -m "chore: sync distribution surface from jarvis@${SOURCE_SHA}"

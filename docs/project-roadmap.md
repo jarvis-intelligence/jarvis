@@ -265,7 +265,7 @@ Published jarvis as a Claude Code plugin (marketplace discovery) and to the offi
 
 **Install flows:**
 - PyPI: `pip install jarvis-mcp` or `uv sync`
-- Plugin: `/plugin marketplace add phuongddx/jarvis-dist` → `/plugin install jarvis@jarvis`
+- Plugin: `/plugin marketplace add jarvis-intelligence/jarvis-index` → `/plugin install jarvis@jarvis`
 - MCP Registry: Claude Code directly discovers `io.github.phuongddx/jarvis`
 
 **Version consistency:** Four version fields (pyproject.toml [project].version, server.json.version, server.json.packages[0].version, plugin/.claude-plugin/plugin.json.version) are asserted identical. `.claude-plugin/marketplace.json` deliberately omits a version field to avoid a fifth place drift could occur. (A fifth field, `.codex-plugin/plugin.json.version`, joined the guard later — see below.)

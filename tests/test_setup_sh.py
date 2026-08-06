@@ -857,7 +857,7 @@ def test_install_bash_shim_advises_install_when_no_modern_bash(tmp_path):
 
 def test_zoekt_release_repo_is_set():
     """The zoekt binaries come from a dedicated public repo, not this one."""
-    assert run_func('echo "$ZOEKT_RELEASE_REPO"').stdout.strip() == "phuongddx/jarvis-dist"
+    assert run_func('echo "$ZOEKT_RELEASE_REPO"').stdout.strip() == "jarvis-intelligence/jarvis-index"
 
 def test_zoekt_release_repo_is_not_the_private_repo():
     """The invariant, not just the value: GitHub serves release assets only to
