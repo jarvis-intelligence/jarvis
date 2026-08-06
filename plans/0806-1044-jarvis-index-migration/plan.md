@@ -1,6 +1,10 @@
 # Migrate distribution repo: phuongddx/jarvis-dist → jarvis-intelligence/jarvis-index
 
-**Status:** pending approval
+**Status:** COMPLETE (2026-08-06).
+- A: jarvis-index created, seeded `a0ac274` (clean identity), tag pushed ✓
+- B: PR #27 merged (`882aea8`); stray `rename-visual.html` swept in by `git add -A`, removed in `9c36bec` ✓
+- C: zoekt release copied (8 assets, all 200) ✓; raw setup.sh 200 with new repo pin ✓; plugin 0.5.1 ✓; PAT re-scoped by user, sync dispatched and succeeded (genuine no-op) ✓
+- D: phuongddx/jarvis-dist deleted, API returns 404 ✓ (stale contributor listing gone with it)
 **Decisions (user):** name `jarvis-index`; delete old repo after verification; copy existing zoekt assets (no rebuild).
 
 ## Phases
