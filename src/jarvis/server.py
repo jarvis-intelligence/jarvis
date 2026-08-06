@@ -331,17 +331,32 @@ def _zoekt_base_url_if_running() -> str | None:
     return _zoekt().base_url_if_running()
 
 
+def _scip_conn_or_none(repo: str):
+    """The symbol signal wants a SCIP index but must not require one — a
+    search-only repo (or any failure) degrades semanticSearch to the
+    vector+zoekt signals, mirroring _zoekt_base_url_or_none."""
+    try:
+        return _service().connection(repo)
+    except Exception:
+        return None
+
+
 @mcp.tool(name="semanticSearch")
 def semantic_search_tool(repo: str, query: str, limit: int = 10) -> dict[str, Any]:
     """Natural-language code search over `repo`: embeds `query`, retrieves
-    top vector matches from the repo's semantic index, fuses them with
-    Zoekt lexical hits via reciprocal rank fusion. Requires the repo to
-    have been indexed with the `semantic` extra installed."""
+    top vector matches from the repo's semantic index, and fuses them with
+    Zoekt lexical hits and SCIP symbol-definition matches (when a SCIP
+    index exists) via reciprocal rank fusion. `sources` on each result
+    names which signal(s) contributed; a symbol-only hit carries
+    `content=""` (SCIP stores no source text) with `symbolName` set to the
+    definition's dotted path. Requires the repo to have been indexed with
+    the `semantic` extra installed."""
     from jarvis import semantic  # deferred: tool must exist even without the extra
 
     try:
         return semantic.semantic_search(repo, query, limit,
-                                        zoekt_base_url=_zoekt_base_url_or_none())
+                                        zoekt_base_url=_zoekt_base_url_or_none(),
+                                        scip_conn=_scip_conn_or_none(repo))
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return {"error": str(exc)}

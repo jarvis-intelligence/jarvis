@@ -13,7 +13,7 @@ Nine MCP tools (all take `repo` = the slug from `jarvis index`):
 - `typeHierarchy` — super/subtypes (errors on real indexes; see the use skill's gotchas).
 - `getIndexStatus` — whether a repo has a published index, plus freshness.
 - `searchCode` — lexical search via Zoekt (lazy-started webserver).
-- `semanticSearch` — vector + Zoekt hybrid via reciprocal rank fusion (needs the `[semantic]` extra).
+- `semanticSearch` — vector + Zoekt + SCIP symbol-definition hybrid via reciprocal rank fusion (needs the `[semantic]` extra).
 - `blastRadius` — 2-hop package-dependency BFS across indexed repos.
 
 Full signatures and return shapes: see the `jarvis-use` skill's `references/tool-roster.md`.

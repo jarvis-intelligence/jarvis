@@ -188,8 +188,9 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 **Semantic path (`server.py` → `semantic.py`):**
 1. `semanticSearch(repo, query, limit=10)` → embed query with the table's recorded `TableIdentity` (model, revision, and prefixes)
 2. Vector search the repo's LanceDB table (cosine metric)
-3. `reciprocal_rank_fusion()` merges vector hits with `searchCode`'s Zoekt lexical hits (k=60)
-4. Return ranked hits; include a `"warning"` if the table's identity (model/revision/prefixes/content format) differs from the currently configured one
+3. `symbol_search.search_symbols()` matches query tokens against the repo's SCIP symbol table (when a SCIP index exists) and resolves ranked candidates to definition locations
+4. `reciprocal_rank_fusion()` merges vector hits, `searchCode`'s Zoekt lexical hits, and the symbol hits (k=60, all three signals unweighted)
+5. Return ranked hits; include a `"warning"` if the table's identity (model/revision/prefixes/content format) differs from the currently configured one
 
 ## Size Profile
 

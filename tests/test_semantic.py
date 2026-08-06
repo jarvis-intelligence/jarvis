@@ -1,10 +1,13 @@
 """Unit tests for semantic store + RRF fusion."""
+import sqlite3
 import sys
 
 import pytest
 
 from jarvis.search import ZoektHit, ZoektUnavailableError
 from jarvis.semantic import FusedHit, reciprocal_rank_fusion
+from jarvis.symbol_search import SymbolHit
+from jarvis.symbols import DescriptorKind
 
 
 def _row(path, start, end, symbol="s", content="body"):
@@ -407,3 +410,87 @@ def test_query_uses_the_tables_prefixes_not_the_configured_ones(tmp_path, lanced
     assert "warning" in result and "prefix" in result["warning"].lower()
     # Rebuilt with the table's empty prefixes, not the configured "WRONG: ".
     assert rebuilt == [("fake-model", "rev1", "", "")]
+
+
+def _class_hit() -> SymbolHit:
+    return SymbolHit(file_path="a.py", start_line=10, end_line=40,
+                     dotted_path="pkg.mod.Thing", kind=DescriptorKind.TYPE)
+
+
+def test_symbol_hit_merges_into_overlapping_vector_chunk():
+    vector_rows = [{"file_path": "a.py", "start_line": 8, "end_line": 42,
+                    "symbol_name": "Thing", "content": "class Thing: ..."}]
+    fused = reciprocal_rank_fusion("r", vector_rows, [], [_class_hit()])
+    assert len(fused) == 1
+    assert set(fused[0].sources) == {"vector", "symbol"}
+    # Merged entry keeps the vector chunk's coordinates and content.
+    assert fused[0].start_line == 8 and fused[0].content == "class Thing: ..."
+
+
+def test_symbol_hit_at_definition_line_merges_into_its_own_chunk():
+    """Regression: a chunker-derived chunk for a definition starts ON the
+    definition's own line (chunker.py's start_line is 1-indexed at the
+    node's own first line) -- the symbol hit for that same definition must
+    merge into it, not stand alone one line off."""
+    definition_line = 9
+    vector_rows = [{"file_path": "a.py", "start_line": definition_line, "end_line": 40,
+                    "symbol_name": "Thing", "content": "class Thing: ..."}]
+    hit = SymbolHit(file_path="a.py", start_line=definition_line, end_line=40,
+                    dotted_path="pkg.mod.Thing", kind=DescriptorKind.TYPE)
+    fused = reciprocal_rank_fusion("r", vector_rows, [], [hit])
+    assert len(fused) == 1
+    assert set(fused[0].sources) == {"vector", "symbol"}
+
+
+def test_standalone_symbol_hit_has_empty_content_and_dotted_name():
+    fused = reciprocal_rank_fusion("r", [], [], [_class_hit()])
+    assert len(fused) == 1
+    assert fused[0].sources == ("symbol",)
+    assert fused[0].symbol_name == "pkg.mod.Thing"
+    assert fused[0].content == ""
+    assert (fused[0].start_line, fused[0].end_line) == (10, 40)
+
+
+def test_three_source_hit_accumulates_unweighted_rrf_score():
+    vector_rows = [{"file_path": "a.py", "start_line": 8, "end_line": 42,
+                    "symbol_name": "Thing", "content": "class Thing: ..."}]
+    zoekt_hits = [ZoektHit(repo="r", path="a.py", line_number=10, line_text="class Thing")]
+    fused = reciprocal_rank_fusion("r", vector_rows, zoekt_hits, [_class_hit()])
+    assert len(fused) == 1
+    assert set(fused[0].sources) == {"vector", "zoekt", "symbol"}
+    # Each source contributed rank 1: score is exactly 3/(k+1).
+    assert abs(fused[0].score - 3 / 61) < 1e-9
+
+
+def test_fusion_without_symbol_list_is_unchanged():
+    """Two-list callers (and the scip_conn=None path) are byte-identical
+    to the pre-symbol behavior — pins the degradation contract."""
+    vector_rows = [{"file_path": "a.py", "start_line": 1, "end_line": 5,
+                    "symbol_name": None, "content": "x"}]
+    zoekt_hits = [ZoektHit(repo="r", path="b.py", line_number=2, line_text="y")]
+    assert (reciprocal_rank_fusion("r", vector_rows, zoekt_hits)
+            == reciprocal_rank_fusion("r", vector_rows, zoekt_hits, []))
+
+
+def test_semantic_search_with_none_scip_conn_matches_previous_behavior(tmp_path, lancedb_available):
+    from jarvis import semantic
+    data = _indexed(tmp_path)
+    result = semantic.semantic_search("myrepo", "function zero", root=data,
+                                      model=FakeEmbedder(), scip_conn=None)
+    assert result["total"] >= 1
+    assert result["results"][0]["sources"] == ["vector"]
+
+
+def test_semantic_search_symbol_signal_failure_degrades_silently(tmp_path, lancedb_available, monkeypatch):
+    from jarvis import semantic
+    data = _indexed(tmp_path)
+
+    def _boom(conn, query):
+        raise RuntimeError("index went away")
+
+    monkeypatch.setattr(semantic, "search_symbols", _boom)
+    result = semantic.semantic_search("myrepo", "function zero", root=data,
+                                      model=FakeEmbedder(), scip_conn=sqlite3.connect(":memory:"))
+    assert result["total"] >= 1
+    assert result["results"][0]["sources"] == ["vector"]
+    assert "error" not in result

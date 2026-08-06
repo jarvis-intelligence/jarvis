@@ -374,6 +374,17 @@ class QueryService:
         conn, _ = get_connection(self._cache, repo)
         return self._resolved(conn, symbol)
 
+    def connection(self, repo: str) -> sqlite3.Connection:
+        """The repo's cached read-only index connection.
+
+        Exists for semanticSearch's symbol signal (symbol_search.py), which
+        needs raw table access rather than a nav operation. Raises
+        IndexNotFoundError when no index is published — callers treating
+        the connection as optional catch that and pass None.
+        """
+        conn, _ = get_connection(self._cache, repo)
+        return conn
+
     def get_definitions(self, repo: str, symbol: str) -> tuple[list[Location], FreshnessSnapshot]:
         conn, metadata = get_connection(self._cache, repo)
         symbol = self._resolved(conn, symbol)
