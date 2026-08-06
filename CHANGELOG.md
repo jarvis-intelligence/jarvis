@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.1] - 2026-08-06
+
+No functional changes relative to 0.1.0 — this release exists purely to fix
+version resolution on PyPI.
+
+### Changed
+
+- **Version fast-forwarded past the orphaned pre-reset `0.5.0`.** The 0.0.1
+  clean-slate reset deleted the pre-reset tags and GitHub Releases, but
+  `jarvis-mcp 0.5.0` was never yanked on PyPI and remained the highest
+  non-yanked version there. Every unpinned install — `uvx --from jarvis-mcp`,
+  `pip install jarvis-mcp`, and the plugin's `--from "jarvis-mcp>=0.0.1"`
+  floor — therefore resolved to the stale pre-reset 0.5.0 instead of 0.0.1
+  or 0.1.0. Jumping to 0.5.1 makes the current code the effective latest for
+  all resolvers without requiring a yank. The intended post-reset numbering
+  (0.0.x/0.1.x) is abandoned; versioning continues from 0.5.1.
+
 ## [0.1.0] - 2026-08-06
 
 Minor rather than patch: `semanticSearch` gains a new capability — a third
