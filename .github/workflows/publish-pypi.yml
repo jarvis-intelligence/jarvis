@@ -1,42 +1,34 @@
 # Publishes jarvis-mcp to PyPI on a GitHub Release, via trusted publishing.
 #
-# Why trusted publishing: PyPI mints a short-lived token from this workflow's
-# OIDC identity, so there is no long-lived API token stored as a repo secret to
-# leak or rotate. That requires `permissions: id-token: write` below, and a
-# matching publisher configured on PyPI (see the one-time setup at the bottom).
+# Wheels are Cython-COMPILED (cp312..cp314 x linux x86_64/aarch64 x macOS
+# arm64/x86_64): the dev repo is private and the published artifact must not
+# ship readable source, so `uv build`'s pure wheel is never uploaded and no
+# sdist exists at all. scripts/check_wheel_contents.py is the guard that a
+# build silently regressing to pure Python (JARVIS_COMPILE unset, build_py
+# override dropped) fails before upload instead of after.
 #
-# Why the guard steps: the distribution name (`jarvis-mcp`) deliberately
-# differs from the import package (`jarvis`), which only works because of
-# `[tool.uv.build-backend] module-name` in pyproject.toml. Drop that and the
-# build still succeeds -- it just produces a wheel importing nothing. Likewise
-# the official MCP Registry verifies PyPI ownership by finding an `mcp-name`
-# marker in the published README, so losing that line breaks registry publishing
-# long after the fact. Both are cheap to assert here and expensive to discover
-# from a user's bug report.
+# Why trusted publishing: PyPI mints a short-lived token from the publish
+# job's OIDC identity, so there is no long-lived API token to leak or rotate.
+# That requires `permissions: id-token: write` and a matching publisher
+# configured on PyPI (workflow file name publish-pypi.yml, environment pypi)
+# -- renaming this file breaks publishing.
+#
+# The MCP Registry check: the official registry verifies PyPI ownership by
+# finding an `mcp-name` marker in the published README. Losing that line
+# breaks registry publishing long after the fact, so it is asserted here.
 name: publish-pypi
 
 on:
   release:
     types: [published]
-  # Manual runs are safe: PyPI rejects re-uploading an existing version, so the
-  # worst case is a loud failure rather than a clobbered release.
+  # Manual runs are safe: PyPI rejects re-uploading an existing version, so
+  # the worst case is a loud failure in the publish job -- build and smoke
+  # still validate the pipeline end-to-end.
   workflow_dispatch:
 
 jobs:
-  publish:
+  preflight:
     runs-on: ubuntu-latest
-
-    # Must match the environment name on the PyPI trusted publisher, if you set
-    # one. Also the place to require a manual approval before any upload.
-    environment:
-      name: pypi
-      url: https://pypi.org/p/jarvis-mcp
-
-    permissions:
-      # Required for PyPI trusted publishing. Nothing else needs write access.
-      id-token: write
-      contents: read
-
     steps:
       - uses: actions/checkout@v4
 
@@ -46,8 +38,7 @@ jobs:
         run: |
           set -eu
           # Integration tests are excluded: they shell out to scip/zoekt/
-          # scip-python, which setup-smoke.yml covers on real runners. This job
-          # only needs to know the package itself is not broken.
+          # scip-python, which setup-smoke.yml covers on real runners.
           uv sync
           uv run pytest -m "not integration" -q
 
@@ -65,36 +56,9 @@ jobs:
           fi
           echo "Version ${packaged} matches tag ${GITHUB_REF_NAME}"
 
-      - name: Build the sdist and wheel
-        run: |
-          set -eu
-          uv build
-          ls -la dist
-
-      - name: Verify the wheel ships the jarvis import package
-        run: |
-          set -eu
-          # `jarvis-mcp` is the distribution name; `jarvis` is the module.
-          # If module-name is ever dropped from pyproject.toml, the backend looks
-          # for src/jarvis_mcp/ instead and emits a wheel with no code.
-          uv run python - <<'PY'
-          import glob, sys, zipfile
-
-          wheel = glob.glob("dist/*.whl")[0]
-          names = zipfile.ZipFile(wheel).namelist()
-          modules = [n for n in names if n.startswith("jarvis/") and n.endswith(".py")]
-          if not modules:
-              tops = sorted({n.split("/")[0] for n in names})
-              sys.exit(f"{wheel} ships no jarvis/ modules; top-level entries: {tops}")
-          print(f"{wheel} ships {len(modules)} jarvis/ modules")
-          PY
-
       - name: Verify the MCP Registry ownership marker survived
         run: |
           set -eu
-          # The official MCP Registry verifies a PyPI package by finding
-          # `mcp-name: <server name>` in the package README (rendered as the
-          # PyPI description). It must match the `name` in server.json.
           marker='mcp-name: io.github.phuongddx/jarvis'
           if ! grep -qF "$marker" README.md; then
             echo "README.md is missing the registry ownership marker:" >&2
@@ -103,20 +67,59 @@ jobs:
           fi
           echo "Found the registry ownership marker"
 
-      - name: Smoke-test the wheel against a fresh dependency resolve
+  build-wheels:
+    needs: preflight
+    strategy:
+      fail-fast: true
+      matrix:
+        # One native runner per platform: cibuildwheel does not cross-compile.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build compiled wheels
+        # Matrix, JARVIS_COMPILE=1, and the per-wheel unit-test run all come
+        # from [tool.cibuildwheel] in pyproject.toml.
+        uses: pypa/cibuildwheel@v4.2.0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  smoke:
+    needs: build-wheels
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Verify every wheel ships compiled modules only
+        run: python3 scripts/check_wheel_contents.py dist/*.whl
+
+      - name: Smoke-test the compiled wheel against a fresh dependency resolve
         run: |
           set -eu
-          # Every step above resolves dependencies from uv.lock, so none of them
-          # can catch a dependency *range* that is broken for real users. 0.2.0
-          # shipped exactly that way: `mcp[cli]>=1.2.0` was uncapped, a fresh
-          # install pulled mcp 2.0.0, which removed `mcp.server.fastmcp`, and the
-          # server could not start at all -- while CI stayed green on the 1.x pin
-          # in the lockfile.
-          #
-          # So: install the built wheel into a clean environment with no lockfile
-          # in sight, and require the server to complete a real MCP handshake.
+          # Installs from dist/ with dependencies resolved from PyPI and no
+          # lockfile in sight, then requires a real MCP handshake -- the same
+          # guard that caught 0.2.0's uncapped mcp range, now also proving
+          # the compiled modules import and register on this platform.
+          version="$(uv version --short)"
           uv venv "${RUNNER_TEMP}/smoke" --python 3.12
-          uv pip install --python "${RUNNER_TEMP}/smoke/bin/python" dist/*.whl
+          uv pip install --python "${RUNNER_TEMP}/smoke/bin/python" \
+            --find-links dist "jarvis-mcp==${version}"
           "${RUNNER_TEMP}/smoke/bin/python" - <<'PY'
           import json, os, subprocess, sys
 
@@ -143,37 +146,55 @@ jobs:
 
           send({"jsonrpc": "2.0", "method": "notifications/initialized"})
           send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-          tools = sorted(t["name"] for t in expect("tools/list")["result"]["tools"])
+          tools = expect("tools/list")["result"]["tools"]
           proc.terminate()
 
+          names = sorted(t["name"] for t in tools)
           # Guards against shipping a build that starts but registers nothing.
-          if len(tools) != 9:
-              sys.exit(f"expected 9 tools, got {len(tools)}: {tools}")
-          print(f"tools/list -> {len(tools)}: {', '.join(tools)}")
+          if len(names) != 9:
+              sys.exit(f"expected 9 tools, got {len(names)}: {names}")
+          # FastMCP derives tool descriptions from server.py docstrings; a
+          # compilation mode that strips docstrings would pass every other
+          # gate and ship undocumented tools.
+          undescribed = sorted(t["name"] for t in tools
+                               if not (t.get("description") or "").strip())
+          if undescribed:
+              sys.exit(f"tools missing descriptions (docstrings lost?): {undescribed}")
+          print(f"tools/list -> {len(names)}: {', '.join(names)}")
           PY
+
+  publish:
+    needs: smoke
+    runs-on: ubuntu-latest
+
+    # Must match the environment name on the PyPI trusted publisher. Also the
+    # place to require a manual approval before any upload.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/jarvis-mcp
+
+    permissions:
+      # Required for PyPI trusted publishing. Nothing else needs write access.
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - uses: astral-sh/setup-uv@v5
 
       - name: Publish to PyPI
         run: |
           set -eu
+          ls -la dist
           # No token: --trusted-publishing exchanges this job's OIDC identity
           # for a short-lived PyPI token. `always` fails loudly rather than
           # silently falling back to an unauthenticated upload attempt.
-          uv publish --trusted-publishing always
+          uv publish --trusted-publishing always dist/*.whl
 
-# One-time setup, before the first release:
-#
-# 1. Create the project's trusted publisher at
-#    https://pypi.org/manage/account/publishing/ with:
-#      PyPI project name: jarvis-mcp
-#      Owner:             phuongddx
-#      Repository:        jarvis
-#      Workflow name:     publish-pypi.yml
-#      Environment:       pypi
-#    Use the "pending publisher" form -- it works before the project exists, so
-#    the very first upload can also come from this workflow.
-#
-# 2. Create a `pypi` environment under Settings -> Environments. Optionally add
-#    yourself as a required reviewer so every upload needs an explicit approval.
-#
-# 3. Cut a release: `git tag v0.2.0 && git push origin v0.2.0`, then publish a
-#    GitHub Release for that tag. This workflow does the rest.
+# One-time setup notes (trusted publisher, `pypi` environment, release tagging)
+# are unchanged from the pure-wheel era -- see git history of this file.
