@@ -26,6 +26,12 @@ on:
   # still validate the pipeline end-to-end.
   workflow_dispatch:
 
+# Default for every job; `publish` overrides with its own more-restrictive
+# block (id-token: write, contents: read) since that's the only job that
+# needs to write anything.
+permissions:
+  contents: read
+
 jobs:
   preflight:
     runs-on: ubuntu-latest
@@ -73,7 +79,9 @@ jobs:
       fail-fast: true
       matrix:
         # One native runner per platform: cibuildwheel does not cross-compile.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13]
+        # macos-13 was retired by GitHub in Dec 2025; macos-15-intel is the
+        # designated x86_64 replacement.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +89,7 @@ jobs:
       - name: Build compiled wheels
         # Matrix, JARVIS_COMPILE=1, and the per-wheel unit-test run all come
         # from [tool.cibuildwheel] in pyproject.toml.
-        uses: pypa/cibuildwheel@v4.2.0
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074 # v4.2.0
 
       - uses: actions/upload-artifact@v4
         with:
@@ -108,6 +116,17 @@ jobs:
 
       - name: Verify every wheel ships compiled modules only
         run: python3 scripts/check_wheel_contents.py dist/*.whl
+
+      - name: Verify exactly 12 wheels were built (3 Python versions x 4 platforms)
+        run: |
+          set -eu
+          count=$(ls dist/*.whl | wc -l)
+          if [ "$count" -ne 12 ]; then
+            echo "Expected 12 wheels, found $count:" >&2
+            ls dist/*.whl >&2
+            exit 1
+          fi
+          echo "Confirmed 12 wheels present"
 
       - name: Smoke-test the compiled wheel against a fresh dependency resolve
         run: |
@@ -143,6 +162,19 @@ jobs:
                 "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                            "clientInfo": {"name": "publish-smoke", "version": "0"}}})
           print("initialize ->", expect("initialize")["result"]["serverInfo"])
+
+          # --find-links dist sits alongside the default PyPI index, so on a
+          # workflow_dispatch dry-run against an already-published version the
+          # resolver could legitimately pick an OLD readable wheel from PyPI
+          # instead of the one just built. A compiled extension module's path
+          # ends in .so on both Linux and macOS (the platforms in this matrix),
+          # so this fails loudly if the wrong wheel won the resolve.
+          import jarvis.query
+          if not jarvis.query.__file__.endswith(".so"):
+              sys.exit(f"expected a compiled jarvis.query (.so), got "
+                        f"{jarvis.query.__file__} -- resolver likely picked an "
+                        f"old readable wheel from PyPI instead of dist/")
+          print("compiled-module check -> jarvis.query:", jarvis.query.__file__)
 
           send({"jsonrpc": "2.0", "method": "notifications/initialized"})
           send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
@@ -196,5 +228,22 @@ jobs:
           # silently falling back to an unauthenticated upload attempt.
           uv publish --trusted-publishing always dist/*.whl
 
-# One-time setup notes (trusted publisher, `pypi` environment, release tagging)
-# are unchanged from the pure-wheel era -- see git history of this file.
+# One-time setup, before the first release:
+#
+# 1. Create the project's trusted publisher at
+#    https://pypi.org/manage/account/publishing/ with:
+#      PyPI project name: jarvis-mcp
+#      Owner:             phuongddx
+#      Repository:        jarvis
+#      Workflow name:     publish-pypi.yml
+#      Environment:       pypi
+#    Use the "pending publisher" form -- it works before the project exists, so
+#    the very first upload can also come from this workflow.
+#
+# 2. Create a `pypi` environment under Settings -> Environments. Optionally add
+#    yourself as a required reviewer so every upload needs an explicit approval.
+#
+# 3. Cut a release: bump the version, tag it (`git tag vX.Y.Z && git push origin
+#    vX.Y.Z`), then publish a GitHub Release for that tag. This workflow does
+#    the rest. These steps are unchanged from the pure-wheel era; only the
+#    build/publish steps above changed for the compiled-wheel matrix.
