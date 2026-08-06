@@ -43,9 +43,18 @@ jobs:
           # rsync --delete so a file removed here is removed there, but never
           # touch .git or jarvis-dist's own README (which describes jarvis-dist
           # itself and has no counterpart in this repo).
-          rsync -a --delete --exclude '.git/' setup.sh "${dest}/setup.sh"
-          rsync -a --delete --exclude '.git/' .claude-plugin/ "${dest}/.claude-plugin/"
-          rsync -a --delete --exclude '.git/' plugin/ "${dest}/plugin/"
+          #
+          # --ignore-times is load-bearing: rsync's default quick-check skips
+          # files whose size and mtime match, and both legs of that check lie
+          # here. A version-only bump ("0.1.0" -> "0.5.1") keeps plugin.json's
+          # byte count identical, and the checkout and the clone materialize
+          # within the same second on a fast runner — so the v0.5.1 sync
+          # skipped the only changed file and reported "already up to date"
+          # while jarvis-dist served a stale version. Copy unconditionally;
+          # the git-diff gate below already makes no-op releases push nothing.
+          rsync -a --ignore-times --delete --exclude '.git/' setup.sh "${dest}/setup.sh"
+          rsync -a --ignore-times --delete --exclude '.git/' .claude-plugin/ "${dest}/.claude-plugin/"
+          rsync -a --ignore-times --delete --exclude '.git/' plugin/ "${dest}/plugin/"
           ls -la "$dest"
 
       - name: Commit and push only if something changed
