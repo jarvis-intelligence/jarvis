@@ -92,33 +92,12 @@ def lancedb_available():
     pytest.importorskip("lancedb")
 
 
-class _BlockImportFinder:
-    """Meta-path finder that fails one import as if the module were absent.
-
-    `monkeypatch.setitem(sys.modules, name, None)` simulates "not installed"
-    via CPython's None-in-sys.modules sentinel, but Cython's compiled `import
-    x` takes a fast path that reads sys.modules directly and does not
-    replicate that sentinel check -- it returns the cached None object
-    instead of raising ImportError. Raising from find_spec() instead forces
-    a real import-machinery failure that both CPython and Cython consult
-    identically, so this exercises the same failure real users hit when the
-    package genuinely isn't installed.
-    """
-
-    def __init__(self, blocked_name):
-        self._blocked_name = blocked_name
-
-    def find_spec(self, fullname, path, target=None):
-        if fullname == self._blocked_name:
-            raise ModuleNotFoundError(f"No module named {fullname!r}")
-        return None
-
-
 def test_missing_lancedb_raises_install_hint(tmp_path, monkeypatch):
     from jarvis.embeddings import SemanticExtraMissingError
     from jarvis.semantic import SemanticStore
+    from tests.conftest import BlockImportFinder
     monkeypatch.delitem(sys.modules, "lancedb", raising=False)
-    monkeypatch.setattr(sys, "meta_path", [_BlockImportFinder("lancedb"), *sys.meta_path])
+    monkeypatch.setattr(sys, "meta_path", [BlockImportFinder("lancedb"), *sys.meta_path])
     store = SemanticStore(tmp_path / "lancedb")
     # Escaped: `match` is a regex and [semantic] would read as a character class.
     with pytest.raises(
