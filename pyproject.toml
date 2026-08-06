@@ -43,7 +43,12 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
     "Typing :: Typed",
 ]
-requires-python = ">=3.12"
+# Capped below 3.15: the compiled-wheel matrix ([tool.cibuildwheel] below)
+# only builds cp312/cp313/cp314. An uncapped floor would let uv resolve 3.15
+# once that becomes its default managed interpreter, find no matching wheel
+# (there is no sdist to fall back to), and fail `uvx --from jarvis-mcp
+# jarvis-server` outright instead of picking a supported interpreter.
+requires-python = ">=3.12,<3.15"
 dependencies = [
     # Capped below 2.0: mcp 2.0.0 removed `mcp.server.fastmcp`, which
     # server.py imports, so an uncapped range lets a fresh install resolve a
@@ -86,7 +91,11 @@ jarvis-server = "jarvis.server:main"
 # Cython is listed unconditionally: build-system requires is static, and the
 # release path (JARVIS_COMPILE=1 in publish-pypi.yml) needs it. Dev builds
 # pay one extra download in the isolated build env and compile nothing.
-requires = ["setuptools>=80.9", "Cython>=3.1"]
+# Capped below the next major, like every dependency below: this resolves
+# fresh in CI at release time with no uv.lock protection, and setup.py
+# overrides a semi-internal setuptools API (`build_py.find_package_modules`)
+# that could shift between majors.
+requires = ["setuptools>=80.9,<90", "Cython>=3.1,<4"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -110,7 +119,12 @@ markers = ["integration: exercises real external binaries (scip-python, scip, zo
 build = ["cp312-*", "cp313-*", "cp314-*"]
 skip = ["*-musllinux_*"]
 environment = { JARVIS_COMPILE = "1" }
-# The full unit suite against the INSTALLED compiled wheel is the empirical
-# gate for Cython semantic fidelity (frozen dataclasses, `str | None`, ...).
+# The unit suite against the INSTALLED compiled wheel is the empirical gate
+# for Cython semantic fidelity (frozen dataclasses, `str | None`, ...). This
+# does NOT install the `semantic` extra -- pulling torch into 12 builds
+# across 4 runners (including an aarch64 container) would be expensive and
+# flaky -- so every test gated behind `pytest.importorskip("lancedb")` or
+# `pytest.importorskip("tree_sitter_language_pack")` skips here. Full-extras
+# compiled-wheel coverage is not yet automated.
 test-requires = ["pytest>=8.3"]
 test-command = "pytest {project}/tests -m 'not integration' -q"
