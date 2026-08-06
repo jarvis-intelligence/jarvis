@@ -1,0 +1,59 @@
+digraph jarvis_index_pipeline {
+    rankdir=TB;
+    bgcolor="white";
+    fontname="Helvetica";
+    labelloc="t";
+    fontsize=20;
+    label="jarvis index — pipeline, two publish modes, failure semantics";
+    node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, margin="0.16,0.09"];
+    edge [color="#666666", arrowsize=0.7, fontname="Helvetica-Oblique", fontsize=9];
+
+    /* ---------- Preflight ---------- */
+    subgraph cluster_preflight {
+        label="PREFLIGHT  (index_cli.index_repo)";
+        fontname="Helvetica-Bold"; fontsize=13; color="#6b7280"; style="rounded"; bgcolor="#f9fafb";
+
+        P1 [label="resolve path + slug · git HEAD sha", fillcolor="#f3f4f6", color="#6b7280"];
+        P2 [label="one-slug-per-path gate · scip >= 0.9.0 check", fillcolor="#f3f4f6", color="#6b7280"];
+        P3 [label="resolve sticky flags\n(search_only · language · scheme · semantic_include\npersisted; reindex/watch never re-pass them)", fillcolor="#f3f4f6", color="#6b7280"];
+        P4 [label="detect_language — git ls-files, not a filesystem walk\n(override bypasses detection entirely)", fillcolor="#f3f4f6", color="#6b7280"];
+    }
+
+    MODE [label="publish mode?", shape=diamond, style="filled", fillcolor="#fde68a", color="#b45309", fontsize=12];
+
+    /* ---------- Full pipeline ---------- */
+    subgraph cluster_full {
+        label="FULL  (SCIP + search)";
+        fontname="Helvetica-Bold"; fontsize=13; color="#2563eb"; style="rounded"; bgcolor="#eff6ff";
+
+        F1 [label="scip-* indexer → index.scip\n(java: parallel=false + bash shim · swift: xcodebuild override)", fillcolor="#dbeafe", color="#2563eb"];
+        F2 [label="scip expt-convert → index.db (scratch)", fillcolor="#dbeafe", color="#2563eb"];
+        F3 [label="populate_graph_for_repo → registry.db\n(clear outgoing edges, then rebuild — never accumulate)", fillcolor="#bfdbfe", color="#2563eb"];
+        F4 [label="git config zoekt.name <slug> · zoekt-git-index\n(indexes HEAD · coverage warn vs tracked blobs · sweep .tmp orphans)", fillcolor="#bfdbfe", color="#2563eb"];
+        F5 [label="semantic stage (optional extra, NON-FATAL)\nchunk → embed (hash-reuse) → LanceDB overwrite", fillcolor="#bfdbfe", color="#2563eb"];
+        F6 [label="ATOMIC PUBLISH\ncopy index-<sha>.db + metadata → os.replace() pointer flip\nold version deleted only after new pointer is live", style="filled,bold", fillcolor="#93c5fd", color="#1d4ed8", fontsize=12];
+    }
+
+    /* ---------- Search-only pipeline ---------- */
+    subgraph cluster_searchonly {
+        label="SEARCH-ONLY  (--search-only, or auto-fallback on known-unfixable indexer signatures: Android/AGP, Kotlin ABI mismatch)";
+        fontname="Helvetica-Bold"; fontsize=13; color="#16a34a"; style="rounded"; bgcolor="#f0fdf4";
+
+        S1 [label="retire prior SCIP artifacts\n(delete pointer dir + clear graph edges — stale nav must not survive)", fillcolor="#dcfce7", color="#16a34a"];
+        S2 [label="zoekt-git-index + semantic stage\nNO current pointer written → nav tools fail safely with explanation", fillcolor="#bbf7d0", color="#16a34a"];
+    }
+
+    /* ---------- Terminal states ---------- */
+    OK      [label="status: indexed\n(or partial — symbols but no positions)", shape=box, style="filled,bold", fillcolor="#bbf7d0", color="#15803d"];
+    SO      [label="status: search-only\n(persisted — reindex/watch skip the doomed build)", shape=box, style="filled,bold", fillcolor="#bbf7d0", color="#15803d"];
+    FAIL    [label="status: failed\nANY step raises → previous index stays live\n(pointer untouched; no half-published state)", shape=box, style="filled,bold", fillcolor="#fecaca", color="#b91c1c"];
+
+    P1 -> P2 -> P3 -> P4 -> MODE;
+    MODE -> F1 [label="  full"];
+    MODE -> S1 [label="  search-only"];
+    F1 -> F2 -> F3 -> F4 -> F5 -> F6 -> OK;
+    F1 -> S1 [label="  known-unfixable signature\n  (persist search_only=1)", color="#16a34a", fontcolor="#16a34a"];
+    S1 -> S2 -> SO;
+    F1 -> FAIL [label="  any other error", color="#b91c1c", fontcolor="#b91c1c"];
+    F6 -> FAIL [style=invis]; /* layout hint: keep FAIL near the bottom */
+}

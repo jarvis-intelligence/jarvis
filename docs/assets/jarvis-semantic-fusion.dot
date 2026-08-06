@@ -1,0 +1,47 @@
+digraph jarvis_semantic_fusion {
+    rankdir=TB;
+    bgcolor="white";
+    fontname="Helvetica";
+    labelloc="t";
+    fontsize=20;
+    label="semanticSearch — three-signal reciprocal rank fusion (query path)";
+    node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, margin="0.16,0.09"];
+    edge [color="#666666", arrowsize=0.7, fontname="Helvetica-Oblique", fontsize=9];
+
+    Q [label="semanticSearch(repo, query, limit)\nserver.py — scip_conn + zoekt_base_url both optional, resolved best-effort", fillcolor="#f3f4f6", color="#6b7280", fontsize=12];
+
+    /* ---------- The three signals ---------- */
+    subgraph cluster_vector {
+        label="VECTOR  (always on)";
+        fontname="Helvetica-Bold"; fontsize=13; color="#2563eb"; style="rounded"; bgcolor="#eff6ff";
+        V1 [label="embed query with the table's recorded\nmodel identity (never the configured one)", fillcolor="#dbeafe", color="#2563eb"];
+        V2 [label="LanceDB cosine top-30\n(tree-sitter chunks, 1-based lines)", fillcolor="#bfdbfe", color="#2563eb"];
+    }
+
+    subgraph cluster_zoekt {
+        label="ZOEKT  (degrades silently)";
+        fontname="Helvetica-Bold"; fontsize=13; color="#16a34a"; style="rounded"; bgcolor="#f0fdf4";
+        Z1 [label="r:<slug> query → top-30 line hits\n(lexical/trigram, indexes HEAD, 1-based lines)\nspawn failure → signal absent", fillcolor="#bbf7d0", color="#16a34a"];
+    }
+
+    subgraph cluster_symbol {
+        label="SYMBOL  (new in 0.5.1 — degrades silently)";
+        fontname="Helvetica-Bold"; fontsize=13; color="#9333ea"; style="rounded"; bgcolor="#faf5ff";
+        Y1 [label="extract_tokens: lowercase, drop stopwords/short,\ndedupe — dotted tokens kept whole", fillcolor="#f3e8ff", color="#9333ea"];
+        Y2 [label="match 3 rungs vs SCIP name map (case-insensitive):\nverbatim token · adjacent-token bigram · dotted suffix", fillcolor="#e9d5ff", color="#9333ea"];
+        Y3 [label="rank: matched-token count → kind priority\n(TYPE > METHOD > TERM) → shorter dotted path", fillcolor="#e9d5ff", color="#9333ea"];
+        Y4 [label="resolve defn_enclosing_ranges → top-10 definition sites\nSCIP 0-based → 1-based converted HERE (the one seam)\nno-definition candidates (externals, partial index) silently dropped", fillcolor="#d8b4fe", color="#9333ea"];
+    }
+
+    /* ---------- Fusion ---------- */
+    RRF [label="reciprocal_rank_fusion — k=60, all three lists UNWEIGHTED (1/(k+rank))\nZoekt line or symbol definition inside a vector chunk's range → merges into that chunk\n(shared containment rule: _containing_chunk_key)", style="filled,bold", fillcolor="#fde68a", color="#b45309", fontsize=12];
+
+    R [label="ranked results — sources ⊆ {vector, zoekt, symbol}\nsymbol-only hit: content=\"\" · symbolName=<dotted path>\nno SCIP index / partial / any signal failure ⇒ byte-identical to two-signal output", fillcolor="#f3f4f6", color="#6b7280", fontsize=11];
+
+    Q -> V1; V1 -> V2;
+    Q -> Z1;
+    Q -> Y1 [label="  scip_conn != None"];
+    Y1 -> Y2 -> Y3 -> Y4;
+    V2 -> RRF; Z1 -> RRF; Y4 -> RRF;
+    RRF -> R;
+}

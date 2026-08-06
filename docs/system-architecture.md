@@ -27,7 +27,7 @@ other contract.
 |---|---|
 | 1 · Clients | Claude Code, Cursor, any MCP host |
 | 2 · MCP Server | `server.py` — FastMCP over stdio, 9 tools |
-| 3 · Engines | Query (`query.py`), Search (`search.py`), Graph (`graph.py`), Semantic (`semantic.py`, `chunker.py`, `embeddings.py`) |
+| 3 · Engines | Query (`query.py`), Search (`search.py`), Graph (`graph.py`), Semantic (`semantic.py`, `chunker.py`, `embeddings.py`, `symbol_search.py`) |
 | 4 · Storage | `index-<sha>.db` + pointer, `.zoekt/` shards, `registry.db`, `~/.jarvis/lancedb/` |
 | 5 · Indexing orchestration | `index_cli.py` — detect → run indexer → convert → graph/zoekt → atomic publish |
 | 6 · Language indexers | `scip-typescript`, `scip-python`, `scip-java`, `scip-swift` |
@@ -55,6 +55,11 @@ Expanding layers 1–4 of the table above, the runtime path is:
 
 The full indexing lifecycle, from file changes → published index (layers 5–7 of the table above,
 writing up into the storage seam):
+
+![jarvis index pipeline](assets/jarvis-index-pipeline.png)
+
+*Editable source: [`assets/jarvis-index-pipeline.dot`](assets/jarvis-index-pipeline.dot) (Graphviz).
+Regenerate with `dot -Tpng -o docs/assets/jarvis-index-pipeline.png docs/assets/jarvis-index-pipeline.dot`.*
 
 ### The Pipeline (index_cli.py)
 
@@ -282,6 +287,11 @@ When a user calls `blastRadius(repo, symbol_or_package)`:
 
 When a user calls `semanticSearch(repo, query, limit=10)`:
 
+![semanticSearch three-signal fusion](assets/jarvis-semantic-fusion.png)
+
+*Editable source: [`assets/jarvis-semantic-fusion.dot`](assets/jarvis-semantic-fusion.dot) (Graphviz).
+Regenerate with `dot -Tpng -o docs/assets/jarvis-semantic-fusion.png docs/assets/jarvis-semantic-fusion.dot`.*
+
 1. **Admission (indexing time, `chunker.py`)**
    - `iter_source_files()` walks the repo, then drops anything `.gitignore` matches (via one
      batched `git check-ignore --stdin` call, `gitignored()`) — a subprocess failure degrades to
@@ -323,8 +333,11 @@ When a user calls `semanticSearch(repo, query, limit=10)`:
 5. **Query (`semantic.py`: `semantic_search()`)**
    - Embeds the query using the full identity stored in the table (model, revision, *and*
      prefixes — never whatever's currently configured) and runs a cosine-metric vector search
-   - Fuses vector hits with `searchCode`'s Zoekt lexical hits via `reciprocal_rank_fusion()` (k=60);
-     degrades to vector-only if Zoekt is unavailable
+   - `symbol_search.search_symbols()` matches query tokens against the SCIP name map (when a
+     SCIP index exists) and resolves ranked candidates to definition locations — the third signal
+   - Fuses vector hits, `searchCode`'s Zoekt lexical hits, and the symbol-definition hits via
+     `reciprocal_rank_fusion()` (k=60, all signals unweighted); each signal degrades silently
+     when unavailable — no SCIP index or a Zoekt spawn failure never errors the search
 
 6. **Response to MCP client**
    - Returns ranked hits; includes a `"warning"` field if the table's recorded identity differs
