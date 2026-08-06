@@ -56,11 +56,12 @@ Three engines sit behind the MCP server, each backed by its own storage:
 - **Graph** (`graph.py` + `registry.py`) — package dependency graph (`packages`/`edges` in
   `registry.db`) driving `blastRadius` (2-hop BFS). `populate_graph_for_repo()` clears a repo's
   outgoing edges before recomputing — rebuild-not-accumulate, so retracted dependencies don't linger.
-- **Semantic** (`chunker.py` + `embeddings.py` + `semantic.py`) — tree-sitter chunking →
-  sentence-transformers embeddings → a per-repo LanceDB table under `~/.jarvis/lancedb/`.
-  `semanticSearch` fuses vector hits with Zoekt hits via reciprocal rank fusion. Gated behind the
-  optional `semantic` extra; the indexing stage is non-fatal in `jarvis index` (a failure there
-  never blocks the SCIP/Zoekt publish). A LanceDB table only ever holds vectors from one
+- **Semantic** (`chunker.py` + `embeddings.py` + `semantic.py` + `symbol_search.py`) — tree-sitter
+  chunking → sentence-transformers embeddings → a per-repo LanceDB table under `~/.jarvis/lancedb/`.
+  `semanticSearch` fuses vector hits with Zoekt hits and SCIP symbol-definition matches (via
+  `symbol_search.py`, reusing `symbols.py`'s name-map machinery) via reciprocal rank fusion. Gated
+  behind the optional `semantic` extra; the indexing stage is non-fatal in `jarvis index` (a failure
+  there never blocks the SCIP/Zoekt publish). A LanceDB table only ever holds vectors from one
   model+revision — the model-identity rule.
 
 **Index pipeline** (`index_cli.py`, `index_repo()`): detect language by extension plurality

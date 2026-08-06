@@ -7,6 +7,7 @@ works without the `semantic` extra.
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from jarvis.chunker import (
 )
 from jarvis.embeddings import EmbeddingModel, default_model
 from jarvis.search import ZoektHit, ZoektUnavailableError, search_zoekt
+from jarvis.symbol_search import SymbolHit, search_symbols
 
 RRF_K = 60
 VECTOR_TOP_K = 30
@@ -41,8 +43,22 @@ class FusedHit:
     sources: tuple[str, ...]
 
 
+def _containing_chunk_key(vector_rows: list[dict], file_path: str, line: int) -> tuple | None:
+    """The (file_path, start_line, end_line) key of the vector_rows entry
+    whose range contains `line` in `file_path`, or None. Shared by the
+    Zoekt and symbol merge rules in reciprocal_rank_fusion — both credit
+    the vector chunk containing a hit's line rather than standing alone."""
+    return next(
+        ((r["file_path"], r["start_line"], r["end_line"]) for r in vector_rows
+         if r["file_path"] == file_path and r["start_line"] <= line <= r["end_line"]),
+        None,
+    )
+
+
 def reciprocal_rank_fusion(repo: str, vector_rows: list[dict],
-                           zoekt_hits: list[ZoektHit], *, k: int = RRF_K) -> list[FusedHit]:
+                           zoekt_hits: list[ZoektHit],
+                           symbol_hits: tuple[SymbolHit, ...] | list[SymbolHit] = (),
+                           *, k: int = RRF_K) -> list[FusedHit]:
     entries: dict[tuple, dict] = {}
 
     def _add(key: tuple, rank: int, source: str, row: dict | None) -> None:
@@ -57,17 +73,27 @@ def reciprocal_rank_fusion(repo: str, vector_rows: list[dict],
         _add((row["file_path"], row["start_line"], row["end_line"]), rank, "vector", row)
 
     for rank, hit in enumerate(zoekt_hits, start=1):
-        merged_key = next(
-            ((r["file_path"], r["start_line"], r["end_line"]) for r in vector_rows
-             if r["file_path"] == hit.path and r["start_line"] <= hit.line_number <= r["end_line"]),
-            None,
-        )
+        merged_key = _containing_chunk_key(vector_rows, hit.path, hit.line_number)
         if merged_key is not None:
             _add(merged_key, rank, "zoekt", None)
         else:
             _add((hit.path, hit.line_number, hit.line_number), rank, "zoekt",
                  {"file_path": hit.path, "start_line": hit.line_number,
                   "end_line": hit.line_number, "symbol_name": None, "content": hit.line_text})
+
+    for rank, sym in enumerate(symbol_hits, start=1):
+        # Same containment rule as the Zoekt merge above: credit the vector
+        # chunk that contains the definition's start line, else stand alone.
+        merged_key = _containing_chunk_key(vector_rows, sym.file_path, sym.start_line)
+        if merged_key is not None:
+            _add(merged_key, rank, "symbol", None)
+        else:
+            # No content: the SCIP db stores no source text, and the agent
+            # has file/lines to read. symbol_name carries the dotted path.
+            _add((sym.file_path, sym.start_line, sym.end_line), rank, "symbol",
+                 {"file_path": sym.file_path, "start_line": sym.start_line,
+                  "end_line": sym.end_line, "symbol_name": sym.dotted_path,
+                  "content": ""})
 
     fused = [
         FusedHit(repo=repo, file_path=e["row"]["file_path"],
@@ -285,7 +311,8 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
 
 def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None = None,
                     zoekt_base_url: str | None = None,
-                    model: EmbeddingModel | None = None) -> dict:
+                    model: EmbeddingModel | None = None,
+                    scip_conn: sqlite3.Connection | None = None) -> dict:
     store = SemanticStore(config.lancedb_dir(root))
     identity = store.table_identity(slug)
     if identity is None:
@@ -321,7 +348,16 @@ def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None
         except ZoektUnavailableError:
             pass  # hybrid degrades to vector-only; sources fields reflect it
 
-    fused = reciprocal_rank_fusion(slug, vector_rows, zoekt_hits)[:limit]
+    symbol_hits: list[SymbolHit] = []
+    if scip_conn is not None:
+        try:
+            symbol_hits = search_symbols(scip_conn, query)
+        except Exception:
+            # Best-effort by contract: the symbol signal may only ever add.
+            # Silent like the Zoekt degradation above; sources reflect it.
+            pass
+
+    fused = reciprocal_rank_fusion(slug, vector_rows, zoekt_hits, symbol_hits)[:limit]
     result = {
         "query": query,
         "results": [

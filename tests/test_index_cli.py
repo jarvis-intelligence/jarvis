@@ -2103,3 +2103,35 @@ def test_get_index_status_reports_incomplete_after_a_shard_is_deleted(tmp_path: 
 
     assert fields["searchCoverage"]["complete"] is False
     assert fields["searchCoverage"]["indexed"] < fields["searchCoverage"]["expected"]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_symbol_search_finds_definitions_in_real_index(tmp_path: Path):
+    """The semanticSearch symbol signal, end-to-end against a real published
+    index: an NL query naming the fixture's class returns its definition."""
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    slug = index_repo(repo_dir, root=data_root)
+
+    target_dir = config.index_dir(slug, data_root)
+    pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
+    conn = sqlite3.connect(f"file:{target_dir / pointer}?mode=ro&immutable=1", uri=True)
+    try:
+        from jarvis.symbol_search import search_symbols
+
+        hits = search_symbols(conn, "where is the Greeter class defined")
+        assert hits, "expected at least one symbol hit for 'Greeter'"
+        top = hits[0]
+        assert top.file_path == "greeter.py"
+        assert top.dotted_path.endswith("Greeter")
+        assert top.start_line == 9  # 1-based: `class Greeter:` is on line 9
+
+        # A method query resolves too, proving defn_enclosing_ranges depth.
+        method_hits = search_symbols(conn, "say_hi")
+        say_hi_hit = next(h for h in method_hits if h.dotted_path.endswith("say_hi"))
+        assert say_hi_hit.start_line == 10  # 1-based: `def say_hi(...)` is on line 10
+    finally:
+        conn.close()

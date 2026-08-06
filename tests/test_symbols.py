@@ -277,3 +277,34 @@ def test_stale_full_symbol_hints_the_bare_name_instead_of_a_bare_not_found():
     message = str(excinfo.value)
     assert "stale" in message.lower() or "different package version" in message.lower()
     assert "'greet'" in message
+
+
+def test_public_name_map_buckets_by_leaf_name():
+    """name_map() is the public accessor symbol_search composes with —
+    same cached map resolve() uses, keyed by leaf descriptor name."""
+    from jarvis.symbols import name_map
+
+    conn = _conn(TS_METHOD, TS_TYPE)
+    buckets = name_map(conn)
+    assert {c.symbol for c in buckets["greet"]} == {TS_METHOD}
+    assert {c.symbol for c in buckets["Greeter"]} == {TS_TYPE}
+
+
+def test_dotted_suffix_matches_is_case_sensitive_by_default():
+    """Default preserves resolve()'s existing rung-2 semantics exactly."""
+    from jarvis.symbols import dotted_suffix_matches, name_map
+
+    conn = _conn(TS_METHOD, TS_ANIMAL_GREET)
+    buckets = name_map(conn)
+    assert {c.symbol for c in dotted_suffix_matches(buckets, "Greeter.greet")} == {TS_METHOD}
+    assert dotted_suffix_matches(buckets, "greeter.greet") == []  # wrong case, no match
+
+
+def test_dotted_suffix_matches_case_insensitive_when_requested():
+    """symbol_search.py's use case: lowercased query against the map."""
+    from jarvis.symbols import dotted_suffix_matches, name_map
+
+    conn = _conn(TS_METHOD, TS_ANIMAL_GREET)
+    buckets = name_map(conn)
+    hits = dotted_suffix_matches(buckets, "greeter.greet", case_sensitive=False)
+    assert {c.symbol for c in hits} == {TS_METHOD}

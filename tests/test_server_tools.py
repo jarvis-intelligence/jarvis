@@ -13,6 +13,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from jarvis import config, query, server
 from jarvis.graph import GraphStore
+from jarvis.index_reader import IndexNotFoundError
 from jarvis.search import ZoektLifecycle
 from jarvis.symbols import AmbiguousSymbolError, Candidate, DescriptorKind
 from tests.fixtures.synthetic_index import CLASS_SYMBOL, DOC_GREETER, METHOD_SYMBOL, build_published_index
@@ -272,7 +273,7 @@ async def test_type_hierarchy_returns_results_when_relationships_present():
 
 
 def test_semantic_search_tool_returns_results(monkeypatch):
-    def _fake_search(repo, query, limit, zoekt_base_url=None):
+    def _fake_search(repo, query, limit, zoekt_base_url=None, scip_conn=None):
         return {"query": query, "results": [], "total": 0}
 
     monkeypatch.setattr(server, "_zoekt_base_url_or_none", lambda: "http://x")
@@ -289,6 +290,16 @@ def test_semantic_search_tool_wraps_errors(monkeypatch):
     monkeypatch.setattr("jarvis.semantic.semantic_search", _boom)
     result = server.semantic_search_tool(repo="r", query="q")
     assert "no semantic index" in result["error"]
+
+
+def test_scip_conn_or_none_returns_none_when_no_index(monkeypatch):
+    """Search-only repos (IndexNotFoundError) and any other failure both
+    degrade to None -- semanticSearch must not error over a missing SCIP index."""
+    def _boom(*args, **kwargs):
+        raise IndexNotFoundError("no index published")
+
+    monkeypatch.setattr(server.QueryService, "connection", _boom)
+    assert server._scip_conn_or_none(REPO) is None
 
 
 def test_error_payload_explains_a_search_only_repo(tmp_path: Path, monkeypatch):

@@ -7,7 +7,7 @@
 **Core value proposition:**
 - **Structural navigation** (SCIP) at your fingertips: go-to-definition, find-references, call/type hierarchy, document symbols
 - **Lexical search** with Zoekt: index your repos once, search instantly across all indexed code
-- **Semantic/vector search:** ask in plain English (`semanticSearch`) and get tree-sitter-chunked code ranked by a self-hosted embedding model, fused with lexical hits — distinct from SCIP's structural navigation above
+- **Semantic/vector search:** ask in plain English (`semanticSearch`) and get tree-sitter-chunked code ranked by a self-hosted embedding model, fused with lexical hits and SCIP symbol-definition matches — bridges toward SCIP's structural navigation above rather than being fully distinct from it
 - **Single-user, local:** read-only runtime, atomic publish guarantees, privacy-by-default
 - **Minimal dependencies:** stdlib sqlite3, plain dataclasses, no ORMs or async framework bloat
 

@@ -259,7 +259,29 @@ def _name_map(conn: sqlite3.Connection) -> dict[str, list[Candidate]]:
     return cached
 
 
-def _matches(name_map: dict[str, list[Candidate]], query: str) -> list[Candidate]:
+def name_map(conn: sqlite3.Connection) -> dict[str, list[Candidate]]:
+    """Public accessor for the cached leaf-name -> candidates map.
+
+    Exists for symbol_search.py, which builds its lowercased view on top —
+    a public seam instead of a cross-module private reach. Treat the
+    returned map as read-only: it is the cache entry itself, not a copy.
+    """
+    return _name_map(conn)
+
+
+def dotted_suffix_matches(
+    name_map: dict[str, list[Candidate]], query: str, *, case_sensitive: bool = True
+) -> list[Candidate]:
+    """Public accessor for the dotted-suffix matching rule `_matches`
+    implements. `resolve()` keeps calling `_matches` directly (unaffected,
+    default `case_sensitive=True`); this wrapper exists so symbol_search.py's
+    case-insensitive dotted-token rung reuses the one rule instead of
+    reimplementing it.
+    """
+    return _matches(name_map, query, case_sensitive=case_sensitive)
+
+
+def _matches(name_map: dict[str, list[Candidate]], query: str, *, case_sensitive: bool = True) -> list[Candidate]:
     """Candidates whose dotted path equals `query` or ends with '.' + query.
 
     The leaf-name bucket is the fast path. It misses when the query's own
@@ -270,7 +292,8 @@ def _matches(name_map: dict[str, list[Candidate]], query: str) -> list[Candidate
     suffix = "." + query
 
     def hit(candidate: Candidate) -> bool:
-        return candidate.dotted_path == query or candidate.dotted_path.endswith(suffix)
+        path = candidate.dotted_path if case_sensitive else candidate.dotted_path.lower()
+        return path == query or path.endswith(suffix)
 
     bucketed = [c for c in name_map.get(query.rsplit(".", 1)[-1], ()) if hit(c)]
     if bucketed:

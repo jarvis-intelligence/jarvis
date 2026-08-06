@@ -76,7 +76,7 @@ claude mcp add jarvis --scope user -- uv --directory "$(pwd)" run jarvis-server
 | `callHierarchy` | Incoming/outgoing calls for a symbol |
 | `documentSymbols` | Outline of every symbol defined in one file |
 | `searchCode` | Zoekt lexical/regex search, optionally filtered to one repo |
-| `semanticSearch` | Natural-language search — vector hits fused with Zoekt via reciprocal rank fusion |
+| `semanticSearch` | Natural-language search — vector hits fused with Zoekt lexical hits and SCIP symbol-definition matches via reciprocal rank fusion |
 | `blastRadius` | Which *other* indexed repos depend on a package, up to 2 hops |
 | `getIndexStatus` | Published commit, freshness, staleness vs. a working tree |
 | `typeHierarchy` | Supertypes/subtypes — **currently non-functional**, see [limitations](#known-upstream-limitations) |

@@ -32,8 +32,8 @@ Lexical search via an embedded Zoekt index (lazy-started on first call). `repo`,
 Returns: `{"query": ..., "hits": [{"repo","path","lineNumber","lineText"}], "total": int}`.
 
 ### semanticSearch(repo, query, limit=10) → dict
-Natural-language code search over `repo`: embeds `query`, retrieves top vector matches from the repo's semantic index, fuses them with Zoekt lexical hits via reciprocal rank fusion. Requires `repo` to have been indexed with the `semantic` extra installed (`uv tool install "jarvis-mcp[semantic]"`); otherwise returns `{"error": "..."}` with an install hint.
-Returns: `{"query": ..., "results": [{"repo","filePath","startLine","endLine","symbolName","content","score","sources"}], "total": int}` (plus an optional `"warning"` if the configured embedding model differs from the index's).
+Natural-language code search over `repo`: embeds `query`, retrieves top vector matches from the repo's semantic index, and fuses them with Zoekt lexical hits and SCIP symbol-definition matches (when a SCIP index exists) via reciprocal rank fusion. Requires `repo` to have been indexed with the `semantic` extra installed (`uv tool install "jarvis-mcp[semantic]"`); otherwise returns `{"error": "..."}` with an install hint.
+Returns: `{"query": ..., "results": [{"repo","filePath","startLine","endLine","symbolName","content","score","sources"}], "total": int}` (plus an optional `"warning"` if the configured embedding model differs from the index's). `sources` may include `"symbol"`; a symbol-only hit has `content=""` (SCIP stores no source text) and `symbolName` set to the definition's dotted path. Swift repos get no benefit from this signal — scip-swift emits clang USR strings as symbol names, which NL query tokens never match (same caveat as bare-name resolution in the nav tools).
 
 ### blastRadius(repo, symbol_or_package) → dict
 2-hop bounded BFS over the package dependency graph: every other indexed repo whose package directly (1 hop) or transitively through one intermediary (2 hops) depends on `symbol_or_package` as registered for `repo` (e.g. `"npm:@scope/name"`). The graph has no per-node timestamp, so `freshness` is always `unknown` here.

@@ -275,3 +275,17 @@ def test_display_and_kind_falls_back_for_unparseable_symbols():
     from jarvis.query import _display_and_kind
 
     assert _display_and_kind("local 0", None, None) == (None, None)
+
+
+def test_query_service_exposes_repo_connection(query_service: QueryService):
+    """connection() hands semanticSearch the same cached read-only conn the
+    nav tools use; symbol data must be readable through it."""
+    conn = query_service.connection(REPO)
+    assert conn.execute("SELECT COUNT(*) FROM global_symbols").fetchone()[0] > 0
+
+
+def test_query_service_connection_raises_for_unpublished_repo(query_service: QueryService):
+    from jarvis.index_reader import IndexNotFoundError
+
+    with pytest.raises(IndexNotFoundError):
+        query_service.connection("no-such-repo")
