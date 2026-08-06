@@ -31,7 +31,9 @@ if COMPILE:
     from Cython.Build import cythonize
 
     # Explicit Extension names: cythonize's dotted-name inference does not
-    # understand src-layout and would emit `src.jarvis.query`.
+    # understand src-layout and would emit `src.jarvis.query`. build_dir
+    # isolates generated .c files to a temporary build directory so they
+    # don't pollute src/jarvis/ or end up in wheels.
     ext_modules = cythonize(
         [
             Extension(f"jarvis.{path.stem}", [str(path)])
@@ -40,6 +42,7 @@ if COMPILE:
         ],
         compiler_directives={"language_level": "3"},
         nthreads=os.cpu_count() or 1,
+        build_dir="build/cython",
     )
 else:
     ext_modules = []
