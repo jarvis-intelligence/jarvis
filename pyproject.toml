@@ -83,13 +83,19 @@ jarvis = "jarvis.index_cli:main"
 jarvis-server = "jarvis.server:main"
 
 [build-system]
-requires = ["uv_build>=0.11.19,<0.12.0"]
-build-backend = "uv_build"
+# Cython is listed unconditionally: build-system requires is static, and the
+# release path (JARVIS_COMPILE=1 in publish-pypi.yml) needs it. Dev builds
+# pay one extra download in the isolated build env and compile nothing.
+requires = ["setuptools>=80.9", "Cython>=3.1"]
+build-backend = "setuptools.build_meta"
 
-[tool.uv.build-backend]
-# The distribution is `jarvis-mcp`, which would otherwise make the backend
-# look for `src/jarvis_mcp/`. The import package is and stays `jarvis`.
-module-name = "jarvis"
+[tool.setuptools]
+# The distribution is `jarvis-mcp`; the import package is and stays `jarvis`.
+# src-layout with an explicit package list -- setuptools finds src/jarvis
+# regardless of the dist name, so no module-name mapping is needed here
+# (uv_build required one; see git history if archaeology calls).
+package-dir = { "" = "src" }
+packages = ["jarvis"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
