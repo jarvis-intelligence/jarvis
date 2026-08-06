@@ -100,3 +100,17 @@ packages = ["jarvis"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: exercises real external binaries (scip-python, scip, zoekt-index)"]
+
+[tool.cibuildwheel]
+# cp312..cp314 x {linux x86_64/aarch64, macOS arm64/x86_64}; the runner list
+# in publish-pypi.yml supplies the platforms. musllinux and Windows are
+# skipped -- setup.sh does not support them, so nothing could consume the
+# wheels. No sdist is ever built: platforms outside this matrix must fail
+# loudly rather than fall back to readable source.
+build = ["cp312-*", "cp313-*", "cp314-*"]
+skip = ["*-musllinux_*"]
+environment = { JARVIS_COMPILE = "1" }
+# The full unit suite against the INSTALLED compiled wheel is the empirical
+# gate for Cython semantic fidelity (frozen dataclasses, `str | None`, ...).
+test-requires = ["pytest>=8.3"]
+test-command = "pytest {project}/tests -m 'not integration' -q"
