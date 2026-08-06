@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.1.0] - 2026-08-06
+
+Minor rather than patch: `semanticSearch` gains a new capability — a third
+retrieval signal — and the `symbols` module grows a public accessor surface.
+No breaking change to any MCP tool signature or response shape.
+
+### Added
+
+- **SCIP symbol-definition signal in `semanticSearch`** (#24). Previously the
+  tool fused two signals — LanceDB vector hits and Zoekt lexical hits — via
+  reciprocal rank fusion, and neither knows what a *definition* is: a query
+  naming an identifier ranked chunks that merely mention it on par with the
+  definition site. A new `symbol_search` module now turns the query into
+  ranked definition locations (token extraction with stopword filtering,
+  adjacent-token bigram concatenation for identifiers written as separate
+  words, dotted-suffix matching; ranking by matched-token count, then kind
+  priority TYPE > METHOD > TERM, then shorter dotted path) by matching
+  against the SCIP name map and resolving through `defn_enclosing_ranges`.
+  The signal enters the existing RRF unweighted, and merges into a vector
+  chunk when that chunk contains the definition line. `sources` on a result
+  may now include `"symbol"`; a symbol-only hit carries `content: ""` (the
+  SCIP db stores no source text) with `symbolName` set to the definition's
+  dotted path.
+- Public `symbols.name_map()` and `symbols.dotted_suffix_matches()` accessors
+  — the latter generalizes the existing rung-2 matching rule with a
+  `case_sensitive` flag (default preserves `resolve()`'s exact behavior).
+
+### Fixed
+
+- SCIP's `defn_enclosing_ranges` stores 0-based line numbers while chunker
+  and Zoekt coordinates are 1-based; the symbol signal now converts at the
+  `SymbolHit` seam. Without the conversion, a definition's symbol hit missed
+  its own chunk's containment check by exactly one line — producing duplicate
+  content-less results and off-by-one `startLine`/`endLine` — because
+  def-derived chunks start precisely on the definition line.
+
+### Notes
+
+- The signal is strictly additive and best-effort: repos published
+  `--search-only`, `partial` indexes, or any failure inside the signal
+  degrade to the previous two-signal result, byte-identical.
+- Swift repos gain nothing from this signal: scip-swift emits clang USR
+  strings as symbol names, which natural-language tokens never match — the
+  same caveat that already applies to bare-name resolution in the nav tools.
+
 ## [0.0.1] - 2026-08-05
 
 Initial clean-slate release of `jarvis-mcp` after the repository was reset to a

@@ -6,12 +6,12 @@
     "url": "https://github.com/phuongddx/jarvis",
     "source": "github"
   },
-  "version": "0.0.1",
+  "version": "0.1.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "jarvis-mcp",
-      "version": "0.0.1",
+      "version": "0.1.0",
       "transport": {
         "type": "stdio"
       }
