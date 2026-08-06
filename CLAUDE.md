@@ -107,8 +107,12 @@ release assets, and the issue tracker. It is a publication target, never edited 
 hand — `sync-public-distribution.yml` overwrites it on every release, and
 `build-zoekt.yml` publishes the binaries there. Nothing else is mirrored: `src/` is
 already on PyPI, and history, issues, `docs/`, `plans/`, and CI definitions stay
-private. Privacy here protects the development process, not the source — the
-published PyPI wheel already contains every module in readable form.
+private. Privacy here protects the development process and, since the compiled-wheel
+pipeline landed, the source: releases ship Cython-compiled `.so` modules
+(only `__init__.py` and the generated `scip_pb2.py` remain plain Python),
+with no sdist. Wheels ≤ 0.5.1 predate this and stay readable on PyPI
+forever. Local dev is unaffected — compilation happens only under
+`JARVIS_COMPILE=1` in `publish-pypi.yml`.
 
 **Language detection reads git, not the filesystem:** `detect_language()` counts extensions across
 `git ls-files`, not a `rglob` walk. A walk also counts gitignored scratch directories — vendored
