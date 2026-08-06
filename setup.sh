@@ -2,7 +2,7 @@
 # jarvis dependency bootstrapper.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/phuongddx/jarvis-dist/main/setup.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
 #
 # STRICTLY POSIX sh: `curl | sh` ignores the shebang above and runs under the
 # system sh (dash on many Linux distros). No arrays, no [[ ]], no bashisms.
@@ -27,7 +27,7 @@ JARVIS_REPO="phuongddx/jarvis"
 # owning repo -- an unauthenticated `curl` against a private repo's release
 # 404s, which is every user running this script. Do not point this back at
 # JARVIS_REPO; tests/test_setup_sh.py asserts the two differ.
-ZOEKT_RELEASE_REPO="phuongddx/jarvis-dist"
+ZOEKT_RELEASE_REPO="jarvis-intelligence/jarvis-index"
 
 # v0.1.1 is the first release whose binary supports `scip-swift index …`, the
 # form index_cli.py invokes. v0.1.0 predates that subcommand and cannot be
@@ -443,7 +443,7 @@ zoekt_asset_name() {
 
 # zoekt ships as one tarball containing both binaries. Upstream
 # sourcegraph/zoekt publishes no releases at all, so these come from our own
-# releases in the public phuongddx/jarvis-dist repo -- NOT from jarvis's own
+# releases in the public jarvis-intelligence/jarvis-index repo -- NOT from jarvis's own
 # repo, which is private and would 404 (see build-zoekt.yml, and
 # ZOEKT_RELEASE_REPO above).
 #

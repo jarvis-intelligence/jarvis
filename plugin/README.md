@@ -25,7 +25,7 @@ Full signatures and return shapes: see the `jarvis-use` skill's `references/tool
 The plugin's bundled `plugin/.mcp.json` auto-registers the `jarvis` MCP server on install — no `codex mcp add` needed for the base case.
 
 ```bash
-codex plugin marketplace add https://github.com/phuongddx/jarvis-dist --ref main
+codex plugin marketplace add https://github.com/jarvis-intelligence/jarvis-index --ref main
 codex plugin add jarvis
 ```
 
@@ -34,7 +34,7 @@ Then run the `jarvis-setup` skill (or follow its steps manually): install extern
 ### Claude Code
 
 ```text
-/plugin marketplace add phuongddx/jarvis-dist
+/plugin marketplace add jarvis-intelligence/jarvis-index
 /plugin install jarvis@jarvis
 ```
 
@@ -55,7 +55,7 @@ jarvis is local-first. The only network egress is `uvx` fetching the published w
 
 ## Links
 
-- Repository: <https://github.com/phuongddx/jarvis-dist>
+- Repository: <https://github.com/jarvis-intelligence/jarvis-index>
 - Changelog: [PyPI release history](https://pypi.org/project/jarvis-mcp/#history)
-- Issues: <https://github.com/phuongddx/jarvis-dist/issues>
+- Issues: <https://github.com/jarvis-intelligence/jarvis-index/issues>
 - Full onboarding: the `jarvis-setup` skill.

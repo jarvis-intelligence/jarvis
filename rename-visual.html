@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jarvis — Folder Rename Visualizer</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --green: #3fb950;
+    --green-bg: #0d2818;
+    --red: #f85149;
+    --red-bg: #2d1213;
+    --yellow: #d29922;
+    --yellow-bg: #2d2410;
+    --blue: #58a6ff;
+    --blue-bg: #0d1f3d;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 36px; }
+  header h1 {
+    font-size: 1.8rem;
+    background: linear-gradient(90deg, var(--blue), var(--purple));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 8px;
+  }
+  header p { color: var(--muted); font-size: 1rem; }
+  .scenario-bar {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 20px; margin-bottom: 36px; flex-wrap: wrap;
+  }
+  .scenario-bar code {
+    background: var(--panel-2); padding: 3px 8px; border-radius: 5px;
+    color: var(--purple); font-size: 0.92rem;
+  }
+  .arrow { color: var(--muted); font-size: 1.3rem; }
+
+  section {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; margin-bottom: 24px;
+  }
+  section h2 {
+    font-size: 1.25rem; margin-bottom: 6px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  section h2 .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border-radius: 50%;
+    background: var(--blue-bg); color: var(--blue);
+    font-size: 0.85rem; font-weight: 700;
+  }
+  section .lead { color: var(--muted); margin-bottom: 18px; font-size: 0.95rem; }
+
+  /* diagrams */
+  .diagram {
+    background: var(--panel-2); border: 1px dashed var(--border);
+    border-radius: 10px; padding: 20px; margin: 12px 0;
+    font-family: "SF Mono", "Fira Code", Consolas, monospace;
+    font-size: 0.86rem; overflow-x: auto; white-space: pre;
+  }
+
+  /* folder node */
+  .folder {
+    display: inline-block; background: var(--blue-bg);
+    border: 1px solid var(--blue); border-radius: 8px;
+    padding: 10px 16px; text-align: center; margin: 6px;
+  }
+  .folder .ico { font-size: 1.6rem; }
+  .folder .name { font-weight: 600; color: var(--blue); }
+  .folder.renamed { border-color: var(--yellow); background: var(--yellow-bg); }
+  .folder.renamed .name { color: var(--yellow); }
+  .folder.gone { opacity: 0.4; text-decoration: line-through; }
+
+  /* registry table */
+  table.reg {
+    width: 100%; border-collapse: collapse; margin: 12px 0;
+    font-size: 0.9rem;
+  }
+  table.reg th, table.reg td {
+    border: 1px solid var(--border); padding: 9px 12px; text-align: left;
+  }
+  table.reg th { background: var(--panel-2); color: var(--muted); font-weight: 600; }
+  table.reg td.code { font-family: monospace; color: var(--purple); }
+  .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 12px;
+    font-size: 0.78rem; font-weight: 600;
+  }
+  .pill.ok  { background: var(--green-bg); color: var(--green); }
+  .pill.bad { background: var(--red-bg);   color: var(--red); }
+  .pill.warn{ background: var(--yellow-bg);color: var(--yellow); }
+
+  /* storage grid */
+  .storage {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px; margin-top: 12px;
+  }
+  .store {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px;
+  }
+  .store .title { font-weight: 600; color: var(--blue); margin-bottom: 6px; font-size: 0.92rem; }
+  .store .path { font-family: monospace; font-size: 0.8rem; color: var(--muted); word-break: break-all; }
+  .store .tag { margin-top: 8px; }
+
+  /* status lists */
+  .status-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  }
+  @media (max-width: 700px) { .status-grid { grid-template-columns: 1fr; } }
+  .status-list { list-style: none; }
+  .status-list li {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-family: monospace; font-size: 0.86rem;
+  }
+  .status-list li .lbl { color: var(--text); }
+
+  /* flow */
+  .flow { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+  .flow .step {
+    background: var(--panel-2); border-left: 3px solid var(--blue);
+    padding: 10px 14px; border-radius: 6px;
+    font-family: monospace; font-size: 0.85rem;
+  }
+  .flow .step.fail { border-left-color: var(--red); }
+  .flow .step .desc { color: var(--muted); font-family: normal; font-size: 0.82rem; margin-top: 3px; }
+
+  /* fix box */
+  .fix-cmd {
+    background: #000; border: 1px solid var(--green);
+    border-radius: 8px; padding: 14px 18px;
+    font-family: monospace; font-size: 0.92rem; color: var(--green);
+    margin: 12px 0; overflow-x: auto;
+  }
+  .key-takeaway {
+    background: linear-gradient(135deg, var(--blue-bg), var(--panel-2));
+    border: 1px solid var(--blue); border-radius: 10px;
+    padding: 18px 22px; margin-top: 12px; font-size: 1rem;
+  }
+  .key-takeaway strong { color: var(--blue); }
+
+  .toggle-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .toggle-btn {
+    background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--muted); padding: 8px 16px; border-radius: 8px;
+    cursor: pointer; font-size: 0.9rem; transition: all 0.15s;
+  }
+  .toggle-btn:hover { border-color: var(--blue); color: var(--text); }
+  .toggle-btn.active { background: var(--blue-bg); border-color: var(--blue); color: var(--blue); }
+  .panel-content { animation: fadeIn 0.25s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>🗄️ Jarvis Index Survival Guide</h1>
+  <p>What happens to indexed data when you rename a project folder?</p>
+</header>
+
+<div class="scenario-bar">
+  <span>Scenario:</span>
+  <code>jarvis index ./epost-ios</code>
+  <span class="arrow">→</span>
+  <span>rename folder</span>
+  <span class="arrow">→</span>
+  <code>epost-ios-v2</code>
+  <span class="arrow">❓</span>
+</div>
+
+<!-- toggle -->
+<div class="toggle-row">
+  <button class="toggle-btn active" onclick="showTab('answer')">Quick Answer</button>
+  <button class="toggle-btn" onclick="showTab('before')">① Before Rename</button>
+  <button class="toggle-btn" onclick="showTab('after')">② After Rename</button>
+  <button class="toggle-btn" onclick="showTab('impact')">③ What Breaks</button>
+  <button class="toggle-btn" onclick="showTab('fix')">④ The Fix</button>
+</div>
+
+<!-- ============ ANSWER ============ -->
+<section id="tab-answer" class="panel-content">
+  <h2><span class="num">✓</span>Quick Answer</h2>
+  <p class="lead">The index data is <strong>safe</strong>. Only one field in the registry goes stale.</p>
+
+  <div class="status-grid">
+    <div>
+      <h3 style="color:var(--green); margin-bottom:10px; font-size:1rem;">✅ Still Valid</h3>
+      <ul class="status-list">
+        <li><span class="lbl">SCIP index DB</span><span class="pill ok">keyed by slug</span></li>
+        <li><span class="lbl">Zoekt search shard</span><span class="pill ok">keyed by slug</span></li>
+        <li><span class="lbl">LanceDB semantic table</span><span class="pill ok">keyed by slug</span></li>
+        <li><span class="lbl">Graph (blastRadius)</span><span class="pill ok">keyed by slug</span></li>
+        <li><span class="lbl">All MCP navigation tools</span><span class="pill ok">use slug only</span></li>
+      </ul>
+    </div>
+    <div>
+      <h3 style="color:var(--red); margin-bottom:10px; font-size:1rem;">⚠️ Goes Stale</h3>
+      <ul class="status-list">
+        <li><span class="lbl">registry.path field</span><span class="pill bad">old abs path</span></li>
+        <li><span class="lbl">jarvis reindex &lt;slug&gt;</span><span class="pill bad">reads stale path</span></li>
+        <li><span class="lbl">jarvis status &lt;slug&gt;</span><span class="pill warn">shows old path</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="key-takeaway">
+    💡 <strong>One-line takeaway:</strong> Index data is keyed by <strong>slug</strong>, never by folder path. Renaming the folder can't touch it. Re-run <code style="color:var(--green);background:#000;padding:2px 6px;border-radius:4px;">jarvis index &lt;new-path&gt; --slug epost-ios</code> to repair the one stale field.
+  </div>
+</section>
+
+<!-- ============ BEFORE ============ -->
+<section id="tab-before" class="panel-content" style="display:none;">
+  <h2><span class="num">1</span>Before the rename — everything wired</h2>
+  <p class="lead">When you run <code style="color:var(--purple);">jarvis index ./epost-ios</code> with no <code style="color:var(--purple);">--slug</code>, the slug is derived from the folder name.</p>
+
+  <div style="text-align:center; margin: 18px 0;">
+    <div class="folder">
+      <div class="ico">📁</div>
+      <div class="name">epost-ios</div>
+      <div style="font-size:0.78rem; color:var(--muted); margin-top:4px;">/Users/you/code/epost-ios</div>
+    </div>
+    <div style="color:var(--blue); font-size:1.5rem; margin:8px 0;">↓ <code style="color:var(--purple);">jarvis index</code></div>
+  </div>
+
+  <table class="reg">
+    <tr><th>field</th><th>value</th><th>role</th></tr>
+    <tr><td>slug</td><td class="code">epost-ios</td><td><span class="pill ok">PRIMARY KEY</span></td></tr>
+    <tr><td>path</td><td class="code">/Users/you/code/epost-ios</td><td>abs path at index time</td></tr>
+    <tr><td>language</td><td class="code">swift</td><td>detected from git ls-files</td></tr>
+  </table>
+
+  <p style="margin-top:16px; color:var(--muted); font-size:0.9rem;">All index artifacts are created under this slug — the folder path is <em>not</em> part of any of these locations:</p>
+
+  <div class="storage">
+    <div class="store">
+      <div class="title">📐 SCIP Navigation DB</div>
+      <div class="path">~/.jarvis/scip/_/epost-ios/_/<br>index-abc.db</div>
+      <div class="tag"><span class="pill ok">go-to-def, refs, hierarchy</span></div>
+    </div>
+    <div class="store">
+      <div class="title">🔍 Zoekt Shard</div>
+      <div class="path">shard name = "epost-ios"</div>
+      <div class="tag"><span class="pill ok">searchCode</span></div>
+    </div>
+    <div class="store">
+      <div class="title">🧠 LanceDB Table</div>
+      <div class="path">table = "epost-ios"</div>
+      <div class="tag"><span class="pill ok">semanticSearch</span></div>
+    </div>
+    <div class="store">
+      <div class="title">🕸️ Graph Edges</div>
+      <div class="path">repo = "epost-ios"</div>
+      <div class="tag"><span class="pill ok">blastRadius</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ AFTER ============ -->
+<section id="tab-after" class="panel-content" style="display:none;">
+  <h2><span class="num">2</span>After rename — index data untouched</h2>
+  <p class="lead">You rename <code style="color:var(--purple);">epost-ios</code> → <code style="color:var(--purple);">epost-ios-v2</code>. The folder changes; <strong>nothing inside <code style="color:var(--purple);">~/.jarvis/</code> does.</strong></p>
+
+  <div style="text-align:center; margin: 18px 0;">
+    <div class="folder gone">
+      <div class="ico">📁</div>
+      <div class="name">epost-ios</div>
+      <div style="font-size:0.78rem; color:var(--red); margin-top:4px;">gone</div>
+    </div>
+    <span class="arrow" style="font-size:1.5rem; vertical-align:middle; margin:0 10px;">→</span>
+    <div class="folder renamed">
+      <div class="ico">📁</div>
+      <div class="name">epost-ios-v2</div>
+      <div style="font-size:0.78rem; color:var(--muted); margin-top:4px;">/Users/you/code/epost-ios-v2</div>
+    </div>
+  </div>
+
+  <table class="reg">
+    <tr><th>field</th><th>value</th><th>status</th></tr>
+    <tr><td>slug</td><td class="code">epost-ios</td><td><span class="pill ok">✅ correct</span></td></tr>
+    <tr><td>path</td><td class="code">/Users/you/code/epost-ios</td><td><span class="pill bad">❌ stale (folder gone)</span></td></tr>
+    <tr><td>language</td><td class="code">swift</td><td><span class="pill ok">✅ correct</span></td></tr>
+  </table>
+
+  <div class="storage">
+    <div class="store">
+      <div class="title">📐 SCIP DB</div>
+      <div class="path">~/.jarvis/scip/_/epost-ios/_/</div>
+      <div class="tag"><span class="pill ok">✅ untouched</span></div>
+    </div>
+    <div class="store">
+      <div class="title">🔍 Zoekt Shard</div>
+      <div class="path">"epost-ios"</div>
+      <div class="tag"><span class="pill ok">✅ untouched</span></div>
+    </div>
+    <div class="store">
+      <div class="title">🧠 LanceDB Table</div>
+      <div class="path">"epost-ios"</div>
+      <div class="tag"><span class="pill ok">✅ untouched</span></div>
+    </div>
+    <div class="store">
+      <div class="title">🕸️ Graph</div>
+      <div class="path">repo="epost-ios"</div>
+      <div class="tag"><span class="pill ok">✅ untouched</span></div>
+    </div>
+  </div>
+
+  <p style="margin-top:16px; color:var(--muted); font-size:0.9rem;">
+    The index only knows the <strong style="color:var(--blue);">slug</strong>. It never reads the folder path at query time — so all MCP tools keep working when you pass <code style="color:var(--purple);">repo="epost-ios"</code>.
+  </p>
+</section>
+
+<!-- ============ IMPACT ============ -->
+<section id="tab-impact" class="panel-content" style="display:none;">
+  <h2><span class="num">3</span>What works vs. what breaks</h2>
+  <p class="lead">MCP query tools resolve by slug only and stay fully functional. CLI commands that read the registry's stored <code style="color:var(--purple);">path</code> are affected.</p>
+
+  <div class="status-grid">
+    <div>
+      <h3 style="color:var(--green); margin-bottom:10px; font-size:1rem;">✅ MCP Tools (slug only)</h3>
+      <ul class="status-list">
+        <li><span class="lbl">documentSymbols</span><span class="pill ok">works</span></li>
+        <li><span class="lbl">goToDefinition</span><span class="pill ok">works</span></li>
+        <li><span class="lbl">findReferences</span><span class="pill ok">works</span></li>
+        <li><span class="lbl">callHierarchy</span><span class="pill ok">works</span></li>
+        <li><span class="lbl">typeHierarchy</span><span class="pill ok">works</span></li>
+        <li><span class="lbl">searchCode</span><span class="pill ok">works</span></li>
+        <li><span class="lbl">semanticSearch</span><span class="pill ok">works</span></li>
+        <li><span class="lbl">blastRadius</span><span class="pill ok">works</span></li>
+      </ul>
+    </div>
+    <div>
+      <h3 style="color:var(--red); margin-bottom:10px; font-size:1rem;">⚠️ CLI Commands</h3>
+      <ul class="status-list">
+        <li><span class="lbl">jarvis status epost-ios</span><span class="pill warn">stale path</span></li>
+        <li><span class="lbl">jarvis reindex epost-ios</span><span class="pill bad">FAILS</span></li>
+        <li><span class="lbl">jarvis index &lt;new&gt; (no --slug)</span><span class="pill bad">creates duplicate</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 style="margin-top:24px; color:var(--text); font-size:1rem;">Why <code style="color:var(--purple);">reindex</code> breaks — the one weak link</h3>
+  <div class="flow">
+    <div class="step">
+      jarvis reindex epost-ios
+      <div class="desc">_cmd_reindex() looks up the slug in the registry</div>
+    </div>
+    <div class="step">
+      repo = registry.get("epost-ios")
+      <div class="desc">reads the stored <strong>path</strong> field → "/Users/.../epost-ios"</div>
+    </div>
+    <div class="step">
+      index_repo(path=repo.path)
+      <div class="desc">hands the stale path to the indexing pipeline</div>
+    </div>
+    <div class="step fail">
+      _git_head("/Users/.../epost-ios")
+      <div class="desc">❌ folder doesn't exist → <code style="color:var(--red);">fatal: cannot change to...</code></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FIX ============ -->
+<section id="tab-fix" class="panel-content" style="display:none;">
+  <h2><span class="num">4</span>The fix — re-index under the old slug</h2>
+  <p class="lead">Pass the <strong>new folder path</strong> but keep the <strong>old slug</strong>. The registry's <code style="color:var(--purple);">ON CONFLICT(slug) DO UPDATE</code> rewrites the stale <code style="color:var(--purple);">path</code> field, and the atomic publish rebuilds the index in place.</p>
+
+  <div class="fix-cmd">
+    $ jarvis index /path/to/epost-ios-v2 --slug epost-ios
+  </div>
+
+  <div class="flow">
+    <div class="step">
+      index_repo(path=/path/epost-ios-v2, slug="epost-ios")
+      <div class="desc">new path + old slug → registry upsert</div>
+    </div>
+    <div class="step">
+      ON CONFLICT(slug) DO UPDATE SET path=excluded.path
+      <div class="desc">✅ <strong>path</strong> field rewritten to the new location</div>
+    </div>
+    <div class="step">
+      _publish_atomically()
+      <div class="desc">writes index-xyz.db, then flips the <code>current</code> pointer</div>
+    </div>
+    <div class="step">
+      ~/.jarvis/scip/_/epost-ios/_/
+      <div class="desc">old index-abc.db replaced → new index-xyz.db live</div>
+    </div>
+  </div>
+
+  <div class="key-takeaway">
+    ✅ <strong>Result:</strong> Same slug <code style="color:var(--purple);">epost-ios</code>, corrected path, rebuilt index. No orphaned data, no duplicate slugs, all tools continue to work with <code style="color:var(--purple);">repo="epost-ios"</code>.
+  </div>
+
+  <p style="margin-top:16px; color:var(--muted); font-size:0.88rem;">
+    ⚠️ <strong>Don't do this:</strong> <code style="color:var(--red);">jarvis index /path/to/epost-ios-v2</code> (no <code>--slug</code>) creates a brand-new slug <code style="color:var(--red);">epost-ios-v2</code>, orphaning the old <code style="color:var(--red);">epost-ios</code> index, Zoekt shard, and LanceDB table on disk.
+  </p>
+</section>
+
+</div>
+
+<script>
+  function showTab(name) {
+    document.querySelectorAll('.panel-content').forEach(el => el.style.display = 'none');
+    document.getElementById('tab-' + name).style.display = 'block';
+    document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+  }
+</script>
+</body>
+</html>

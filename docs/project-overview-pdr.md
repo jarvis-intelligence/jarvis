@@ -85,7 +85,7 @@ jarvis is available through four discovery and installation channels:
 
 **PyPI package:** `jarvis-mcp` — Install via `pip install jarvis-mcp` or `uv sync` from source. Published on every release via GitHub Actions OIDC auth.
 
-**Claude Code plugin:** Available via `/plugin marketplace add phuongddx/jarvis-dist` (plugin marketplace discovery) then `/plugin install jarvis@jarvis` (auto-registers the MCP server, alternative to manual `claude mcp add`). Plugin manifest and MCP registration live under `plugin/.claude-plugin/` and `plugin/.mcp.json`; skills are under `plugin/skills/`.
+**Claude Code plugin:** Available via `/plugin marketplace add jarvis-intelligence/jarvis-index` (plugin marketplace discovery) then `/plugin install jarvis@jarvis` (auto-registers the MCP server, alternative to manual `claude mcp add`). Plugin manifest and MCP registration live under `plugin/.claude-plugin/` and `plugin/.mcp.json`; skills are under `plugin/skills/`.
 
 **Codex plugin:** `.codex-plugin/plugin.json` (root) declares the same `plugin/skills/` tree for Codex, adding the interface metadata Codex requires (display name, category, capabilities, default prompts, icons) that the Claude manifest does not carry. Both manifests point at one shared skills directory, so a skill is authored once and served to both hosts.
 

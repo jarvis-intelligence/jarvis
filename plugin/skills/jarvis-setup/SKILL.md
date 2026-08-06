@@ -19,7 +19,7 @@ To take a machine from zero to "jarvis answering queries", run these in order.
 ## 2. Install jarvis + external binaries
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/phuongddx/jarvis-dist/main/setup.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
 uv tool install jarvis-mcp
 ```
 

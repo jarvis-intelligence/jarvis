@@ -8,7 +8,7 @@ version: "0.1.0"
 
 Part of the jarvis toolkit. Siblings: `jarvis-setup` (onboard), `jarvis-use` (everyday queries).
 
-File well-formed bug reports and feature requests against **phuongddx/jarvis-dist** on GitHub — jarvis's public issue tracker. (Development happens in a private repo; `jarvis-dist` is where the installer, plugin, and binaries are published, and where issues are filed.) This skill targets only the jarvis project itself, not other repos.
+File well-formed bug reports and feature requests against **jarvis-intelligence/jarvis-index** on GitHub — jarvis's public issue tracker. (Development happens in a private repo; `jarvis-index` is where the installer, plugin, and binaries are published, and where issues are filed.) This skill targets only the jarvis project itself, not other repos.
 
 ## 1. Gather context first
 
@@ -65,7 +65,7 @@ If it's a known limitation, say so to the user instead of filing.
 Filing is outward-facing and public. **Always show the drafted title + body to the user and get explicit confirmation before running:**
 
 ```bash
-gh issue create --repo phuongddx/jarvis-dist --title "<title>" --body "<body>"
+gh issue create --repo jarvis-intelligence/jarvis-index --title "<title>" --body "<body>"
 ```
 
 If `gh` is missing or not authed, stop and tell the user to run `gh auth login` — do not attempt to file another way.
