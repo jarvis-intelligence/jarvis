@@ -11,23 +11,34 @@ set -eu
 
 # ------------------------------------------------------------- versions ------
 
+# scip is installed from OUR release assets, not upstream scip-code/scip:
+# upstream through v0.9.0 never populates `global_symbols.relationships`
+# (scip-code/scip#464), which makes jarvis's typeHierarchy unanswerable on
+# every index. The fix (scip-code/scip#465) is merged in the public fork
+# phuongddx/scip; build-scip.yml cross-compiles that fork at the commit
+# pinned in the repo-root SCIP_COMMIT file and publishes the binaries to
+# SCIP_RELEASE_REPO. Exit ramp: when upstream merges #465 and cuts a
+# release, repoint this at scip-code/scip and delete build-scip.yml +
+# SCIP_COMMIT.
+#
 # Pinned deliberately, never "latest": query.py targets the v0.7.0-era
-# `scip expt-convert` SQLite schema. v0.9.0's schema was verified
-# byte-identical to v0.7.0's before this pin was raised.
-SCIP_VERSION="v0.9.0"
-SCIP_REPO="scip-code/scip"
+# `scip expt-convert` SQLite schema (the fork build is v0.9.0 + the #465
+# fix, which only adds data to an existing column -- same schema).
+# tests/test_setup_sh.py asserts this never drifts from SCIP_COMMIT.
+SCIP_COMMIT_PIN="56791658a873"
 
 # Kept in sync with the repo-root ZOEKT_COMMIT file that CI builds from.
 # tests/test_setup_sh.py asserts the two never drift.
 ZOEKT_COMMIT_PIN="33f1f18af292"
 JARVIS_REPO="phuongddx/jarvis"
 
-# The zoekt binaries are published to a separate PUBLIC repo. jarvis's own
-# repo is private, and GitHub serves release assets only to viewers of the
-# owning repo -- an unauthenticated `curl` against a private repo's release
-# 404s, which is every user running this script. Do not point this back at
-# JARVIS_REPO; tests/test_setup_sh.py asserts the two differ.
+# The zoekt and scip binaries are published to a separate PUBLIC repo.
+# jarvis's own repo is private, and GitHub serves release assets only to
+# viewers of the owning repo -- an unauthenticated `curl` against a private
+# repo's release 404s, which is every user running this script. Do not point
+# either back at JARVIS_REPO; tests/test_setup_sh.py asserts they differ.
 ZOEKT_RELEASE_REPO="jarvis-intelligence/jarvis-index"
+SCIP_RELEASE_REPO="jarvis-intelligence/jarvis-index"
 
 # v0.1.1 is the first release whose binary supports `scip-swift index …`, the
 # form index_cli.py invokes. v0.1.0 predates that subcommand and cannot be
@@ -426,13 +437,13 @@ install_scip() {
 	fi
 
 	_asset=$(scip_asset_name "$_os" "$_arch")
-	_base="https://github.com/${SCIP_REPO}/releases/download/${SCIP_VERSION}"
+	_base="https://github.com/${SCIP_RELEASE_REPO}/releases/download/scip-${SCIP_COMMIT_PIN}"
 
-	log_info "scip: installing ${SCIP_VERSION}"
+	log_info "scip: installing fork build ${SCIP_COMMIT_PIN} (upstream v0.9.0 + relationships fix)"
 	if install_tarball_binary "${_base}/${_asset}" "${_base}/${_asset}.sha256" scip scip; then
 		log_info "scip: installed"
 	else
-		log_error "scip: install failed — see https://github.com/${SCIP_REPO}/releases"
+		log_error "scip: install failed — see https://github.com/${SCIP_RELEASE_REPO}/releases"
 		return 1
 	fi
 }

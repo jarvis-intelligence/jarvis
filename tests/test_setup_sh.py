@@ -321,12 +321,34 @@ def test_scip_asset_name_covers_all_supported_platforms(os_name, arch, expected)
     assert result.stdout.strip() == expected
 
 
-def test_scip_version_is_pinned_not_latest():
-    """A floating 'latest' could silently swap the expt-convert schema."""
-    result = run_func('echo "$SCIP_VERSION"')
-    version = result.stdout.strip()
-    assert version.startswith("v"), f"expected a pinned vX.Y.Z, got {version!r}"
-    assert "latest" not in version
+def test_scip_pin_matches_committed_file():
+    """The in-script pin must not drift from the SCIP_COMMIT file CI builds
+    from: a drifted pin downloads a release build-scip.yml never published,
+    which 404s for every user. A floating 'latest' is ruled out by the same
+    mechanism -- the pin is a commit, fixed at build time."""
+    on_disk = (Path(__file__).parent.parent / "SCIP_COMMIT").read_text().strip()
+    in_script = run_func('echo "$SCIP_COMMIT_PIN"').stdout.strip()
+    assert in_script == on_disk
+
+
+def test_scip_release_repo_is_set():
+    """The scip binaries come from a dedicated public repo, not this one."""
+    assert run_func('echo "$SCIP_RELEASE_REPO"').stdout.strip() == "jarvis-intelligence/jarvis-index"
+
+
+def test_scip_release_repo_is_not_the_private_repo():
+    """Same invariant as the zoekt variant above: GitHub serves release
+    assets only to viewers of the owning repo, so pointing scip downloads at
+    the private development repo 404s for every real user.
+
+    The non-empty assertion comes first deliberately: without it, an unset
+    SCIP_RELEASE_REPO makes `"" != "phuongddx/jarvis"` true and the test
+    passes vacuously, guarding nothing."""
+    release_repo = run_func('echo "$SCIP_RELEASE_REPO"').stdout.strip()
+    private_repo = run_func('echo "$JARVIS_REPO"').stdout.strip()
+    assert release_repo, "SCIP_RELEASE_REPO is unset"
+    assert private_repo, "JARVIS_REPO is unset"
+    assert release_repo != private_repo
 
 
 def test_already_installed_finds_binary_in_bin_dir_not_on_path(tmp_path):
