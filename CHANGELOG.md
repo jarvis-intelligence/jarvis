@@ -1,6 +1,41 @@
 # Changelog
 
-## [0.5.1] - 2026-08-06
+## [0.6.0] - 2026-08-07
+
+Minor rather than patch: `typeHierarchy` works for the first time, and the
+packaging model changes from readable pure-Python wheels to Cython-compiled
+platform wheels. No breaking change to any MCP tool signature or response
+shape.
+
+### Added
+
+- **`typeHierarchy` now returns real super/subtypes** (#29). Upstream
+  `scip expt-convert` (through v0.9.0) declares `global_symbols.relationships`
+  in its schema but never writes it (scip-code/scip#464), so the tool
+  returned an explicit error on every index. The fix (scip-code/scip#465) is
+  still unmerged upstream, so `setup.sh` now installs a build of the public
+  fork `phuongddx/scip` carrying it: `build-scip.yml` cross-compiles the fork
+  at the commit pinned in `SCIP_COMMIT` and publishes the binaries to
+  jarvis-index releases — the same pattern zoekt already uses. **To activate:
+  re-run setup.sh, then `jarvis reindex <slug>`** — the scip install is
+  version-gated (an installed binary that doesn't stamp the pinned commit is
+  replaced exactly once per pin bump), and indexes built with an unpatched
+  scip keep returning the explicit error until reindexed.
+
+### Changed
+
+- **Releases ship Cython-compiled wheels; source is no longer readable on
+  PyPI** (#28). A pure-Python wheel is a zip of readable `.py` files, so
+  repo privacy protected the development process but not the source. The
+  build backend is now setuptools + Cython, gated by `JARVIS_COMPILE=1` (set
+  only in release CI — local dev and editable installs stay pure Python):
+  every module compiles to a native `.so` except `__init__.py` and the
+  generated `scip_pb2.py`. Wheels cover cp312–cp314 on
+  {linux x86_64/aarch64, macOS arm64/x86_64}; **no sdist is published**, so
+  platforms outside that matrix fail loudly instead of falling back to
+  readable source. Consequences: wheels ≤ 0.5.1 remain readable on PyPI
+  forever; user-reported tracebacks now show compiled frames; musl/Alpine
+  and Windows are not installable targets.
 
 No functional changes relative to 0.1.0 — this release exists purely to fix
 version resolution on PyPI.
