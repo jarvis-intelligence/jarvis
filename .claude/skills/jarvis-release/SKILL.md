@@ -28,11 +28,18 @@ These must all end up identical, or CI's tag/version guard (see step 6) fails th
 | File | What to change |
 |---|---|
 | `pyproject.toml` | `version = "X.Y.Z"` |
-| `plugin/.claude-plugin/plugin.json` | `"version": "X.Y.Z"` |
+| `.codex-plugin/plugin.json` | `"version": "X.Y.Z"` |
 | `server.json` | **two** fields: the top-level `"version"` and `packages[0].version` |
 | `uv.lock` | **never hand-edit.** Run `uv lock` — it updates this package's own self-referential version entry (`Updated jarvis-mcp vX.Y.Z-1 -> vX.Y.Z` in its output) and re-resolves nothing else changes if no deps moved |
 
-Grep to confirm consistency before committing: `grep -rn '"version"\|^version' pyproject.toml plugin/.claude-plugin/plugin.json server.json | grep -v uv.lock`
+Grep to confirm consistency before committing: `grep -rn '"version"\|^version' pyproject.toml .codex-plugin/plugin.json server.json | grep -v uv.lock` — or just run `uv run python scripts/check_versions.py`.
+
+The Claude Code plugin is NOT part of this bump: its source of truth is
+`jarvis-intelligence/jarvis-index` (`plugin/` + `.claude-plugin/` there), versioned
+independently. When a release changes behavior the plugin skills describe, update those
+skills in jarvis-index directly and bump `plugin/.claude-plugin/plugin.json` there so
+installed plugins see an update. Keep its `.mcp.json` `--from` floor a valid `>=`
+minimum against PyPI.
 
 ## 3. Add the CHANGELOG.md entry
 
@@ -51,7 +58,7 @@ The second check matters because `publish-pypi.yml` hard-fails the release if th
 
 ```bash
 git checkout -b chore/release-X.Y.Z
-git add CHANGELOG.md plugin/.claude-plugin/plugin.json pyproject.toml server.json uv.lock
+git add CHANGELOG.md .codex-plugin/plugin.json pyproject.toml server.json uv.lock
 git commit -m "chore: release X.Y.Z"
 git push -u origin chore/release-X.Y.Z
 gh pr create --base main --head chore/release-X.Y.Z --title "chore: release X.Y.Z" \

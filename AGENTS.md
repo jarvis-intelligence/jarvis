@@ -34,8 +34,8 @@ Top-level:
 - `setup.py` — Cython build glue: overrides `build_py.find_package_modules` to exclude `.py` sources whose `.so` counterpart was just built, so a compiled release wheel ships no readable source alongside its extensions.
 - `scripts/check_wheel_contents.py` — asserts a built wheel ships compiled `jarvis/*.so` modules and no leaked `.py`/`.pyx`/`.c` source; run in CI before every PyPI upload.
 - `docs/`, `evals/`, `plans/` — architecture, code standards, roadmap, eval harness, and design plans.
-- `plugin/` — Claude Code plugin (`.claude-plugin/plugin.json` manifest, `.mcp.json`, and skills under `skills/jarvis-setup`/`jarvis-use`/`jarvis-issues`).
-- `.claude/skills/jarvis-release` — maintainer-only release skill (distinct from `plugin/`, which ships to end users).
+- Claude Code plugin + marketplace definition: NOT in this repo — source of truth is `jarvis-intelligence/jarvis-index` (`plugin/` + `.claude-plugin/` there, edited directly, versioned independently).
+- `.claude/skills/jarvis-release` — maintainer-only release skill (never ships to end users).
 - `.github/workflows/test.yml` — unit-test CI gate.
 
 ## Build, Test, and Development Commands
@@ -102,4 +102,4 @@ Follow **Conventional Commits** as seen in history — `feat(scope):`, `fix(scop
 
 - Open PRs against `main`. Ensure `uv run pytest -m "not integration"` is green.
 - `ZOEKT_COMMIT`/`ZOEKT_COMMIT_PIN` and `SCIP_COMMIT`/`SCIP_COMMIT_PIN` (file ↔ `setup.sh`) must each stay in sync (`tests/test_setup_sh.py` enforces both) — never edit one without the other.
-- Bumping the release version touches four files in lockstep: `pyproject.toml`, `server.json` (two fields), `plugin/.claude-plugin/plugin.json`. `plugin/.mcp.json`'s `--from` floor is a compatibility minimum (checked `<=` against the version, not synced to it). See `.claude/skills/jarvis-release/SKILL.md` for the full release runbook.
+- Bumping the release version touches four files in lockstep: `pyproject.toml`, `server.json` (two fields), `.codex-plugin/plugin.json`, plus `uv.lock` via `uv lock`. The Claude Code plugin versions separately in jarvis-index. See `.claude/skills/jarvis-release/SKILL.md` for the full release runbook.

@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "jarvis": {
-      "command": "uvx",
-      "args": ["--from", "jarvis-mcp>=0.0.1", "jarvis-server"]
-    }
-  }
-}
