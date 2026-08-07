@@ -102,10 +102,12 @@ serving partial results.
 GitHub serves raw files, release assets, and marketplace metadata only to viewers of
 the owning repo — so every install path advertised from here 404s for a real user.
 `jarvis-intelligence/jarvis-index` is a public repo holding the public distribution surface: a synced
-copy of `setup.sh`, the plugin definition (`.claude-plugin/` + `plugin/`), the zoekt
-release assets, and the issue tracker. It is a publication target, never edited by
-hand — `sync-public-distribution.yml` overwrites it on every release, and
-`build-zoekt.yml` publishes the binaries there. Nothing else is mirrored: `src/` is
+copy of `setup.sh`, the zoekt/scip release assets, the issue tracker — and, since
+2026-08-07, the **source of truth** for the Claude Code plugin and marketplace
+definition (`.claude-plugin/` + `plugin/`, edited there directly, versioned
+independently of the PyPI package; this repo no longer contains them).
+`sync-public-distribution.yml` overwrites only `setup.sh` on every release, and
+`build-zoekt.yml`/`build-scip.yml` publish the binaries there. Nothing else is mirrored: `src/` is
 already on PyPI, and history, issues, `docs/`, `plans/`, and CI definitions stay
 private. Privacy here protects the development process and, since the compiled-wheel
 pipeline landed, the source: releases ship Cython-compiled `.so` modules
@@ -210,11 +212,11 @@ against fixtures in `tests/fixtures/`.
 ## Cutting a release
 
 Use the `.claude/skills/jarvis-release` skill (project-scoped, maintainer-only — distinct from
-`plugin/skills/`, which ships to end users installing jarvis). It captures the full pipeline
+the end-user plugin skills, which live in jarvis-index). It captures the full pipeline
 verified end-to-end while cutting v0.3.1: bump the version consistently across `pyproject.toml`,
-`server.json` (two fields), `plugin/.claude-plugin/plugin.json`, and `uv.lock`; add a `CHANGELOG.md`
+`server.json` (two fields), `.codex-plugin/plugin.json`, and `uv.lock`; add a `CHANGELOG.md`
 entry; open and merge a `chore/release-X.Y.Z` PR; tag and publish a GitHub Release; confirm
 `publish-pypi.yml`/`publish-mcp-registry.yml` both succeed. `scripts/check_versions.py` (run in CI
-by `test.yml`) enforces the same 4-file consistency, plus a 5th file the skill doesn't hand-bump:
-`plugin/.mcp.json`'s `--from` floor, a `>=` compatibility minimum checked against the release
-version, not synced to it.
+by `test.yml`) enforces the same 4-file consistency. The Claude Code plugin versions separately
+in jarvis-index — bump `plugin/.claude-plugin/plugin.json` there when plugin content changes,
+and keep its `.mcp.json` `--from` floor a valid `>=` minimum against PyPI by hand.
