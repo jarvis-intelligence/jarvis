@@ -102,4 +102,4 @@ Follow **Conventional Commits** as seen in history — `feat(scope):`, `fix(scop
 
 - Open PRs against `main`. Ensure `uv run pytest -m "not integration"` is green.
 - `ZOEKT_COMMIT`/`ZOEKT_COMMIT_PIN` and `SCIP_COMMIT`/`SCIP_COMMIT_PIN` (file ↔ `setup.sh`) must each stay in sync (`tests/test_setup_sh.py` enforces both) — never edit one without the other.
-- Bumping the release version touches four files in lockstep: `pyproject.toml`, `server.json` (two fields), `.codex-plugin/plugin.json`, plus `uv.lock` via `uv lock`. The Claude Code plugin versions separately in jarvis-index. See `.claude/skills/jarvis-release/SKILL.md` for the full release runbook.
+- Bumping the release version touches three files in lockstep: `pyproject.toml`, `server.json` (two fields), plus `uv.lock` via `uv lock`. The Claude Code and Codex plugins version separately in jarvis-index. See `.claude/skills/jarvis-release/SKILL.md` for the full release runbook.

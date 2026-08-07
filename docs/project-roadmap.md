@@ -261,7 +261,7 @@ Published jarvis as a Claude Code plugin (marketplace discovery) and to the offi
 - `.claude-plugin/marketplace.json` (root): declares this repo as a plugin marketplace
 - `server.json` (root): MCP Registry server descriptor (`io.github.jarvis-intelligence/jarvis`)
 - `.github/workflows/publish-mcp-registry.yml`: publishes `server.json` to official MCP Registry after PyPI publish succeeds; retries up to 6x for eventual consistency
-- `scripts/check_versions.py`: asserts `pyproject.toml`, `server.json`, and the plugin manifests all declare the same version, and that the MCP registration floor is not ahead of it (run via test + CI to prevent drift)
+- `scripts/check_versions.py`: asserts `pyproject.toml` and `server.json` (×2) declare the same version (run via test + CI to prevent drift); the Claude Code and Codex plugin manifests moved to jarvis-index and version independently
 
 **Install flows:**
 - PyPI: `pip install jarvis-mcp` or `uv sync`
