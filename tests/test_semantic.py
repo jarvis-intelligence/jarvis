@@ -95,7 +95,9 @@ def lancedb_available():
 def test_missing_lancedb_raises_install_hint(tmp_path, monkeypatch):
     from jarvis.embeddings import SemanticExtraMissingError
     from jarvis.semantic import SemanticStore
-    monkeypatch.setitem(sys.modules, "lancedb", None)
+    from tests.conftest import BlockImportFinder
+    monkeypatch.delitem(sys.modules, "lancedb", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [BlockImportFinder("lancedb"), *sys.meta_path])
     store = SemanticStore(tmp_path / "lancedb")
     # Escaped: `match` is a regex and [semantic] would read as a character class.
     with pytest.raises(

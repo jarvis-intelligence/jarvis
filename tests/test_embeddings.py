@@ -34,7 +34,9 @@ def _install_fake(monkeypatch):
 
 
 def test_missing_extra_raises_install_hint(monkeypatch):
-    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+    from tests.conftest import BlockImportFinder
+    monkeypatch.delitem(sys.modules, "sentence_transformers", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [BlockImportFinder("sentence_transformers"), *sys.meta_path])
     model = EmbeddingModel()
     # Asserts the extra is named, not just that some command appears: the hint
     # previously offered only `uv sync`, which is unusable for anyone who

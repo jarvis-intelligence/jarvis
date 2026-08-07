@@ -29,7 +29,9 @@ Top-level:
 - `ZOEKT_COMMIT` — the zoekt commit CI builds from; must match `ZOEKT_COMMIT_PIN` in `setup.sh`.
 - `scripts/check_versions.py` — version-consistency guard across `pyproject.toml`, `server.json`, and the plugin manifest.
 - `server.json` — MCP registry manifest (two version fields).
-- `pyproject.toml` — distribution `jarvis-mcp`, `uv_build` backend, `[tool.uv.build-backend] module-name = "jarvis"`.
+- `pyproject.toml` — distribution `jarvis-mcp`, `setuptools` + Cython backend (`[build-system]`), compiled only under `JARVIS_COMPILE=1`; local dev and editable installs stay pure Python.
+- `setup.py` — Cython build glue: overrides `build_py.find_package_modules` to exclude `.py` sources whose `.so` counterpart was just built, so a compiled release wheel ships no readable source alongside its extensions.
+- `scripts/check_wheel_contents.py` — asserts a built wheel ships compiled `jarvis/*.so` modules and no leaked `.py`/`.pyx`/`.c` source; run in CI before every PyPI upload.
 - `docs/`, `evals/`, `plans/` — architecture, code standards, roadmap, eval harness, and design plans.
 - `plugin/` — Claude Code plugin (`.claude-plugin/plugin.json` manifest, `.mcp.json`, and skills under `skills/jarvis-setup`/`jarvis-use`/`jarvis-issues`).
 - `.claude/skills/jarvis-release` — maintainer-only release skill (distinct from `plugin/`, which ships to end users).
@@ -37,7 +39,7 @@ Top-level:
 
 ## Build, Test, and Development Commands
 
-The project uses `uv` (Python ≥3.12, `uv_build` backend):
+The project uses `uv` (Python ≥3.12, `setuptools` + Cython build backend; compilation only under `JARVIS_COMPILE=1`, which release CI sets and dev never does):
 
 - `uv sync` — install base deps. `uv sync --extra semantic --extra watch` for optional features.
 - `uv run pytest` — run all tests.

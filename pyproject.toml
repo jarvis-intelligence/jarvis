@@ -43,7 +43,12 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
     "Typing :: Typed",
 ]
-requires-python = ">=3.12"
+# Capped below 3.15: the compiled-wheel matrix ([tool.cibuildwheel] below)
+# only builds cp312/cp313/cp314. An uncapped floor would let uv resolve 3.15
+# once that becomes its default managed interpreter, find no matching wheel
+# (there is no sdist to fall back to), and fail `uvx --from jarvis-mcp
+# jarvis-server` outright instead of picking a supported interpreter.
+requires-python = ">=3.12,<3.15"
 dependencies = [
     # Capped below 2.0: mcp 2.0.0 removed `mcp.server.fastmcp`, which
     # server.py imports, so an uncapped range lets a fresh install resolve a
@@ -83,14 +88,43 @@ jarvis = "jarvis.index_cli:main"
 jarvis-server = "jarvis.server:main"
 
 [build-system]
-requires = ["uv_build>=0.11.19,<0.12.0"]
-build-backend = "uv_build"
+# Cython is listed unconditionally: build-system requires is static, and the
+# release path (JARVIS_COMPILE=1 in publish-pypi.yml) needs it. Dev builds
+# pay one extra download in the isolated build env and compile nothing.
+# Capped below the next major, like every dependency below: this resolves
+# fresh in CI at release time with no uv.lock protection, and setup.py
+# overrides a semi-internal setuptools API (`build_py.find_package_modules`)
+# that could shift between majors.
+requires = ["setuptools>=80.9,<90", "Cython>=3.1,<4"]
+build-backend = "setuptools.build_meta"
 
-[tool.uv.build-backend]
-# The distribution is `jarvis-mcp`, which would otherwise make the backend
-# look for `src/jarvis_mcp/`. The import package is and stays `jarvis`.
-module-name = "jarvis"
+[tool.setuptools]
+# The distribution is `jarvis-mcp`; the import package is and stays `jarvis`.
+# src-layout with an explicit package list -- setuptools finds src/jarvis
+# regardless of the dist name, so no module-name mapping is needed here
+# (uv_build required one; see git history if archaeology calls).
+package-dir = { "" = "src" }
+packages = ["jarvis"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: exercises real external binaries (scip-python, scip, zoekt-index)"]
+
+[tool.cibuildwheel]
+# cp312..cp314 x {linux x86_64/aarch64, macOS arm64/x86_64}; the runner list
+# in publish-pypi.yml supplies the platforms. musllinux and Windows are
+# skipped -- setup.sh does not support them, so nothing could consume the
+# wheels. No sdist is ever built: platforms outside this matrix must fail
+# loudly rather than fall back to readable source.
+build = ["cp312-*", "cp313-*", "cp314-*"]
+skip = ["*-musllinux_*"]
+environment = { JARVIS_COMPILE = "1" }
+# The unit suite against the INSTALLED compiled wheel is the empirical gate
+# for Cython semantic fidelity (frozen dataclasses, `str | None`, ...). This
+# does NOT install the `semantic` extra -- pulling torch into 12 builds
+# across 4 runners (including an aarch64 container) would be expensive and
+# flaky -- so every test gated behind `pytest.importorskip("lancedb")` or
+# `pytest.importorskip("tree_sitter_language_pack")` skips here. Full-extras
+# compiled-wheel coverage is not yet automated.
+test-requires = ["pytest>=8.3"]
+test-command = "pytest {project}/tests -m 'not integration' -q"
