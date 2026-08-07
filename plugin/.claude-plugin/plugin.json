@@ -1,7 +1,7 @@
 {
   "name": "jarvis",
   "description": "Local-first SCIP code navigation and Zoekt search over your own indexed repositories, with skills that teach Claude to prefer structural queries over grep.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "author": {
     "name": "phuongddx",
     "email": "95doanphuong@gmail.com"

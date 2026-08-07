@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.1] - 2026-08-07
+
+No functional changes — this release exists to move the project's publishing
+identity to the jarvis-intelligence org after the repo transfer.
+
+### Changed
+
+- **MCP Registry entry renamed to `io.github.jarvis-intelligence/jarvis`.**
+  The registry namespace is bound to the repo owner via GitHub OIDC, so after
+  the transfer the workflow could no longer publish updates under
+  `io.github.phuongddx/jarvis` — that old entry is orphaned at 0.6.0 and this
+  release creates the successor. `server.json`, the README ownership marker,
+  and publish-pypi.yml's marker guard changed in lockstep.
+- **PyPI trusted publisher re-anchored** to owner `jarvis-intelligence`, with
+  no environment: GitHub environments are unavailable on private repos under
+  free-plan orgs, so the `pypi` environment (and its runbook) was dropped
+  from publish-pypi.yml.
+- **PyPI project URLs** now point at the public distribution repo
+  `jarvis-intelligence/jarvis-index` (they referenced the pre-migration
+  `phuongddx/jarvis-dist` name, which only worked via GitHub redirects).
+
 ## [0.6.0] - 2026-08-07
 
 Minor rather than patch: `typeHierarchy` works for the first time, and the
