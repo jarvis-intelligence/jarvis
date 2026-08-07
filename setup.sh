@@ -30,7 +30,7 @@ SCIP_COMMIT_PIN="56791658a873"
 # Kept in sync with the repo-root ZOEKT_COMMIT file that CI builds from.
 # tests/test_setup_sh.py asserts the two never drift.
 ZOEKT_COMMIT_PIN="33f1f18af292"
-JARVIS_REPO="phuongddx/jarvis"
+JARVIS_REPO="jarvis-intelligence/jarvis"
 
 # The zoekt and scip binaries are published to a separate PUBLIC repo.
 # jarvis's own repo is private, and GitHub serves release assets only to

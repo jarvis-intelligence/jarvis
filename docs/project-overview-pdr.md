@@ -89,7 +89,7 @@ jarvis is available through four discovery and installation channels:
 
 **Codex plugin:** `.codex-plugin/plugin.json` (root) declares the same `plugin/skills/` tree for Codex, adding the interface metadata Codex requires (display name, category, capabilities, default prompts, icons) that the Claude manifest does not carry. Both manifests point at one shared skills directory, so a skill is authored once and served to both hosts.
 
-**MCP Registry:** Official listing at [`io.github.phuongddx/jarvis`](https://modelcontextprotocol.io/registry) — published via `server.json` (MCP Registry server descriptor) on every release, gated on PyPI publish success to ensure availability. Allows MCP clients (beyond Claude Code) to discover and install jarvis.
+**MCP Registry:** Official listing at [`io.github.jarvis-intelligence/jarvis`](https://modelcontextprotocol.io/registry) — published via `server.json` (MCP Registry server descriptor) on every release, gated on PyPI publish success to ensure availability. Allows MCP clients (beyond Claude Code) to discover and install jarvis.
 
 **Version consistency:** Five version fields across four files (`pyproject.toml`, `server.json` ×2, `plugin/.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`) are asserted identical by `scripts/check_versions.py`, run automatically in CI and as a test (`tests/test_check_versions.py`), preventing version drift across distribution channels. `plugin/.mcp.json`'s `--from` specifier is checked separately: it is a compatibility *floor*, not a synced field, so the guard only asserts it is `<=` the release version — a floor ahead of the release would make the plugin resolve to nothing installable.
 

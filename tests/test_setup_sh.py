@@ -369,7 +369,7 @@ def test_scip_release_repo_is_not_the_private_repo():
     the private development repo 404s for every real user.
 
     The non-empty assertion comes first deliberately: without it, an unset
-    SCIP_RELEASE_REPO makes `"" != "phuongddx/jarvis"` true and the test
+    SCIP_RELEASE_REPO makes `"" != "jarvis-intelligence/jarvis"` true and the test
     passes vacuously, guarding nothing."""
     release_repo = run_func('echo "$SCIP_RELEASE_REPO"').stdout.strip()
     private_repo = run_func('echo "$JARVIS_REPO"').stdout.strip()
@@ -922,7 +922,7 @@ def test_zoekt_release_repo_is_not_the_private_repo():
     that regression -- it is how the original outage would have been caught.
 
     The non-empty assertion comes first deliberately: without it, an unset
-    ZOEKT_RELEASE_REPO makes `"" != "phuongddx/jarvis"` true and the test
+    ZOEKT_RELEASE_REPO makes `"" != "jarvis-intelligence/jarvis"` true and the test
     passes vacuously, guarding nothing."""
     release_repo = run_func('echo "$ZOEKT_RELEASE_REPO"').stdout.strip()
     private_repo = run_func('echo "$JARVIS_REPO"').stdout.strip()

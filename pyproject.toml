@@ -78,9 +78,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/phuongddx/jarvis-dist"
-Repository = "https://github.com/phuongddx/jarvis-dist"
-Issues = "https://github.com/phuongddx/jarvis-dist/issues"
+Homepage = "https://github.com/jarvis-intelligence/jarvis-index"
+Repository = "https://github.com/jarvis-intelligence/jarvis-index"
+Issues = "https://github.com/jarvis-intelligence/jarvis-index/issues"
 Changelog = "https://pypi.org/project/jarvis-mcp/#history"
 
 [project.scripts]
