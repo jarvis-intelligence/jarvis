@@ -1,6 +1,6 @@
 # jarvis
 
-<!-- mcp-name: io.github.phuongddx/jarvis -->
+<!-- mcp-name: io.github.jarvis-intelligence/jarvis -->
 
 **Local-first code intelligence for coding agents.** Precomputed SCIP navigation
 (go-to-definition, find-references, call hierarchy, document symbols), Zoekt
@@ -61,7 +61,7 @@ inherit your shell's), use the absolute path from `which jarvis-server`.
 <summary>Running from a clone instead</summary>
 
 ```bash
-git clone https://github.com/phuongddx/jarvis && cd jarvis
+git clone https://github.com/jarvis-intelligence/jarvis && cd jarvis
 uv sync
 claude mcp add jarvis --scope user -- uv --directory "$(pwd)" run jarvis-server
 ```

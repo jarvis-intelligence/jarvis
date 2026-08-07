@@ -65,7 +65,7 @@ jobs:
       - name: Verify the MCP Registry ownership marker survived
         run: |
           set -eu
-          marker='mcp-name: io.github.phuongddx/jarvis'
+          marker='mcp-name: io.github.jarvis-intelligence/jarvis'
           if ! grep -qF "$marker" README.md; then
             echo "README.md is missing the registry ownership marker:" >&2
             echo "  <!-- $marker -->" >&2
@@ -199,11 +199,10 @@ jobs:
     needs: smoke
     runs-on: ubuntu-latest
 
-    # Must match the environment name on the PyPI trusted publisher. Also the
-    # place to require a manual approval before any upload.
-    environment:
-      name: pypi
-      url: https://pypi.org/p/jarvis-mcp
+    # No `environment:` block deliberately: this private repo lives in a
+    # free-plan org, where environments are unavailable on private repos --
+    # a job referencing one never starts. The PyPI trusted publisher must
+    # therefore be configured with an EMPTY environment field.
 
     permissions:
       # Required for PyPI trusted publishing. Nothing else needs write access.
@@ -231,19 +230,16 @@ jobs:
 # One-time setup, before the first release:
 #
 # 1. Create the project's trusted publisher at
-#    https://pypi.org/manage/account/publishing/ with:
+#    https://pypi.org/manage/project/jarvis-mcp/settings/publishing/ with:
 #      PyPI project name: jarvis-mcp
-#      Owner:             phuongddx
+#      Owner:             jarvis-intelligence
 #      Repository:        jarvis
 #      Workflow name:     publish-pypi.yml
-#      Environment:       pypi
-#    Use the "pending publisher" form -- it works before the project exists, so
-#    the very first upload can also come from this workflow.
+#      Environment:       (leave empty -- see the publish job's comment; the
+#                         free-plan org cannot provide environments on this
+#                         private repo, and a publisher pinned to one rejects
+#                         tokens minted without it)
 #
-# 2. Create a `pypi` environment under Settings -> Environments. Optionally add
-#    yourself as a required reviewer so every upload needs an explicit approval.
-#
-# 3. Cut a release: bump the version, tag it (`git tag vX.Y.Z && git push origin
+# 2. Cut a release: bump the version, tag it (`git tag vX.Y.Z && git push origin
 #    vX.Y.Z`), then publish a GitHub Release for that tag. This workflow does
-#    the rest. These steps are unchanged from the pure-wheel era; only the
-#    build/publish steps above changed for the compiled-wheel matrix.
+#    the rest.
