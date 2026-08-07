@@ -127,4 +127,8 @@ environment = { JARVIS_COMPILE = "1" }
 # `pytest.importorskip("tree_sitter_language_pack")` skips here. Full-extras
 # compiled-wheel coverage is not yet automated.
 test-requires = ["pytest>=8.3"]
-test-command = "pytest {project}/tests -m 'not integration' -q"
+# test_setup_sh.py is excluded: it tests the repo's bootstrap script, not the
+# wheel, and it hard-requires dash (its own first test guards on that), which
+# manylinux containers do not ship. Proven the hard way: v0.6.0's first
+# publish run failed exactly there, inside the cp312 manylinux test phase.
+test-command = "pytest {project}/tests -m 'not integration' -q --ignore={project}/tests/test_setup_sh.py"
