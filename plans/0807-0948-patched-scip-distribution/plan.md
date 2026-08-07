@@ -1,7 +1,7 @@
 # Patched-scip Distribution Implementation Plan
 
 **Brainstorm:** `plans/reports/brainstorm-0806-1610-patched-scip-distribution-report.md` (Option A approved)
-**Status:** pending
+**Status:** complete (implemented + reviewed; release scip-56791658a873 live on jarvis-index)
 
 **Goal:** End users installing via the public setup.sh get a `scip` binary with the scip#465 fix (populated `global_symbols.relationships`), so `typeHierarchy` works — without waiting for upstream to merge.
 

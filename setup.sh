@@ -427,11 +427,30 @@ install_bash_shim() {
 	return 0
 }
 
+# True when the scip that setup.sh manages (bin_dir first, PATH as the
+# fallback -- same resolution order as already_installed) reports the pinned
+# fork commit in its --version output. Go stamps the build's vcs revision, so
+# an upstream v0.9.0 binary or a stale fork build both fail the match.
+installed_scip_matches_pin() {
+	if [ -x "$(bin_dir)/scip" ]; then
+		"$(bin_dir)/scip" --version 2>/dev/null | grep -q "$SCIP_COMMIT_PIN"
+	elif have_cmd scip; then
+		scip --version 2>/dev/null | grep -q "$SCIP_COMMIT_PIN"
+	else
+		return 1
+	fi
+}
+
 install_scip() {
 	_os=$1
 	_arch=$2
 
-	if [ "${FORCE:-0}" != "1" ] && already_installed scip; then
+	# Version-gated, not merely presence-gated like the other installers: the
+	# whole point of the fork build is replacing upstream v0.9.0 binaries that
+	# existing installs already have on disk. A bare already_installed check
+	# would strand every one of them on broken typeHierarchy forever; matching
+	# the pin re-installs exactly once per pin bump and then skips again.
+	if [ "${FORCE:-0}" != "1" ] && installed_scip_matches_pin; then
 		log_info "scip: already installed, skipping"
 		return 0
 	fi
@@ -442,6 +461,14 @@ install_scip() {
 	log_info "scip: installing fork build ${SCIP_COMMIT_PIN} (upstream v0.9.0 + relationships fix)"
 	if install_tarball_binary "${_base}/${_asset}" "${_base}/${_asset}.sha256" scip scip; then
 		log_info "scip: installed"
+		# bin_dir is appended to PATH, so a scip already installed elsewhere
+		# keeps winning at runtime -- jarvis would silently index with the
+		# broken binary despite the fresh install landing above.
+		_path_scip=$(command -v scip 2>/dev/null || true)
+		if [ -n "$_path_scip" ] && [ "$_path_scip" != "$(bin_dir)/scip" ] \
+			&& ! "$_path_scip" --version 2>/dev/null | grep -q "$SCIP_COMMIT_PIN"; then
+			log_warn "scip: ${_path_scip} is earlier on PATH and predates the fix -- remove it or jarvis will keep using it"
+		fi
 	else
 		log_error "scip: install failed — see https://github.com/${SCIP_RELEASE_REPO}/releases"
 		return 1

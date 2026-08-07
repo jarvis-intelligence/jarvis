@@ -101,7 +101,10 @@ jobs:
           set -eux
           mkdir -p smoke
           tar -xzf dist/scip-linux-amd64.tar.gz -C smoke
-          smoke/scip --version | tee version.txt
+          # No pipe: a piped form would silently depend on pipefail being
+          # unset, masking a non-zero exit from scip itself.
+          smoke/scip --version >version.txt 2>&1
+          cat version.txt
           # The build stamps the fork commit into --version output; a binary
           # built from the wrong ref would ship the wrong fix silently.
           grep -q "$SCIP_COMMIT" version.txt

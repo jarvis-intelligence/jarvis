@@ -6,6 +6,7 @@ without performing a real install.
 """
 
 import hashlib
+import re
 import shutil
 import subprocess
 import tarfile
@@ -324,11 +325,37 @@ def test_scip_asset_name_covers_all_supported_platforms(os_name, arch, expected)
 def test_scip_pin_matches_committed_file():
     """The in-script pin must not drift from the SCIP_COMMIT file CI builds
     from: a drifted pin downloads a release build-scip.yml never published,
-    which 404s for every user. A floating 'latest' is ruled out by the same
-    mechanism -- the pin is a commit, fixed at build time."""
+    which 404s for every user.
+
+    The non-empty and format assertions guard against the vacuous pass:
+    two empty (or two 'latest') values would compare equal while producing
+    a download URL that resolves for nobody."""
     on_disk = (Path(__file__).parent.parent / "SCIP_COMMIT").read_text().strip()
     in_script = run_func('echo "$SCIP_COMMIT_PIN"').stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{7,40}", on_disk), f"SCIP_COMMIT is not a commit hash: {on_disk!r}"
     assert in_script == on_disk
+
+
+def test_install_scip_reinstalls_over_unpatched_upstream_binary(tmp_path):
+    """The upgrade path for the installed base: existing users hold upstream
+    v0.9.0, whose --version carries no fork commit. A bare presence check
+    would strand them on broken typeHierarchy forever, so a version mismatch
+    must fall through to the download path (asserted here via its failure
+    against an unreachable URL, not 'already installed, skipping')."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    scip = fake_bin / "scip"
+    scip.write_text('#!/bin/sh\necho "scip version v0.9.0"\n')
+    scip.chmod(0o755)
+    result = run_func(
+        # Shadow download_to so the fall-through is observable without
+        # network access: reaching the download step proves the version
+        # gate declined to skip.
+        'download_to() { return 1; }\ninstall_scip darwin arm64',
+        env={"JARVIS_BIN_DIR": str(fake_bin)},
+    )
+    assert "already installed" not in result.stdout
+    assert "installing fork build" in result.stdout
 
 
 def test_scip_release_repo_is_set():
@@ -397,11 +424,17 @@ def test_already_installed_reports_missing_when_truly_absent(tmp_path):
 
 
 def test_install_scip_skips_when_present_only_in_bin_dir(tmp_path):
-    """Regression: CI caught setup.sh re-downloading on every re-run."""
+    """Regression: CI caught setup.sh re-downloading on every re-run.
+
+    The stub reports the pinned fork commit because the skip is
+    version-gated: after a real install the binary genuinely stamps the pin,
+    so re-runs skip, while a silent or upstream binary must NOT skip (see
+    test_install_scip_reinstalls_over_unpatched_upstream_binary)."""
+    pin = (Path(__file__).parent.parent / "SCIP_COMMIT").read_text().strip()
     bin_path = tmp_path / "bin"
     bin_path.mkdir()
     stub = bin_path / "scip"
-    stub.write_text("#!/bin/sh\ntrue\n")
+    stub.write_text(f'#!/bin/sh\necho "SHA: {pin}0000000000000000000000000000"\n')
     stub.chmod(0o755)
     result = run_func(
         'install_scip linux amd64',
@@ -414,11 +447,12 @@ def test_install_scip_skips_when_present_only_in_bin_dir(tmp_path):
 
 
 def test_install_scip_skips_when_already_present(tmp_path):
-    """An existing scip on PATH must not be re-downloaded."""
+    """A pin-stamped scip on PATH must not be re-downloaded."""
+    pin = (Path(__file__).parent.parent / "SCIP_COMMIT").read_text().strip()
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
     stub = fake_bin / "scip"
-    stub.write_text("#!/bin/sh\necho 'scip version v0.9.0'\n")
+    stub.write_text(f'#!/bin/sh\necho "SHA: {pin}0000000000000000000000000000"\n')
     stub.chmod(0o755)
     result = run_func(
         'install_scip darwin arm64',
