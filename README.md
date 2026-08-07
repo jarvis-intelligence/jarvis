@@ -79,7 +79,7 @@ claude mcp add jarvis --scope user -- uv --directory "$(pwd)" run jarvis-server
 | `semanticSearch` | Natural-language search — vector hits fused with Zoekt lexical hits and SCIP symbol-definition matches via reciprocal rank fusion |
 | `blastRadius` | Which *other* indexed repos depend on a package, up to 2 hops |
 | `getIndexStatus` | Published commit, freshness, staleness vs. a working tree |
-| `typeHierarchy` | Supertypes/subtypes — **currently non-functional**, see [limitations](#known-upstream-limitations) |
+| `typeHierarchy` | Supertypes/subtypes — needs an index built with the bundled `scip`, see [limitations](#known-upstream-limitations) |
 
 Every nav tool takes `repo` (the slug from `jarvis index`) plus a
 tool-specific `symbol` or `path`. All tools report failure the same way — a
@@ -273,10 +273,12 @@ These are real behaviors of the underlying SCIP tooling (`scip expt-convert`
 as of v0.9.0, `scip-java`, `scip-kotlinc`), not jarvis bugs:
 
 - **`typeHierarchy` returns an explicit `{"error": ...}`**, not empty arrays, on
-  every real-world index — the converter declares `global_symbols.relationships`
-  in its schema but never writes it. An empty result would wrongly assert "no
-  supertypes"; the error says "cannot tell" instead. Reported upstream:
-  [scip-code/scip#464](https://github.com/scip-code/scip/issues/464), fixed by
+  indexes built with an unpatched upstream `scip` — that converter declares
+  `global_symbols.relationships` in its schema but never writes it. An empty
+  result would wrongly assert "no supertypes"; the error says "cannot tell"
+  instead. setup.sh installs a fork build carrying the fix, so a fresh
+  `jarvis reindex <slug>` makes the tool work. Reported upstream:
+  [scip-code/scip#464](https://github.com/scip-code/scip/issues/464), fix
   [scip-code/scip#465](https://github.com/scip-code/scip/pull/465) (open, CI green).
 - **`displayName` / `kind` are backfilled from the symbol string.** The converter never populates
   `global_symbols.display_name`/`.kind`, so `query.py`'s `_display_and_kind` parses both from the

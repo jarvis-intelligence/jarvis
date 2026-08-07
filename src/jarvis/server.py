@@ -246,8 +246,10 @@ def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
     SCIP symbol string.
 
     Returns an explicit error when the index carries no relationship data —
-    `scip expt-convert` does not populate `global_symbols.relationships`, so
-    an empty result would wrongly imply the symbol has no supertypes."""
+    unpatched `scip expt-convert` (upstream through v0.9.0) does not populate
+    `global_symbols.relationships`, so an empty result would wrongly imply
+    the symbol has no supertypes. Reindexing with the fork build setup.sh
+    installs makes this self-heal."""
     try:
         resolved = symbol
         supertypes, subtypes, freshness, available = _service().type_hierarchy(repo, symbol)
@@ -260,10 +262,11 @@ def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
         return {
             "error": (
                 "typeHierarchy unavailable for this index: no symbol carries relationship "
-                "data. `scip expt-convert` declares global_symbols.relationships but never "
-                "writes it, so super/subtypes cannot be determined. This is an upstream "
-                "converter limitation, not a missing symbol — do not read it as "
-                "'this type has no supertypes'."
+                "data. This index was built with an unpatched `scip` (upstream through "
+                "v0.9.0 never populates global_symbols.relationships — scip#464). "
+                "setup.sh now installs a fixed build: re-run setup.sh, then "
+                "`jarvis reindex <slug>`. Do not read this as 'this type has no "
+                "supertypes' — it is missing data, not an empty hierarchy."
             ),
             "symbol": symbol,
             **_freshness_fields(freshness),

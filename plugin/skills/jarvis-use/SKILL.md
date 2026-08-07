@@ -17,7 +17,7 @@ For any **structural** code question, prefer the jarvis tool over grep. `repo` i
 | Where is `X` defined? | `goToDefinition(repo, X)` | grep |
 | Who calls / uses `X`? | `findReferences(repo, X)` | grep |
 | What calls `X` / what `X` calls? | `callHierarchy(repo, X)` | grep |
-| Super/subtypes of `X`? | `typeHierarchy(repo, X)` | (often errors — see gotchas) |
+| Super/subtypes of `X`? | `typeHierarchy(repo, X)` | (errors on stale indexes — see gotchas) |
 | Symbols in a file? | `documentSymbols(repo, path)` | grep |
 | Is this repo indexed? | `getIndexStatus(repo, repo_path)` | — |
 | Cross-repo dependents of a package? | `blastRadius(repo, pkg)` | — |
@@ -62,7 +62,7 @@ Before any structural tool call, check freshness:
 
 ## Gotchas
 
-- **`typeHierarchy` errors on real indexes.** Upstream `scip expt-convert` never populates `relationships`, so the tool returns an explicit error (not a bug, not "no supertypes"). Do not file this as a bug; it's a known upstream gap.
+- **`typeHierarchy` errors on indexes built with an unpatched `scip`.** Upstream `scip expt-convert` (through v0.9.0) never populates `relationships`; setup.sh now installs a fixed fork build, so the error means the index predates it — re-run setup.sh if needed, then `jarvis reindex <slug>`. Only file a bug if the error persists on a freshly reindexed repo.
 - **An ambiguous bare name returns `candidates`, not the wrong answer.** If `goToDefinition(repo, "__init__")` matches multiple symbols, the response is an error payload carrying `candidates` (each with `symbol`, `dottedPath`, `kind`) and `candidateTotal` — pick the intended entry's `dottedPath` and retry with that as `symbol`. A name that matches nothing at all (or only parameters/type-parameters, which are excluded from resolution) returns a `SymbolNotFoundError`-style message, never a silent empty result.
 - **`semanticSearch` needs the `semantic` extra.** If `repo` was indexed without the `semantic` extra installed (`uv tool install "jarvis-mcp[semantic]"`), it returns `{"error": "..."}` with an install hint — index/reindex after installing the extra.
 - **`semanticSearch` will always error under this plugin's default registration — installing/reindexing with `[semantic]` does not fix it.** The `semantic` extra must be present in the specific server process answering the query, not just at index time. `plugin/.mcp.json` registers `jarvis` as plain `uvx --from jarvis-mcp jarvis-server` (no `[semantic]`) by design, to keep every plugin user's MCP server cold-start free of lancedb/torch. That decision is not being revisited here. If you genuinely need `semanticSearch`, register a second, differently-named MCP server pointed at the extra (the `jarvis` name is already taken by the plugin's registration):

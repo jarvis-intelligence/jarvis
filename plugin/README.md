@@ -10,7 +10,7 @@ Nine MCP tools (all take `repo` = the slug from `jarvis index`):
 - `goToDefinition` — resolve a symbol's definition site(s).
 - `findReferences` — every occurrence of a symbol.
 - `callHierarchy` — single-level incoming + outgoing calls.
-- `typeHierarchy` — super/subtypes (errors on real indexes; see the use skill's gotchas).
+- `typeHierarchy` — super/subtypes (errors only on indexes built with an unpatched `scip`; reindex fixes it — see the use skill's gotchas).
 - `getIndexStatus` — whether a repo has a published index, plus freshness.
 - `searchCode` — lexical search via Zoekt (lazy-started webserver).
 - `semanticSearch` — vector + Zoekt + SCIP symbol-definition hybrid via reciprocal rank fusion (needs the `[semantic]` extra).

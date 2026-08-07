@@ -135,11 +135,16 @@ is a real, user-facing identifier.
 `{"error": "..."}` rather than raising — this keeps the stdio server alive across query bugs. Every
 nav tool takes `repo` (the slug from `jarvis index`) plus a tool-specific `symbol` or `path`.
 
-**Known gap:** `scip expt-convert` (through v0.9.0) declares `global_symbols.relationships` but never
-populates it, so `typeHierarchy` returns an explicit `{"error": ...}` on real indexes — deliberately
-*not* empty arrays, which would wrongly assert "no supertypes". Not a bug in jarvis's query logic;
-reported upstream as [scip#464](https://github.com/scip-code/scip/issues/464) with fix PR
-[scip#465](https://github.com/scip-code/scip/pull/465) open.
+**typeHierarchy needs the fork-built scip.** Upstream `scip expt-convert` (through v0.9.0) declares
+`global_symbols.relationships` but never populates it — reported as
+[scip#464](https://github.com/scip-code/scip/issues/464), fix PR
+[scip#465](https://github.com/scip-code/scip/pull/465) still open. setup.sh therefore installs a
+build of the public fork `phuongddx/scip` (v0.9.0 + the fix), cross-compiled by `build-scip.yml`
+from the commit pinned in `SCIP_COMMIT` and published to jarvis-index releases — the same pattern
+as zoekt. Indexes created with an unpatched upstream binary still make `typeHierarchy` return an
+explicit `{"error": ...}` — deliberately *not* empty arrays, which would wrongly assert "no
+supertypes"; `relationship_data_present()` self-heals on reindex. Exit ramp: when upstream merges
+#465 and releases, repoint setup.sh at `scip-code/scip` and delete `build-scip.yml` + `SCIP_COMMIT`.
 
 **Java/Kotlin reach is narrower than "supported" suggests.** `scip-java` indexes plain JVM
 Gradle/Maven repos, and jarvis forces `-Dorg.gradle.parallel=false` for them because scip-java's

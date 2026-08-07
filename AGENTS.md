@@ -25,8 +25,9 @@ are all `jarvis`.
 
 Top-level:
 
-- `setup.sh` — POSIX-`sh` dependency bootstrapper; pins `scip` (v0.9.0), `zoekt` (`ZOEKT_COMMIT_PIN`), `scip-typescript`, `scip-python`, `scip-java` (incl. `SCIP_JAVA_KOTLIN`), `scip-swift`.
+- `setup.sh` — POSIX-`sh` dependency bootstrapper; pins `scip` (fork build, `SCIP_COMMIT_PIN`), `zoekt` (`ZOEKT_COMMIT_PIN`), `scip-typescript`, `scip-python`, `scip-java` (incl. `SCIP_JAVA_KOTLIN`), `scip-swift`.
 - `ZOEKT_COMMIT` — the zoekt commit CI builds from; must match `ZOEKT_COMMIT_PIN` in `setup.sh`.
+- `SCIP_COMMIT` — the phuongddx/scip fork commit CI builds from (upstream v0.9.0 + the scip#465 relationships fix); must match `SCIP_COMMIT_PIN` in `setup.sh`.
 - `scripts/check_versions.py` — version-consistency guard across `pyproject.toml`, `server.json`, and the plugin manifest.
 - `server.json` — MCP registry manifest (two version fields).
 - `pyproject.toml` — distribution `jarvis-mcp`, `setuptools` + Cython backend (`[build-system]`), compiled only under `JARVIS_COMPILE=1`; local dev and editable installs stay pure Python.
@@ -100,5 +101,5 @@ Optional extras (`watch`, `semantic`) must be installed via `--extra <name>`; th
 Follow **Conventional Commits** as seen in history — `feat(scope):`, `fix(scope):`, `docs:`, `chore:`, `test:`. Keep the subject line lowercase, imperative.
 
 - Open PRs against `main`. Ensure `uv run pytest -m "not integration"` is green.
-- `ZOEKT_COMMIT` and `ZOEKT_COMMIT_PIN` in `setup.sh` must stay in sync (`tests/test_setup_sh.py` enforces this) — never edit one without the other.
+- `ZOEKT_COMMIT`/`ZOEKT_COMMIT_PIN` and `SCIP_COMMIT`/`SCIP_COMMIT_PIN` (file ↔ `setup.sh`) must each stay in sync (`tests/test_setup_sh.py` enforces both) — never edit one without the other.
 - Bumping the release version touches four files in lockstep: `pyproject.toml`, `server.json` (two fields), `plugin/.claude-plugin/plugin.json`. `plugin/.mcp.json`'s `--from` floor is a compatibility minimum (checked `<=` against the version, not synced to it). See `.claude/skills/jarvis-release/SKILL.md` for the full release runbook.

@@ -342,15 +342,17 @@ def _type_hierarchy_subtypes(conn: sqlite3.Connection, symbol: str) -> list[Type
 def relationship_data_present(conn: sqlite3.Connection) -> bool:
     """True when any symbol carries relationship data.
 
-    `scip expt-convert` declares `global_symbols.relationships` in its schema
-    but never writes it -- `insertGlobalSymbols()` binds only symbol,
-    display_name, kind, documentation and enclosing_symbol (verified against
-    cmd/scip/convert.go at v0.9.0). Type hierarchy is therefore unanswerable
-    on every real index, and reporting an empty result would assert that a
-    type has no supertypes rather than that we cannot tell.
+    Upstream `scip expt-convert` (through v0.9.0) declares
+    `global_symbols.relationships` in its schema but never writes it --
+    `insertGlobalSymbols()` binds only symbol, display_name, kind,
+    documentation and enclosing_symbol (verified against cmd/scip/convert.go
+    at v0.9.0; scip#464). Type hierarchy is therefore unanswerable on indexes
+    that converter produced, and reporting an empty result would assert that
+    a type has no supertypes rather than that we cannot tell.
 
-    Self-healing: this flips to True with no code change if a future
-    converter starts populating the column.
+    Self-healing by design: setup.sh now installs a fork build carrying the
+    scip#465 fix, so this flips to True on the first reindex with it -- no
+    code change needed.
     """
     row = conn.execute("SELECT 1 FROM global_symbols WHERE relationships IS NOT NULL LIMIT 1").fetchone()
     return row is not None

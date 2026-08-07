@@ -1,0 +1,133 @@
+# Cross-compiles scip for the platforms setup.sh supports and publishes the
+# binaries to jarvis-intelligence/jarvis-index — a separate PUBLIC repo, not this one.
+#
+# Why this exists: upstream scip-code/scip through v0.9.0 never populates
+# `global_symbols.relationships` in `scip expt-convert` (scip-code/scip#464),
+# which makes jarvis's typeHierarchy unanswerable on every real index. The
+# fix (scip-code/scip#465) is still unmerged upstream but is merged in the
+# public fork phuongddx/scip; this workflow builds that fork at the commit
+# pinned in the repo-root SCIP_COMMIT file.
+#
+# Why a git clone and not `go get`: the fork's module path is still
+# github.com/scip-code/scip and its go.mod carries a `replace` directive
+# pointing at ./bindings/go/scip, so module-mode fetching of a fork commit
+# cannot resolve — the build must run in a checkout of the fork itself.
+#
+# Why jarvis-index and not here: this repo is private, and GitHub serves
+# release assets only to viewers of the owning repo — an unauthenticated
+# `curl` against a private repo's release 404s, which is exactly what every
+# user's setup.sh run would hit. jarvis-index is public and holds nothing
+# but published artifacts (zoekt binaries live there for the same reason).
+#
+# Exit ramp: when upstream merges #465 and cuts a release containing it,
+# repoint setup.sh's scip download at scip-code/scip releases and delete
+# this workflow plus the SCIP_COMMIT pin.
+#
+# Runs only when the pinned commit changes, or on manual dispatch — never on
+# a schedule, so fork breakage can't land unannounced.
+name: build-scip
+
+on:
+  push:
+    branches: [main]
+    paths: ["SCIP_COMMIT", ".github/workflows/build-scip.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Read pinned commit
+        id: pin
+        run: |
+          commit=$(tr -d '[:space:]' < SCIP_COMMIT)
+          if [ -z "$commit" ]; then
+            echo "SCIP_COMMIT is empty" >&2
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile all platforms
+        env:
+          SCIP_COMMIT: ${{ steps.pin.outputs.commit }}
+        run: |
+          set -eux
+          mkdir -p dist
+          git clone https://github.com/phuongddx/scip.git fork
+          cd fork
+          git checkout "$SCIP_COMMIT"
+
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os=${target%/*}
+            arch=${target#*/}
+            stage="../dist/stage-${os}-${arch}"
+            mkdir -p "$stage"
+            # Pure-Go sqlite (modernc), so CGO_ENABLED=0 cross-compiles cleanly.
+            # GOWORK=off: workspace mode rewrites go.work.sum during the build,
+            # which flips the binary's vcs stamp to dirty ("clean: false"); the
+            # replace directive lives in go.mod, so module mode needs no go.work.
+            GOWORK=off GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+              go build -trimpath -o "${stage}/scip" ./cmd/scip
+            # Member name `scip` at the tarball root: setup.sh's
+            # install_tarball_binary extracts exactly that member, and the
+            # asset name must match scip_asset_name().
+            tar -czf "../dist/scip-${os}-${arch}.tar.gz" -C "$stage" scip
+            rm -rf "$stage"
+          done
+
+      - name: Generate checksums
+        run: |
+          set -eu
+          cd dist
+          for f in *.tar.gz; do
+            # Match the "<digest>  <filename>" sidecar format setup.sh parses.
+            sha256sum "$f" > "${f}.sha256"
+          done
+          ls -la
+
+      - name: Smoke-test the native binary
+        env:
+          SCIP_COMMIT: ${{ steps.pin.outputs.commit }}
+        run: |
+          set -eux
+          mkdir -p smoke
+          tar -xzf dist/scip-linux-amd64.tar.gz -C smoke
+          # No pipe: a piped form would silently depend on pipefail being
+          # unset, masking a non-zero exit from scip itself.
+          smoke/scip --version >version.txt 2>&1
+          cat version.txt
+          # The build stamps the fork commit into --version output; a binary
+          # built from the wrong ref would ship the wrong fix silently.
+          grep -q "$SCIP_COMMIT" version.txt
+          # expt-convert is the one subcommand jarvis actually drives; its
+          # help exiting non-zero would mean a broken CLI wiring.
+          smoke/scip expt-convert --help >convert-help.txt 2>&1
+          grep -qi "sqlite" convert-help.txt
+
+      - name: Publish release
+        env:
+          # JARVIS_DIST_TOKEN, not GITHUB_TOKEN: the default token cannot
+          # write to a different repo. Fine-grained, Contents:write on
+          # jarvis-intelligence/jarvis-index only.
+          GH_TOKEN: ${{ secrets.JARVIS_DIST_TOKEN }}
+          SCIP_COMMIT: ${{ steps.pin.outputs.commit }}
+        run: |
+          set -eu
+          tag="scip-${SCIP_COMMIT}"
+          if gh release view "$tag" --repo jarvis-intelligence/jarvis-index >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.tar.gz dist/*.sha256 --clobber --repo jarvis-intelligence/jarvis-index
+          else
+            gh release create "$tag" dist/*.tar.gz dist/*.sha256 \
+              --repo jarvis-intelligence/jarvis-index \
+              --title "scip @ ${SCIP_COMMIT}" \
+              --notes "scip cross-compiled from phuongddx/scip@${SCIP_COMMIT} (upstream v0.9.0 + the scip-code/scip#465 relationships fix). Consumed by jarvis's setup.sh."
+          fi
