@@ -72,7 +72,10 @@ jobs:
             stage="../dist/stage-${os}-${arch}"
             mkdir -p "$stage"
             # Pure-Go sqlite (modernc), so CGO_ENABLED=0 cross-compiles cleanly.
-            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+            # GOWORK=off: workspace mode rewrites go.work.sum during the build,
+            # which flips the binary's vcs stamp to dirty ("clean: false"); the
+            # replace directive lives in go.mod, so module mode needs no go.work.
+            GOWORK=off GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
               go build -trimpath -o "${stage}/scip" ./cmd/scip
             # Member name `scip` at the tarball root: setup.sh's
             # install_tarball_binary extracts exactly that member, and the
