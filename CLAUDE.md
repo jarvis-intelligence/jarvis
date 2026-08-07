@@ -103,9 +103,9 @@ GitHub serves raw files, release assets, and marketplace metadata only to viewer
 the owning repo — so every install path advertised from here 404s for a real user.
 `jarvis-intelligence/jarvis-index` is a public repo holding the public distribution surface: a synced
 copy of `setup.sh`, the zoekt/scip release assets, the issue tracker — and, since
-2026-08-07, the **source of truth** for the Claude Code plugin and marketplace
-definition (`.claude-plugin/` + `plugin/`, edited there directly, versioned
-independently of the PyPI package; this repo no longer contains them).
+2026-08-07, the **source of truth** for the Claude Code and Codex plugins and the
+marketplace definition (`.claude-plugin/` + `plugin/` + `.codex-plugin/`, edited there
+directly, versioned independently of the PyPI package; this repo no longer contains them).
 `sync-public-distribution.yml` overwrites only `setup.sh` on every release, and
 `build-zoekt.yml`/`build-scip.yml` publish the binaries there. Nothing else is mirrored: `src/` is
 already on PyPI, and history, issues, `docs/`, `plans/`, and CI definitions stay
@@ -214,9 +214,10 @@ against fixtures in `tests/fixtures/`.
 Use the `.claude/skills/jarvis-release` skill (project-scoped, maintainer-only — distinct from
 the end-user plugin skills, which live in jarvis-index). It captures the full pipeline
 verified end-to-end while cutting v0.3.1: bump the version consistently across `pyproject.toml`,
-`server.json` (two fields), `.codex-plugin/plugin.json`, and `uv.lock`; add a `CHANGELOG.md`
+`server.json` (two fields), and `uv.lock`; add a `CHANGELOG.md`
 entry; open and merge a `chore/release-X.Y.Z` PR; tag and publish a GitHub Release; confirm
 `publish-pypi.yml`/`publish-mcp-registry.yml` both succeed. `scripts/check_versions.py` (run in CI
-by `test.yml`) enforces the same 4-file consistency. The Claude Code plugin versions separately
-in jarvis-index — bump `plugin/.claude-plugin/plugin.json` there when plugin content changes,
-and keep its `.mcp.json` `--from` floor a valid `>=` minimum against PyPI by hand.
+by `test.yml`) enforces the same 3-file consistency. The Claude Code and Codex plugins version
+separately in jarvis-index — bump `plugin/.claude-plugin/plugin.json` and
+`.codex-plugin/plugin.json` there when plugin content changes, and keep the
+`.mcp.json` `--from` floor a valid `>=` minimum against PyPI by hand.

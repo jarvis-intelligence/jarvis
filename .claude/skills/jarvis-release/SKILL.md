@@ -1,6 +1,6 @@
 ---
 name: jarvis-release
-description: Cut a new release of the jarvis repo itself (not a user's indexed repo) — bump the version consistently across pyproject.toml, plugin.json, server.json, and uv.lock, add a CHANGELOG.md entry, open and merge a chore/release PR, tag and publish a GitHub Release, and confirm the publish-pypi/publish-mcp-registry pipeline actually completes. Use this whenever the user asks to release a new version, cut a release, ship vX.Y.Z, publish to PyPI, or asks what's needed to release recent changes — even if they only name one or two of these steps, since they're one pipeline and skipping any of them leaves the release half-done.
+description: Cut a new release of the jarvis repo itself (not a user's indexed repo) — bump the version consistently across pyproject.toml, server.json, and uv.lock, add a CHANGELOG.md entry, open and merge a chore/release PR, tag and publish a GitHub Release, and confirm the publish-pypi/publish-mcp-registry pipeline actually completes. Use this whenever the user asks to release a new version, cut a release, ship vX.Y.Z, publish to PyPI, or asks what's needed to release recent changes — even if they only name one or two of these steps, since they're one pipeline and skipping any of them leaves the release half-done.
 ---
 
 # Releasing jarvis
@@ -21,25 +21,25 @@ Semver, and the CHANGELOG is explicit about the reasoning behind past bumps — 
 
 If it's genuinely ambiguous (a fix that also quietly changes behavior), say what you're picking and why in one line before proceeding — this is the one place in the whole pipeline that isn't mechanical, and it's cheap to confirm before an irreversible PyPI upload locks it in.
 
-## 2. Bump the version in all 4 places
+## 2. Bump the version in all 3 files
 
 These must all end up identical, or CI's tag/version guard (see step 6) fails the release:
 
 | File | What to change |
 |---|---|
 | `pyproject.toml` | `version = "X.Y.Z"` |
-| `.codex-plugin/plugin.json` | `"version": "X.Y.Z"` |
 | `server.json` | **two** fields: the top-level `"version"` and `packages[0].version` |
 | `uv.lock` | **never hand-edit.** Run `uv lock` — it updates this package's own self-referential version entry (`Updated jarvis-mcp vX.Y.Z-1 -> vX.Y.Z` in its output) and re-resolves nothing else changes if no deps moved |
 
-Grep to confirm consistency before committing: `grep -rn '"version"\|^version' pyproject.toml .codex-plugin/plugin.json server.json | grep -v uv.lock` — or just run `uv run python scripts/check_versions.py`.
+Grep to confirm consistency before committing: `grep -rn '"version"\|^version' pyproject.toml server.json | grep -v uv.lock` — or just run `uv run python scripts/check_versions.py`.
 
-The Claude Code plugin is NOT part of this bump: its source of truth is
-`jarvis-intelligence/jarvis-index` (`plugin/` + `.claude-plugin/` there), versioned
-independently. When a release changes behavior the plugin skills describe, update those
-skills in jarvis-index directly and bump `plugin/.claude-plugin/plugin.json` there so
-installed plugins see an update. Keep its `.mcp.json` `--from` floor a valid `>=`
-minimum against PyPI.
+The Claude Code and Codex plugins are NOT part of this bump: their source of truth is
+`jarvis-intelligence/jarvis-index` (`plugin/` + `.claude-plugin/` + `.codex-plugin/`
+there), versioned independently. When a release changes behavior the plugin skills
+describe, update those skills in jarvis-index directly and bump
+`plugin/.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` there so installed
+plugins see an update. Keep its `.mcp.json` `--from` floor a valid `>=` minimum
+against PyPI.
 
 ## 3. Add the CHANGELOG.md entry
 
@@ -58,7 +58,7 @@ The second check matters because `publish-pypi.yml` hard-fails the release if th
 
 ```bash
 git checkout -b chore/release-X.Y.Z
-git add CHANGELOG.md .codex-plugin/plugin.json pyproject.toml server.json uv.lock
+git add CHANGELOG.md pyproject.toml server.json uv.lock
 git commit -m "chore: release X.Y.Z"
 git push -u origin chore/release-X.Y.Z
 gh pr create --base main --head chore/release-X.Y.Z --title "chore: release X.Y.Z" \

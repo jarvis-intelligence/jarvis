@@ -85,13 +85,13 @@ jarvis is available through four discovery and installation channels:
 
 **PyPI package:** `jarvis-mcp` — Install via `pip install jarvis-mcp` or `uv sync` from source. Published on every release via GitHub Actions OIDC auth.
 
-**Claude Code plugin:** Available via `/plugin marketplace add jarvis-intelligence/jarvis-index` (plugin marketplace discovery) then `/plugin install jarvis@jarvis` (auto-registers the MCP server, alternative to manual `claude mcp add`). Plugin manifest and MCP registration live under `plugin/.claude-plugin/` and `plugin/.mcp.json`; skills are under `plugin/skills/`.
+**Claude Code plugin:** Available via `/plugin marketplace add jarvis-intelligence/jarvis-index` (plugin marketplace discovery) then `/plugin install jarvis@jarvis` (auto-registers the MCP server, alternative to manual `claude mcp add`). Source of truth is the jarvis-index repo: plugin manifest and MCP registration live under `plugin/.claude-plugin/` and `plugin/.mcp.json` there; skills are under `plugin/skills/`.
 
-**Codex plugin:** `.codex-plugin/plugin.json` (root) declares the same `plugin/skills/` tree for Codex, adding the interface metadata Codex requires (display name, category, capabilities, default prompts, icons) that the Claude manifest does not carry. Both manifests point at one shared skills directory, so a skill is authored once and served to both hosts.
+**Codex plugin:** `.codex-plugin/plugin.json` (jarvis-index root) declares the same `plugin/skills/` tree for Codex, adding the interface metadata Codex requires (display name, category, capabilities, default prompts, icons) that the Claude manifest does not carry. Both manifests point at one shared skills directory, so a skill is authored once and served to both hosts.
 
 **MCP Registry:** Official listing at [`io.github.jarvis-intelligence/jarvis`](https://modelcontextprotocol.io/registry) — published via `server.json` (MCP Registry server descriptor) on every release, gated on PyPI publish success to ensure availability. Allows MCP clients (beyond Claude Code) to discover and install jarvis.
 
-**Version consistency:** Five version fields across four files (`pyproject.toml`, `server.json` ×2, `plugin/.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`) are asserted identical by `scripts/check_versions.py`, run automatically in CI and as a test (`tests/test_check_versions.py`), preventing version drift across distribution channels. `plugin/.mcp.json`'s `--from` specifier is checked separately: it is a compatibility *floor*, not a synced field, so the guard only asserts it is `<=` the release version — a floor ahead of the release would make the plugin resolve to nothing installable.
+**Version consistency:** Three version fields across two files (`pyproject.toml`, `server.json` ×2) are asserted identical by `scripts/check_versions.py`, run automatically in CI and as a test (`tests/test_check_versions.py`), preventing version drift across distribution channels. The Claude Code and Codex plugin manifests live in jarvis-index and version independently; the plugin's `.mcp.json` `--from` specifier there is a compatibility *floor* against PyPI, maintained by hand as a valid `>=` minimum.
 
 ## Database Schema
 
