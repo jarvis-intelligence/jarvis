@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.6.2] - 2026-08-08
+
+Pure bug fix: Swift indexing was unreachable through the installer for every
+user. No change to any MCP tool signature or response shape.
+
+### Fixed
+
+- **`setup.sh --only scip-swift` 404'd on every macOS arm64 host.** The Swift
+  indexer's repo moved off the personal `phuongddx` owner to the
+  jarvis-intelligence org, and GitHub serves *no* redirect for the old path —
+  so the pinned download URL returned 404 rather than forwarding, and
+  `install_scip_swift` failed on every run. `SCIP_SWIFT_REPO` now points at
+  `jarvis-intelligence/scip-swift`. Repointing alone was not sufficient: the
+  move also dropped every tag and release asset from the repo, so v0.1.2 was
+  republished from the same source (only `ci.yml` differs from the original
+  tag; the binary still reports `0.1.2`). The asset checksum differs from the
+  deleted release because it is a fresh build — `setup.sh` verifies against
+  the `.sha256` sidecar published beside it, and existing installs are
+  presence-gated, so nothing downstream needed changing.
+
+  Two guards close the gap that let this ship silently. A test asserts
+  `SCIP_SWIFT_REPO`'s owner never drifts back — the same drift assertion
+  `ZOEKT_RELEASE_REPO` and `SCIP_RELEASE_REPO` already carried, which
+  `SCIP_SWIFT_REPO` simply never had. And `setup-smoke.yml` now runs
+  `--only scip-swift` on both runners: macOS arm64 downloads and executes the
+  binary for real, Linux exercises the not-available skip branch (which must
+  still exit 0). Previously no test read the variable and the smoke workflow
+  only ever installed `scip` and `zoekt`, so the scip-swift download path had
+  zero coverage anywhere.
+
 ## [0.6.1] - 2026-08-07
 
 No functional changes — this release exists to move the project's publishing
