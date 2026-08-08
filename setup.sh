@@ -46,7 +46,11 @@ SCIP_RELEASE_REPO="jarvis-intelligence/jarvis-index"
 # disables code signing, without which repos containing signed app-extension
 # targets fail during GatherProvisioningInputs before compiling anything.
 SCIP_SWIFT_VERSION="v0.1.2"
-SCIP_SWIFT_REPO="phuongddx/scip-swift"
+# Moved from the personal `phuongddx` owner to the org. GitHub serves no
+# redirect for the old path, so it 404s rather than forwarding -- every
+# `--only scip-swift` run failed until this was repointed.
+# tests/test_setup_sh.py asserts the owner never drifts back.
+SCIP_SWIFT_REPO="jarvis-intelligence/scip-swift"
 
 # scip-java ships one self-contained launcher asset per release: a POSIX sh
 # script with an embedded JAR. It runs on any JVM, so unlike scip-swift there

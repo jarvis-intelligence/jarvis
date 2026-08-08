@@ -700,6 +700,18 @@ def test_install_scip_swift_skips_on_intel_mac(tmp_path):
     assert "not available" in (result.stdout + result.stderr).lower()
 
 
+def test_scip_swift_repo_is_the_org_not_the_personal_owner():
+    """The repo moved owners and GitHub serves no redirect for the old path.
+
+    While this pointed at `phuongddx/scip-swift` the download URL 404'd, so
+    `--only scip-swift` failed on every macOS arm64 host and Swift indexing was
+    unavailable to all users. Nothing else caught it: no other test reads this
+    variable, and setup-smoke.yml did not exercise the scip-swift install.
+    """
+    repo = run_func('echo "$SCIP_SWIFT_REPO"').stdout.strip()
+    assert repo == "jarvis-intelligence/scip-swift", f"wrong owner: {repo}"
+
+
 def test_scip_swift_asset_name_uses_macos_not_darwin():
     """The asset says "macos", not "darwin" — unlike scip's own assets."""
     result = run_func('scip_swift_asset_name')
