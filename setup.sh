@@ -640,6 +640,39 @@ install_scip_java() {
 	fi
 }
 
+# Warms uv's tool cache for jarvis-mcp so the plugin's `uvx --from jarvis-mcp
+# ... jarvis-server` first connect doesn't pay a cold resolve-and-build cost
+# inside the MCP client's ~30s connect window (jarvis-index#4). `uv tool
+# install` is what a user runs by hand today; this just does it automatically.
+# Soft skip without uv, matching install_npm_indexer's missing-npm branch:
+# this bootstraps a Python package, not one of the native binaries setup.sh
+# otherwise installs.
+install_jarvis_mcp() {
+	if [ "${FORCE:-0}" != "1" ] && already_installed jarvis-server; then
+		log_info "jarvis-mcp: already installed, skipping"
+		return 0
+	fi
+
+	if ! have_cmd uv; then
+		log_warn "jarvis-mcp: uv not found — skipping. Install from https://docs.astral.sh/uv/, then: uv tool install jarvis-mcp"
+		return 0
+	fi
+
+	if [ "${FORCE:-0}" = "1" ]; then
+		_uv_force="--force"
+	else
+		_uv_force=""
+	fi
+
+	log_info "jarvis-mcp: installing via uv (warms the cache the plugin's uvx launch reuses)"
+	if uv tool install $_uv_force jarvis-mcp >/dev/null 2>&1; then
+		log_info "jarvis-mcp: installed"
+	else
+		log_error "jarvis-mcp: uv tool install failed — try manually: uv tool install jarvis-mcp"
+		return 1
+	fi
+}
+
 # ------------------------------------------------------------ orchestration --
 
 ONLY=""
@@ -652,12 +685,14 @@ usage() {
 	cat <<'EOF'
 Usage: setup.sh [options]
 
-Installs jarvis's external binary dependencies into ~/.jarvis/bin.
+Installs jarvis's external binary dependencies into ~/.jarvis/bin, plus
+jarvis-mcp itself via `uv tool install` (pre-warms the cache the plugin's
+uvx launch reuses, so the first MCP connect doesn't compile from source).
 
 Options:
   --only <name>   Install just one dependency. One of:
                   scip, zoekt, scip-swift, scip-typescript,
-                  scip-python, scip-java, bash-shim
+                  scip-python, scip-java, bash-shim, jarvis-mcp
   --force         Reinstall even if already present
   --help          Show this message
 
@@ -749,6 +784,7 @@ main() {
 	if should_run scip-python; then run_one scip-python install_scip_python; fi
 	if should_run scip-java; then run_one scip-java install_scip_java; fi
 	if should_run bash-shim; then install_bash_shim "$OS"; fi
+	if should_run jarvis-mcp; then run_one jarvis-mcp install_jarvis_mcp; fi
 
 	ensure_on_path
 	print_summary

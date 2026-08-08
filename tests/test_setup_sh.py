@@ -608,6 +608,77 @@ def test_scip_typescript_wrapper_uses_sourcegraph_package(tmp_path):
     assert "@sourcegraph/scip-typescript" in log.read_text()
 
 
+# ------------------------------------------------------- jarvis-mcp installer ----
+
+
+def test_install_jarvis_mcp_warns_and_continues_without_uv():
+    """Missing uv is a soft skip with instructions, not a hard failure."""
+    result = run_func("install_jarvis_mcp")
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "uv" in combined
+
+
+def test_install_jarvis_mcp_skips_when_already_present(tmp_path):
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    stub = fake_bin / "jarvis-server"
+    stub.write_text("#!/bin/sh\ntrue\n")
+    stub.chmod(0o755)
+    result = run_func(
+        "install_jarvis_mcp",
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    combined = (result.stdout + result.stderr).lower()
+    assert "already" in combined or "skip" in combined
+
+
+def test_install_jarvis_mcp_invokes_uv_tool_install(tmp_path):
+    """Stub uv and assert the exact package name passed to it."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    log = tmp_path / "uv-args.txt"
+    uv_stub = fake_bin / "uv"
+    uv_stub.write_text(f'#!/bin/sh\necho "$@" > {log}\n')
+    uv_stub.chmod(0o755)
+    result = run_func(
+        "install_jarvis_mcp",
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+    args = log.read_text()
+    assert "tool" in args
+    assert "install" in args
+    assert "jarvis-mcp" in args
+    assert "--force" not in args
+
+
+def test_install_jarvis_mcp_forces_reinstall_when_forced(tmp_path):
+    """FORCE=1 both bypasses the already-installed skip and passes --force to uv.
+
+    FORCE is set as a shell variable in the snippet, not via the subprocess
+    env: sourcing setup.sh resets FORCE=0 at top level (parse_args is what
+    normally sets it, from main()'s --force flag), so an env-supplied FORCE
+    would be clobbered before install_jarvis_mcp ever sees it.
+    """
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    stub = fake_bin / "jarvis-server"
+    stub.write_text("#!/bin/sh\ntrue\n")
+    stub.chmod(0o755)
+    log = tmp_path / "uv-args.txt"
+    uv_stub = fake_bin / "uv"
+    uv_stub.write_text(f'#!/bin/sh\necho "$@" > {log}\n')
+    uv_stub.chmod(0o755)
+    result = run_func(
+        "FORCE=1\ninstall_jarvis_mcp",
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--force" in log.read_text()
+
+
 # ----------------------------------------------------------- zoekt installer ----
 
 
