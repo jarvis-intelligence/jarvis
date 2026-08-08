@@ -55,6 +55,19 @@ jobs:
           "${bin}/zoekt-git-index" -h >help.txt 2>&1 || true
           grep -q "zoekt-git-index" help.txt
 
+      # The only guard on SCIP_SWIFT_REPO/SCIP_SWIFT_VERSION actually resolving.
+      # Without it a repo rename or a lost release tag 404s silently, and the
+      # first report arrives from a user whose Swift index never builds.
+      # Runs on both platforms: macOS runners are arm64 and download for real,
+      # Linux exercises the not-available skip branch (which must still exit 0).
+      - name: Install scip-swift via setup.sh
+        run: |
+          set -eu
+          JARVIS_BIN_DIR="${RUNNER_TEMP}/ci-bin" sh setup.sh --only scip-swift
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            "${RUNNER_TEMP}/ci-bin/scip-swift" --version
+          fi
+
       - name: Re-run to prove idempotency
         run: |
           set -eu
