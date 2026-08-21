@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 02
 current_phase_name: scip-swift Toolchain Update
-status: executing
-stopped_at: Completed 02-02-PLAN.md (runtime guards & lifecycle)
-last_updated: "2026-08-21T18:42:04.626Z"
+status: verifying
+stopped_at: Completed 02-03-PLAN.md (CI smoke fixture & workflow — phase 02 fully executed, ready for verification)
+last_updated: "2026-08-21T18:50:24.465Z"
 last_activity: 2026-08-22
 last_activity_desc: Phase 02 execution started
-state_head: f135650715b18a4ed2f4787422a5336876d96d68
+state_head: b342fea043ec70ab40b16cf71303253db410f30a
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-21)
 
 Phase: 02 (scip-swift Toolchain Update) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-22 — Phase 02 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -72,6 +72,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P03 | 9min | 2 tasks | 2 files |
 | Phase 02 P01 | 13min | 2 tasks | 6 files |
 | Phase 02 P02 | 7min | 3 tasks | 4 files |
+| Phase 02 P03 | 9min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Phase 02-02: check_scip_swift_version reuses parse_scip_version verbatim (v-optional regex parses the no-v scip-swift format); warn-by-omission on unparseable output, identical policy to check_scip_version
 - [Phase 02]: Phase 02-02: watch ignores are a pure component-membership set extension (.scip-cache, .build, DerivedData, .index-store, IndexStore, .swiftpm); the one-shot xcshareddata write is accepted not ignored — ignoring it would start suppressing legitimate .xcodeproj triggers (orchestrator resolution #2)
 - [Phase 02]: Phase 02-02: forget sweeps cache/scip-swift/<slug>/ with ignore_errors=True beside the lancedb sweep — path built solely from the slug so sibling caches provably survive (D-06)
+- [Phase 02]: [Phase 02]: Phase 02-03: mini_xcode_repo fixture is byte-copied from upstream XcodeTestProject@v0.3.0 with inner names preserved (pbxproj references them; identity is the directory) — proven locally via real jarvis index (swift/indexed, xcodebuild dispatch) as verification only, no committed integration test (D-09/D-10)
+- [Phase 02]: [Phase 02]: Phase 02-03: smoke step gates RUNNER_OS inside the run block (Linux leg runs the step and proves the skip); fixture copy is a standalone git-init'd repo under RUNNER_TEMP because detection reads git ls-files; cache-dir contract asserted via no in-tree .scip-cache/.build + cache root under JARVIS_DATA_DIR
 
 ### Pending Todos
 
@@ -118,6 +121,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-21T18:42:04.571Z
-Stopped at: Completed 02-02-PLAN.md (runtime guards & lifecycle)
+Last session: 2026-08-21T18:50:24.407Z
+Stopped at: Completed 02-03-PLAN.md (CI smoke fixture & workflow — phase 02 fully executed, ready for verification)
 Resume file: None
