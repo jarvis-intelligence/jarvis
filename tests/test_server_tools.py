@@ -447,6 +447,205 @@ def test_get_index_status_reports_none_status_when_never_registered():
     assert result["indexed"] is False
 
 
+def test_get_index_status_reports_last_index_run_for_a_search_only_repo(tmp_path: Path, monkeypatch):
+    """D-15: the run layer reports what the last run did. `outcome` mirrors
+    the registry status string verbatim (resolution #3 — no new enum);
+    origin/reason/recovery are populated exactly when the row carries
+    them. Existing keys keep their values."""
+    from jarvis.registry import ORIGIN_SIGNATURE, Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only",
+                        search_only=True, status_origin=ORIGIN_SIGNATURE,
+                        status_reason="the build produced no SCIP shards")
+    finally:
+        registry.close()
+
+    result = server.get_index_status(repo="gorepo")
+
+    assert result["last_index_run"] == {
+        "outcome": "search-only",
+        "origin": "signature",
+        "reason": "the build produced no SCIP shards",
+        "recovery": "jarvis reindex gorepo",
+    }
+    assert result["repo"] == "gorepo"
+    assert result["status"] == "search-only"
+    assert result["indexed"] is False
+
+
+def test_get_index_status_navigation_unavailable_for_search_only_explains_and_recovers(tmp_path: Path, monkeypatch):
+    """STAT-03/SC4: an MCP client branches on
+    capabilities.navigation.available without parsing prose; when it is
+    False on a search-only repo, the reason names the state and the
+    recovery says how to escape it."""
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        # Legacy row: NULL origin and NULL reason exercise the default
+        # wording and the origin_of manual fallback in one shot.
+        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
+    finally:
+        registry.close()
+
+    nav = server.get_index_status(repo="gorepo")["capabilities"]["navigation"]
+
+    assert nav["available"] is False
+    assert nav["reason"] == "indexed search-only — no SCIP index"
+    assert nav["recovery"] == "jarvis forget gorepo && jarvis index /p"
+
+
+def test_get_index_status_failed_run_with_live_pointer_reports_stale_navigation(tmp_path: Path, monkeypatch):
+    """D-07/D-15: atomic publish leaves the last index live when the newest
+    run failed, so the payload reports outcome='failed' AND
+    navigation.available=True with the stale commit named — that
+    combination is correct, not a bug (Pitfall 4)."""
+    from datetime import UTC, datetime
+
+    from jarvis.query import Freshness, FreshnessSnapshot
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+
+    class _LivePointerStub:
+        def get_index_status(self, repo, repo_path=None):
+            return True, FreshnessSnapshot(
+                commit="abc123",
+                generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+                stale=True,
+                freshness=Freshness.STALE,
+                checked_at=datetime.now(UTC),
+            )
+
+    monkeypatch.setattr(server, "_query_service", _LivePointerStub())
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.record_failure("gorepo", "/p", "unknown", ORIGIN_FAILED_HARD,
+                                "scip-python failed", "full stderr text")
+    finally:
+        registry.close()
+
+    result = server.get_index_status(repo="gorepo")
+
+    assert result["last_index_run"]["outcome"] == "failed"
+    assert result["last_index_run"]["origin"] == "failed_hard"
+    nav = result["capabilities"]["navigation"]
+    assert nav["available"] is True
+    assert "abc123" in nav["reason"]
+
+
+def test_get_index_status_search_capability_follows_zoekt_shards_on_disk(tmp_path: Path, monkeypatch):
+    """A5: search availability is a pure filesystem read of the zoekt shard
+    dir — the `{slug}_v*` glob with the `_v` guard, never a webserver
+    probe."""
+    zoekt_dir = config.data_dir() / ".zoekt"
+    zoekt_dir.mkdir(parents=True)
+    (zoekt_dir / "gorepo_v16.00000.zoekt").write_text("dummy shard")
+
+    search = server.get_index_status(repo="gorepo")["capabilities"]["search"]
+    assert search["available"] is True
+    assert search["reason"] is None
+
+    # The _v guard: a sibling repo's shards must not make this repo available.
+    (zoekt_dir / "otherrepo_v16.00000.zoekt").write_text("dummy shard")
+    (zoekt_dir / "gorepo_v16.00000.zoekt").unlink()
+    search = server.get_index_status(repo="gorepo")["capabilities"]["search"]
+    assert search["available"] is False
+    assert search["reason"] == "no zoekt shards on disk"
+
+
+def test_get_index_status_semantic_capability_follows_the_row(tmp_path: Path, monkeypatch):
+    """A6: semantic availability derives from `semantic_indexed_at` on the
+    row (recorded at index time); the reason names the missing extra —
+    the semantic extra is never imported here (base install works)."""
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "python", "abc", "indexed")
+        before = server.get_index_status(repo="gorepo")
+        registry.mark_semantic_indexed("gorepo")
+        after = server.get_index_status(repo="gorepo")
+    finally:
+        registry.close()
+
+    assert before["capabilities"]["semantic"]["available"] is False
+    assert "extra" in before["capabilities"]["semantic"]["reason"]
+    assert after["capabilities"]["semantic"]["available"] is True
+
+
+def test_get_index_status_capability_failure_degrades_to_nulls(tmp_path: Path, monkeypatch):
+    """The never-raise convention: even if capability derivation itself
+    blows up, the pre-existing status payload must survive with capability
+    fields degraded to null — never an error response (A5)."""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(server, "_capability_fields", _boom)
+
+    result = server.get_index_status(repo="gorepo")
+
+    assert "error" not in result
+    assert result["repo"] == "gorepo"
+    assert result["indexed"] is False
+    assert result["last_index_run"] is None
+    assert result["capabilities"] is None
+
+
+def test_get_index_status_adds_capability_fields_without_reshaping_existing_keys():
+    """D-13 additive-only: repo/indexed/status/freshness/searchCoverage
+    keep their names and values for a plain published index."""
+    indexed_direct, freshness_direct = server._service().get_index_status(REPO)
+
+    result = server.get_index_status(repo=REPO)
+
+    assert result["repo"] == REPO
+    assert result["indexed"] is True
+    assert result["indexed"] == indexed_direct
+    assert result["status"] is None  # the fixture publishes an index but registers no row
+    assert result["commit"] == freshness_direct.commit
+    assert result["stale"] == freshness_direct.stale
+    assert "searchCoverage" in result
+    assert result["capabilities"]["navigation"]["available"] is True
+
+
+def test_get_index_status_capability_derivation_never_spawns(tmp_path: Path, monkeypatch):
+    """A5 + T-01-08: a status call derives capabilities from the filesystem
+    and the registry row only — zoekt-webserver must never be started and
+    no subprocess may run."""
+    import subprocess as subprocess_module
+
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "python", "abc", "indexed")
+    finally:
+        registry.close()
+    zoekt_dir = config.data_dir() / ".zoekt"
+    zoekt_dir.mkdir(parents=True)
+    (zoekt_dir / "gorepo_v16.00000.zoekt").write_text("dummy shard")
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("a status call must not spawn a process")
+
+    monkeypatch.setattr(subprocess_module, "run", _forbidden)
+    monkeypatch.setattr(subprocess_module, "Popen", _forbidden)
+    monkeypatch.setattr("jarvis.search.ZoektLifecycle.ensure_running", _forbidden)
+
+    result = server.get_index_status(repo="gorepo")
+
+    assert "error" not in result
+    assert result["capabilities"]["search"]["available"] is True
+
+
 def test_error_payload_renders_ambiguous_candidates(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     candidates = (
