@@ -1171,6 +1171,10 @@ def _cmd_forget(args: argparse.Namespace) -> int:
         shutil.rmtree(index_dir)
     _remove_zoekt_shards(slug)
     shutil.rmtree(config.lancedb_dir() / f"{slug}.lance", ignore_errors=True)
+    # D-06: forgetting a repo removes everything jarvis stored for it. The
+    # scip-swift cache legitimately may not exist (never-Swift repo, or the
+    # binary never ran), hence ignore_errors like the lancedb sweep above.
+    shutil.rmtree(config.swift_cache_dir(slug), ignore_errors=True)
     print(f"forgot {slug}")
     return 0
 
