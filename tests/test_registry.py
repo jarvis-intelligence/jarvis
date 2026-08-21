@@ -426,3 +426,26 @@ def test_recovery_for_returns_none_for_successful_and_unknown_rows():
 
     assert recovery_for(_entry(status="indexed", commit_sha="abc")) is None
     assert recovery_for(_entry(status_origin="from-the-future")) is None
+
+
+def test_upsert_clears_failure_fields_on_success(tmp_path: Path):
+    """D-04: failure fields are NULLed by the next successful index -- the
+    registry must reflect the latest run, not lie about a stale failure
+    (fail -> succeed -> read)."""
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.record_failure(
+            "mine", "/repos/mine", "python", ORIGIN_FAILED_HARD, "boom", "boom\ntrace"
+        )
+        registry.upsert("mine", "/repos/mine", "python", "abc123", "indexed")
+        entry = registry.get("mine")
+        assert entry is not None
+        assert entry.status == "indexed"
+        assert entry.commit_sha == "abc123"
+        assert entry.status_origin is None
+        assert entry.status_reason is None
+        assert entry.status_stderr is None
+    finally:
+        registry.close()
