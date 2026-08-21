@@ -320,3 +320,109 @@ def test_mark_tracked_files_survives_a_later_upsert(tmp_path: Path):
         assert registry.get("myslug").tracked_files == 133
     finally:
         registry.close()
+
+
+def _entry(**overrides):
+    """A RegisteredRepo for recovery-mapping tests; keyword overrides pick
+    the origin/state under test."""
+    from datetime import UTC, datetime
+
+    from jarvis.registry import RegisteredRepo
+
+    fields = dict(
+        slug="mine", path="/repos/mine", language="python", commit_sha=None,
+        last_indexed=datetime.now(UTC), status="failed",
+    )
+    fields.update(overrides)
+    return RegisteredRepo(**fields)
+
+
+def test_record_failure_creates_row_when_absent(tmp_path: Path):
+    """D-05: a hard-failed FIRST index must still leave a row -- nothing
+    else can explain the failure or make `jarvis reindex` work."""
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        assert registry.get("new") is None
+        entry = registry.record_failure(
+            "new", "/repos/new", "python", ORIGIN_FAILED_HARD,
+            "scip-python index failed (scip-python)",
+            "scip-python index failed (scip-python):\nboom",
+        )
+        assert registry.get("new") == entry
+        assert entry.path == "/repos/new"
+        assert entry.language == "python"
+        assert entry.status == "failed"
+        assert entry.commit_sha is None
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.status_reason == "scip-python index failed (scip-python)"
+        assert entry.status_stderr == "scip-python index failed (scip-python):\nboom"
+    finally:
+        registry.close()
+
+
+def test_record_failure_overwrites_existing_row_and_preserves_search_only(tmp_path: Path):
+    """D-06: a failed reindex fully overwrites the run facts (commit_sha
+    NULL, status failed, fresh last_indexed, failure fields stamped) while
+    search_only survives -- losing it would make _resolve_search_only
+    re-run a build that already proved un-indexable."""
+    import time
+    from datetime import UTC, datetime
+
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        before = registry.upsert("mine", "/repos/mine", "python", "abc123",
+                                 "indexed", search_only=True)
+        time.sleep(0.002)  # guarantee a strictly later last_indexed timestamp
+        registry.record_failure(
+            "mine", "/repos/mine", "python", ORIGIN_FAILED_HARD,
+            "zoekt-git-index failed", "zoekt-git-index failed:\nboom",
+        )
+        entry = registry.get("mine")
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.commit_sha is None
+        assert entry.last_indexed > before.last_indexed
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.status_reason == "zoekt-git-index failed"
+        assert entry.status_stderr == "zoekt-git-index failed:\nboom"
+        assert entry.search_only is True
+    finally:
+        registry.close()
+
+
+def test_recovery_for_derives_per_origin_commands():
+    """D-09/D-11/D-12: recovery is derived from origin at read time, one
+    command per origin -- never persisted per-row."""
+    from jarvis.registry import (
+        ORIGIN_FAILED_HARD,
+        ORIGIN_MANUAL,
+        ORIGIN_SIGNATURE,
+        recovery_for,
+    )
+
+    assert recovery_for(_entry(status_origin=ORIGIN_FAILED_HARD)) == "jarvis index /repos/mine"
+    assert recovery_for(_entry(status_origin=ORIGIN_SIGNATURE)) == "jarvis reindex mine"
+    assert recovery_for(_entry(status_origin=ORIGIN_MANUAL)) == (
+        "jarvis forget mine && jarvis index /repos/mine"
+    )
+
+
+def test_recovery_for_treats_legacy_search_only_as_manual():
+    """Pre-migration search_only=1 rows have a NULL origin; the D-10 escape
+    (forget + re-index) is valid for whichever path created them."""
+    from jarvis.registry import recovery_for
+
+    assert recovery_for(_entry(search_only=True, status="search-only")) == (
+        "jarvis forget mine && jarvis index /repos/mine"
+    )
+
+
+def test_recovery_for_returns_none_for_successful_and_unknown_rows():
+    from jarvis.registry import recovery_for
+
+    assert recovery_for(_entry(status="indexed", commit_sha="abc")) is None
+    assert recovery_for(_entry(status_origin="from-the-future")) is None

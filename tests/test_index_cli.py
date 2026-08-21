@@ -2135,3 +2135,79 @@ def test_symbol_search_finds_definitions_in_real_index(tmp_path: Path):
         assert say_hi_hit.start_line == 10  # 1-based: `def say_hi(...)` is on line 10
     finally:
         conn.close()
+
+
+def test_hard_failed_index_persists_cause_and_full_stderr(tmp_path: Path, monkeypatch):
+    """D-02/D-03/D-05: a hard-failed run must leave a registry row carrying
+    the origin slug, a one-line classified reason, and the COMPLETE failure
+    text verbatim -- persistence is unbounded, so a >1000-char payload must
+    survive a fresh read without truncation."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    marker = "BOOM-" + "x" * 1200
+    carrier = (
+        "scip-python index failed (scip-python index --output index.scip):\n"
+        f"stdout noise\n{marker}\ntrailing stderr line\n"
+    )
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        # " index" (leading space) matches only the indexer step, so the
+        # failure happens exactly where a real broken build would.
+        if step.endswith(" index"):
+            raise IndexingError(carrier)
+        return None
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
+
+    with pytest.raises(IndexingError):
+        index_repo(repo_dir, root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(config.repo_slug(repo_dir.name))
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.status_reason  # non-empty...
+        assert "\n" not in entry.status_reason  # ...and a single line (D-03)
+        assert entry.status_reason.startswith("scip-python index failed")
+        assert marker in entry.status_stderr
+        assert entry.status_stderr == carrier  # verbatim, untruncated (D-02)
+    finally:
+        registry.close()
+
+
+def test_cmd_status_explains_a_failed_repo(tmp_path: Path, monkeypatch, capsys):
+    """STAT-01/D-12: `jarvis status` must explain what happened and how to
+    recover, deriving the recovery command from the origin at read time."""
+    import argparse
+
+    from jarvis.index_cli import _cmd_status
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
+
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.record_failure(
+            "failing", "/abs/path/failing", "python", ORIGIN_FAILED_HARD,
+            "scip-python index failed (scip-python)",
+            "scip-python index failed (scip-python):\nfull stderr text",
+        )
+    finally:
+        registry.close()
+
+    rc = _cmd_status(argparse.Namespace(slug="failing"))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "origin: failed_hard" in out
+    assert "cause: scip-python index failed (scip-python)" in out
+    assert "recovery: jarvis index /abs/path/failing" in out
