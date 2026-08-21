@@ -2463,3 +2463,128 @@ def test_cmd_status_omits_stderr_block_when_absent(tmp_path: Path, monkeypatch, 
     out = capsys.readouterr().out
     assert "stderr" not in out
     assert "full log" not in out
+
+
+def test_pre_pipeline_version_gate_failure_creates_a_recoverable_row(
+    tmp_path: Path, monkeypatch
+):
+    """D-05 close-out: a failure BEFORE the pipeline proper (the scip
+    version gate) must leave a registry row -- status 'failed', origin
+    'failed_hard', language 'unknown' (detection never ran) -- so the
+    slug resolves for `jarvis reindex <slug>` and `jarvis status` can
+    explain it."""
+    from jarvis.index_cli import UNKNOWN_LANGUAGE, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _boom():
+        raise RuntimeError("scip v0.7.0 is below the required floor v0.9.0")
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", _boom)
+
+    with pytest.raises(RuntimeError, match="below the required floor"):
+        index_repo(repo_dir, root=data_root)
+
+    slug = config.repo_slug(repo_dir.name)
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None, "the failed first index must leave a row (D-05)"
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.language == UNKNOWN_LANGUAGE  # detection never completed
+        assert entry.status_reason == "scip v0.7.0 is below the required floor v0.9.0"
+        assert "below the required floor" in entry.status_stderr
+    finally:
+        registry.close()
+
+
+def test_pre_pipeline_stale_language_override_failure_overwrites_the_row(
+    tmp_path: Path, monkeypatch
+):
+    """D-05/D-06: a persisted unsupported language override raises before
+    the pipeline; the existing row must be overwritten with the failed
+    attempt's facts (status/origin/reason set, language reflecting that
+    resolution never completed), not keep the last good run's."""
+    from jarvis.index_cli import UNKNOWN_LANGUAGE, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert("stale", str(repo_dir), "cobol", "abc123", "indexed",
+                        language_override="cobol")
+    finally:
+        registry.close()
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+
+    with pytest.raises(UnsupportedLanguageError, match="cobol"):
+        index_repo(repo_dir, slug="stale", root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get("stale")
+        assert entry is not None
+        assert entry.status == "failed"  # not the stale 'indexed'
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert "cobol" in entry.status_reason
+        assert "cobol" in entry.status_stderr
+        assert entry.language == UNKNOWN_LANGUAGE  # D-06: no last-good facts linger
+        assert entry.commit_sha is None
+    finally:
+        registry.close()
+
+
+def test_duplicate_slug_rejection_writes_no_failure_row(tmp_path: Path, monkeypatch):
+    """The duplicate-slug gate rejects the REQUEST (a path already indexed
+    under another slug), it is not a failed run: stamping a failure would
+    create a phantom row for the rejected slug that re-trips the gate on
+    every later attempt. The existing row must stay byte-identical and no
+    new row may appear."""
+    from jarvis.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        before = registry.upsert("first", str(repo_dir), "python", "abc123", "indexed")
+    finally:
+        registry.close()
+
+    def _tripwire():
+        # If the duplicate gate ever stops rejecting, the pre-pipeline
+        # handler would stamp this row -- the untouched assertions below
+        # would then fail loudly instead of silently indexing.
+        raise RuntimeError("must not reach the version gate")
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", _tripwire)
+
+    with pytest.raises(IndexingError, match="already indexed as 'first'"):
+        index_repo(repo_dir, slug="second", root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get("first")
+        assert entry is not None
+        assert entry.status == "indexed"
+        assert entry.status_origin is None
+        assert entry.status_reason is None
+        assert entry.status_stderr is None
+        assert entry.language == "python"
+        assert entry.commit_sha == "abc123"
+        assert entry.last_indexed == before.last_indexed  # untouched, not re-stamped
+        assert registry.get("second") is None  # no phantom row for the rejected request
+    finally:
+        registry.close()
