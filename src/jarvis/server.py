@@ -141,6 +141,82 @@ def _search_coverage_fields(repo: str) -> dict[str, Any]:
         return {"searchCoverage": None, "searchCoverageReason": str(exc)}
 
 
+def _capability_fields(repo: str, indexed: bool, freshness: FreshnessSnapshot | None) -> dict[str, Any]:
+    """The two orthogonal layers a status consumer needs (D-15):
+    `last_index_run` reports what the latest run did (registry-row truth),
+    `capabilities.*` reports what the system can do right now (on-disk
+    truth). Navigation availability is the caller's `indexed` — the pointer
+    read — never the row's status (D-07): a failed run with a live pointer
+    is both outcome='failed' and navigation available-but-stale.
+
+    Never raises: like `_search_coverage_fields`, any derivation failure
+    degrades the capability fields to nulls with a reason rather than
+    turning a working status response into an error. Purely filesystem and
+    registry-row reads — no ZoektLifecycle call, no subprocess, so a status
+    call never starts a webserver (A5). The payload is built key by key,
+    never `asdict(entry)`: `status_stderr` must not leak into an MCP
+    response (it can be megabytes)."""
+    try:
+        entry = _registry_entry(repo)
+        origin = origin_of(entry) if entry is not None else None
+
+        last_index_run = {
+            # Resolution #3: the registry status string verbatim — no new
+            # outcome enum to maintain; 'partial' stays success-family.
+            "outcome": entry.status if entry is not None else None,
+            "origin": origin,
+            "reason": entry.status_reason if entry is not None else None,
+            "recovery": recovery_for(entry) if entry is not None else None,
+        }
+
+        if indexed:
+            last_run_failed = entry is not None and entry.status == "failed"
+            stale_reported = freshness is not None and freshness.stale
+            if last_run_failed or stale_reported:
+                commit = freshness.commit if freshness is not None else None
+                nav_reason = (
+                    f"stale — indexed at {commit}" if commit else "stale — indexed commit unknown"
+                )
+            else:
+                nav_reason = None
+            nav_recovery = None
+        else:
+            if entry is not None and entry.search_only:
+                nav_reason = entry.status_reason or "indexed search-only — no SCIP index"
+            elif entry is None:
+                nav_reason = "no published index"
+            else:
+                nav_reason = None
+            nav_recovery = recovery_for(entry) if entry is not None else None
+
+        zoekt_dir = config.data_dir() / ".zoekt"
+        # The `_v` guard is load-bearing: without it "api" would match
+        # "api-gateway"'s shards (`_sweep_zoekt_tmp_orphans` relies on the
+        # same idiom). Pure glob — never a webserver probe.
+        search_available = zoekt_dir.is_dir() and any(zoekt_dir.glob(f"{repo}_v*.zoekt"))
+        semantic_available = entry is not None and entry.semantic_indexed_at is not None
+
+        return {
+            "last_index_run": last_index_run,
+            "capabilities": {
+                "navigation": {"available": indexed, "reason": nav_reason, "recovery": nav_recovery},
+                "search": {
+                    "available": search_available,
+                    "reason": None if search_available else "no zoekt shards on disk",
+                },
+                "semantic": {
+                    "available": semantic_available,
+                    "reason": (
+                        None if semantic_available
+                        else "semantic index not built for this repo (requires the `semantic` extra)"
+                    ),
+                },
+            },
+        }
+    except Exception as exc:
+        return {"last_index_run": None, "capabilities": None, "capabilitiesReason": str(exc)}
+
+
 def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
     """Turn a missing SCIP index into an explanation when the repo was
     deliberately published search-only. Every other error passes through
@@ -320,9 +396,14 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
         indexed, freshness = _service().get_index_status(repo, repo_path)
     except Exception as exc:
         return {"error": str(exc)}
+    try:
+        capability_fields = _capability_fields(repo, indexed, freshness)
+    except Exception:
+        # Belt over `_capability_fields`' own never-raise: even a bug in the
+        # helper must not kill the published status response.
+        capability_fields = {"last_index_run": None, "capabilities": None}
     return {"repo": repo, "indexed": indexed, "status": _registry_status(repo),
-            **_freshness_fields(freshness), **_search_coverage_fields(repo)}
-
+            **_freshness_fields(freshness), **_search_coverage_fields(repo), **capability_fields}
 
 @mcp.tool(name="searchCode")
 def search_code(query: str, repo: str | None = None) -> dict[str, Any]:
