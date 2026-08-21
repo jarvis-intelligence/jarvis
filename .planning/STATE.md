@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 01
 current_phase_name: Registry Foundation & Degradation Reporting
 status: executing
-stopped_at: "Completed 01-01-PLAN.md (registry foundation: failure persistence + status/list reporting)"
-last_updated: "2026-08-21T16:56:40.981Z"
+stopped_at: Completed 01-02-PLAN.md (origin persistence across every index_repo outcome)
+last_updated: "2026-08-21T17:12:11.588Z"
 last_activity: 2026-08-21
 last_activity_desc: Phase 01 execution started
-state_head: c1fc05da7d250cc9dc3a51d95a27efae11d7fb09
+state_head: 75be95184c7b6adcb949f0f9f2be0715008f417b
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 3
-  completed_plans: 1
+  completed_plans: 2
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-21)
 ## Current Position
 
 Phase: 01 (Registry Foundation & Degradation Reporting) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-08-21 — Phase 01 execution started
 
@@ -68,6 +68,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 9min | 3 tasks | 4 files |
+| Phase 01 P02 | 9min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,9 @@ Recent decisions affecting current work:
 - [Phase 01]: Failure cause persists as origin slug + one-line reason + untruncated stderr in three additive registry columns; recovery commands are derived at read time per origin, never persisted (D-02/D-03/D-09)
 - [Phase 01]: record_failure is an INSERT..ON CONFLICT write that overwrites run facts but preserves search_only/overrides/tracked_files; upsert's conflict list NULL-clears the failure fields on success (D-04/D-05/D-06)
 - [Phase 01]: jarvis list keeps the 5-column TSV contract with glyph-prefixed status (✗/◐/✓) and a 6th reason field on failed rows only; jarvis status prints origin/cause/recovery plus a 20-line stderr tail with persistence pointer (D-08, resolution #4)
+- [Phase 01]: 01-02: duplicate-slug gate rejects the REQUEST (path already under another slug) — stays a plain close-and-raise; a failure stamp would create a phantom row that re-trips the gate forever
+- [Phase 01]: 01-02: pre-pipeline failures record language='unknown' until resolution completes (resolved_language sentinel) — D-06 full-overwrite, never last-good facts
+- [Phase 01]: 01-02: search-only writes are origin-stamped on the success upsert (manual/signature + matched reason verbatim); status_reason carries reasons only, remedies stay out (D-11)
 
 ### Pending Todos
 
@@ -101,6 +105,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-21T16:56:40.971Z
-Stopped at: Completed 01-01-PLAN.md (registry foundation: failure persistence + status/list reporting)
+Last session: 2026-08-21T17:12:11.576Z
+Stopped at: Completed 01-02-PLAN.md (origin persistence across every index_repo outcome)
 Resume file: None
