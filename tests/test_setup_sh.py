@@ -750,6 +750,40 @@ def test_install_zoekt_extracts_both_binaries(tmp_path):
 # ------------------------------------------------------ scip-swift installer ----
 
 
+def _stage_scip_swift_release(
+    tmp_path: Path, tag: str = "v0.3.0", digest: str | None = None
+) -> str:
+    """Stage a local tarball (member `scip-swift`) plus a GitHub-shaped
+    releases/latest JSON pointing at it; return the file:// API URL.
+
+    Mirrors api.github.com's pretty-printed shape (tag_name, assets[] with
+    name/digest/browser_download_url) so the sed/grep extraction in
+    setup.sh exercises its real parsing path. `digest` overrides the real
+    hash so a test can serve a tampered checksum.
+    """
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "scip-swift").write_text("#!/bin/sh\necho '0.3.0 (swift 6.2.4)'\n")
+    tar_path = tmp_path / "scip-swift.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(stage / "scip-swift", arcname="scip-swift")
+    real = hashlib.sha256(tar_path.read_bytes()).hexdigest()
+    api_json = tmp_path / "latest.json"
+    api_json.write_text(
+        "{\n"
+        f'  "tag_name": "{tag}",\n'
+        '  "assets": [\n'
+        "    {\n"
+        f'      "name": "scip-swift-{tag.lstrip("v")}.tar.gz",\n'
+        f'      "digest": "sha256:{real if digest is None else digest}",\n'
+        f'      "browser_download_url": "file://{tar_path}"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+    )
+    return f"file://{api_json}"
+
+
 def test_install_scip_swift_skips_on_linux_without_failing(tmp_path):
     """Swift indexing needs Xcode; a Linux skip is by design, not an error."""
     result = run_func(
@@ -783,39 +817,143 @@ def test_scip_swift_repo_is_the_org_not_the_personal_owner():
     assert repo == "jarvis-intelligence/scip-swift", f"wrong owner: {repo}"
 
 
-def test_scip_swift_asset_name_uses_macos_not_darwin():
-    """The asset says "macos", not "darwin" — unlike scip's own assets."""
-    result = run_func('scip_swift_asset_name')
-    name = result.stdout.strip()
-    assert name == "scip-swift-v0.1.2-macos-arm64.tar.gz"
+def test_version_ge_compares_numeric_fields_not_strings():
+    """0.10.0 > 0.3.0 must be GE: numeric field compare, not lexicographic."""
+    assert run_func("version_ge 0.10.0 0.3.0").returncode == 0
+    assert run_func("version_ge v0.3.0 0.2.1").returncode == 0, "v prefix is tolerated"
+    assert run_func("version_ge 0.2.2 0.3.0").returncode != 0
+    assert run_func("version_ge 0.3.0 0.3.0").returncode == 0, "equal counts as GE"
 
 
-def test_scip_swift_pin_is_at_least_v0_1_2():
-    """Two independent reasons the pin must never slip backwards.
+def test_install_scip_swift_resolves_and_installs_latest(tmp_path):
+    """Tag, asset URL, and digest all come from the API JSON (seam-served)."""
+    api_url = _stage_scip_swift_release(tmp_path, tag="v0.3.0")
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(bin_path),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    installed = bin_path / "scip-swift"
+    assert installed.is_file()
+    assert installed.stat().st_mode & 0o111
+    # The seam tarball's stub must be what landed, not some other source.
+    probe = subprocess.run([str(installed), "--version"], capture_output=True, text=True)
+    assert "0.3.0" in probe.stdout
 
-    v0.1.0's binary lacks the `index` subcommand `index_cli.py` invokes, so
-    jarvis cannot drive it at all. v0.1.1's xcodebuild backend passes no
-    code-signing overrides, so any repo with signed app-extension targets fails
-    during GatherProvisioningInputs before compiling anything.
-    """
-    version = run_func('echo "$SCIP_SWIFT_VERSION"').stdout.strip()
-    parts = version.lstrip("v").split(".")
-    assert tuple(int(p) for p in parts) >= (0, 1, 2), f"too old: {version}"
+
+def test_install_scip_swift_fails_loudly_when_latest_below_floor(tmp_path):
+    """v0.2.x ignores --build-tool xcodebuild; below-floor must be fatal."""
+    api_url = _stage_scip_swift_release(tmp_path, tag="v0.2.1")
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(tmp_path / "bin"),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "0.3.0" in combined, "must name the floor"
+    assert "no good release exists yet" in combined
+    assert not (tmp_path / "bin" / "scip-swift").exists()
 
 
-def test_install_scip_swift_skips_when_present(tmp_path):
+def test_install_scip_swift_fails_on_digest_mismatch(tmp_path):
+    """A tampered digest must fail the install before anything is installed."""
+    api_url = _stage_scip_swift_release(tmp_path, digest="0" * 64)
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(tmp_path / "bin"),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode != 0
+    assert "checksum mismatch" in (result.stdout + result.stderr).lower()
+    assert not (tmp_path / "bin" / "scip-swift").exists()
+
+
+def test_install_scip_swift_rejects_tag_with_shell_metacharacters(tmp_path):
+    """Untrusted API JSON: a tag carrying a payload never reaches shell use."""
+    payload = tmp_path / "pwned"
+    api_url = _stage_scip_swift_release(tmp_path, tag=f"v0.3.0; touch {payload}")
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(tmp_path / "bin"),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode != 0
+    assert not payload.exists(), "shape validation must fire before any use"
+    assert not (tmp_path / "bin" / "scip-swift").exists()
+
+
+def test_install_scip_swift_skips_when_installed_version_is_current(tmp_path):
+    """Version-aware skip: an installed binary already at latest is skipped."""
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
     stub = fake_bin / "scip-swift"
-    stub.write_text("#!/bin/sh\ntrue\n")
+    stub.write_text("#!/bin/sh\necho '0.3.0 (swift 6.2.4)'\n")
     stub.chmod(0o755)
+    api_url = _stage_scip_swift_release(tmp_path, tag="v0.3.0")
+    bin_path = tmp_path / "bin"
     result = run_func(
-        'install_scip_swift darwin arm64',
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "JARVIS_BIN_DIR": str(tmp_path / "b")},
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(bin_path),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    combined = (result.stdout + result.stderr).lower()
+    assert "already" in combined or "skip" in combined
+    assert not (bin_path / "scip-swift").exists()
+
+
+def test_install_scip_swift_reinstalls_when_installed_version_outdated(tmp_path):
+    """Auto-roll must upgrade a stale v0.1.2 — presence-skip would strand it."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    stub = fake_bin / "scip-swift"
+    stub.write_text("#!/bin/sh\necho '0.1.2 (swift 6.1.2)'\n")
+    stub.chmod(0o755)
+    api_url = _stage_scip_swift_release(tmp_path, tag="v0.3.0")
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(bin_path),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert (bin_path / "scip-swift").is_file()
+
+
+def test_install_scip_swift_linux_skips_before_any_fetch(tmp_path):
+    """Platform gate first: Linux exits 0 without touching the API at all."""
+    result = run_func(
+        "install_scip_swift linux amd64",
+        env={
+            "JARVIS_BIN_DIR": str(tmp_path / "bin"),
+            "PATH": "/usr/bin:/bin",
+            "SCIP_SWIFT_API_URL": "file:///nonexistent-latest.json",
+        },
     )
     assert result.returncode == 0
     combined = (result.stdout + result.stderr).lower()
-    assert "already" in combined or "skip" in combined
+    assert "not available" in combined
 
 
 # ------------------------------------------------ orchestration / flags / summary ----
