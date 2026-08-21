@@ -249,41 +249,54 @@ def test_prefers_xcodebuild_true_when_xcworkspace_present(tmp_path: Path):
     assert _prefers_xcodebuild(tmp_path) is True
 
 
-def test_swift_indexer_cmd_unchanged_without_xcodeproj(tmp_path: Path):
+def test_swift_indexer_cmd_appends_cache_dir_without_xcodeproj(tmp_path, monkeypatch):
+    """The cache flag is NOT xcodebuild-only: swiftpm runs carry it too,
+    pointing at exactly config.swift_cache_dir(slug)."""
+    from jarvis import config
     from jarvis.index_cli import _swift_indexer_cmd
 
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
-    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme=None) == ["scip-swift"]
-
-
-def test_swift_indexer_cmd_adds_xcodebuild_when_xcodeproj_present(tmp_path: Path):
-    from jarvis.index_cli import _swift_indexer_cmd
-
-    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
-    (tmp_path / "MyLib.xcodeproj").mkdir()
-    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme=None) == [
-        "scip-swift", "--build-tool", "xcodebuild",
+    cache = config.swift_cache_dir("demo")
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, None, cache) == [
+        "scip-swift", "--cache-dir", str(tmp_path / "cache" / "scip-swift" / "demo"),
     ]
 
 
-def test_swift_indexer_cmd_adds_scheme_when_given(tmp_path: Path):
+def test_swift_indexer_cmd_adds_xcodebuild_then_cache_dir(tmp_path):
     from jarvis.index_cli import _swift_indexer_cmd
 
     (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
     (tmp_path / "MyLib.xcodeproj").mkdir()
-    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme="ios_theme_ui") == [
+    cache = tmp_path / "cache" / "scip-swift" / "demo"
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, None, cache) == [
+        "scip-swift", "--build-tool", "xcodebuild", "--cache-dir", str(cache),
+    ]
+
+
+def test_swift_indexer_cmd_orders_scheme_before_cache_dir(tmp_path):
+    from jarvis.index_cli import _swift_indexer_cmd
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "MyLib.xcodeproj").mkdir()
+    cache = tmp_path / "cache" / "scip-swift" / "demo"
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, "ios_theme_ui", cache) == [
         "scip-swift", "--build-tool", "xcodebuild", "--scheme", "ios_theme_ui",
+        "--cache-dir", str(cache),
     ]
 
 
-def test_swift_indexer_cmd_ignores_scheme_without_xcodeproj(tmp_path: Path):
+def test_swift_indexer_cmd_ignores_scheme_without_xcodeproj(tmp_path):
     """A --scheme override is meaningless (and unsupported by scip-swift)
     under the swiftpm build tool, so it must not leak into the command
     when there's no checked-in Xcode project to justify xcodebuild."""
     from jarvis.index_cli import _swift_indexer_cmd
 
     (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
-    assert _swift_indexer_cmd(["scip-swift"], tmp_path, scheme="ios_theme_ui") == ["scip-swift"]
+    cache = tmp_path / "cache" / "scip-swift" / "demo"
+    assert _swift_indexer_cmd(["scip-swift"], tmp_path, "ios_theme_ui", cache) == [
+        "scip-swift", "--cache-dir", str(cache),
+    ]
 
 
 def test_detect_language_tie_break_prefers_java_over_swift(tmp_path: Path):

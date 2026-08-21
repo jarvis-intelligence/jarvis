@@ -36,6 +36,18 @@ def test_lancedb_dir_under_data_dir(tmp_path):
     assert config.lancedb_dir(tmp_path) == tmp_path / "lancedb"
 
 
+def test_swift_cache_dir_under_data_dir(monkeypatch, tmp_path):
+    """Per-repo keyed (D-05): deterministic isolation so IndexStores from
+    different repos never interfere with each other."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    assert config.swift_cache_dir("my-repo") == tmp_path / "cache" / "scip-swift" / "my-repo"
+
+
+def test_swift_cache_dir_honors_explicit_root(tmp_path):
+    """The root override wins over the env var, exactly like lancedb_dir."""
+    assert config.swift_cache_dir("my-repo", tmp_path) == tmp_path / "cache" / "scip-swift" / "my-repo"
+
+
 def test_ignored_dirs_shared_with_index_cli():
     from jarvis import index_cli
     assert index_cli._IGNORED_DIRS is config.IGNORED_DIRS
