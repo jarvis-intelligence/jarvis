@@ -61,26 +61,26 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FALL-01 | — | Pending |
-| FALL-02 | — | Pending |
-| FALL-03 | — | Pending |
-| FALL-04 | — | Pending |
-| FALL-05 | — | Pending |
-| STAT-01 | — | Pending |
-| STAT-02 | — | Pending |
-| STAT-03 | — | Pending |
-| SWFT-01 | — | Pending |
-| SWFT-02 | — | Pending |
-| SWFT-03 | — | Pending |
-| SWFT-04 | — | Pending |
-| SEMA-01 | — | Pending |
-| SEMA-02 | — | Pending |
+| FALL-01 | Phase 3 | Pending |
+| FALL-02 | Phase 3 | Pending |
+| FALL-03 | Phase 3 | Pending |
+| FALL-04 | Phase 3 | Pending |
+| FALL-05 | Phase 3 | Pending |
+| STAT-01 | Phase 1 | Pending |
+| STAT-02 | Phase 1 | Pending |
+| STAT-03 | Phase 1 | Pending |
+| SWFT-01 | Phase 2 | Pending |
+| SWFT-02 | Phase 2 | Pending |
+| SWFT-03 | Phase 2 | Pending |
+| SWFT-04 | Phase 4 | Pending |
+| SEMA-01 | Phase 5 | Pending |
+| SEMA-02 | Phase 5 | Pending |
 
 **Coverage:**
 - v1 requirements: 14 total
-- Mapped to phases: 0
-- Unmapped: 14 ⚠️
+- Mapped to phases: 14
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-21*
-*Last updated: 2026-08-21 after initial definition*
+*Last updated: 2026-08-21 after roadmap creation (v1.0 — 5 phases)*
