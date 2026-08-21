@@ -327,6 +327,103 @@ def test_error_payload_passes_through_other_errors(tmp_path: Path, monkeypatch):
     assert payload == {"error": "boom"}
 
 
+def test_error_payload_carries_state_cause_recovery_for_a_signature_search_only_repo(tmp_path: Path, monkeypatch):
+    """STAT-02 / D-14: on a search-only repo whose registry row explains the
+    state, nav-tool errors gain additive `state`/`cause`/`recovery` keys
+    alongside the unchanged prose `error` string."""
+    from jarvis.index_reader import IndexNotFoundError
+    from jarvis.registry import ORIGIN_SIGNATURE, Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only",
+                        search_only=True, status_origin=ORIGIN_SIGNATURE,
+                        status_reason="the build produced no SCIP shards")
+    finally:
+        registry.close()
+
+    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
+
+    assert "search-only" in payload["error"]  # prose explanation retained
+    assert "searchCode" in payload["error"]
+    assert payload["state"] == "signature"
+    assert payload["cause"] == "the build produced no SCIP shards"
+    assert payload["recovery"] == "jarvis reindex gorepo"
+
+
+def test_error_payload_reports_manual_state_for_a_legacy_search_only_row(tmp_path: Path, monkeypatch):
+    """Pre-migration rows carry a NULL origin; `origin_of`'s read-time
+    fallback reports them as 'manual' with the forget+index escape (SC5)."""
+    from jarvis.index_reader import IndexNotFoundError
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
+    finally:
+        registry.close()
+
+    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
+
+    assert payload["state"] == "manual"
+    assert payload["recovery"] == "jarvis forget gorepo && jarvis index /p"
+    assert "cause" not in payload  # NULL reason on legacy rows — no fabricated key
+
+
+def test_error_payload_without_a_registry_row_stays_bare(tmp_path: Path, monkeypatch):
+    """D-14 keys appear only when the registry row actually explains the
+    state — a repo that was never registered keeps the bare error dict."""
+    from jarvis.index_reader import IndexNotFoundError
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    payload = server._error_payload("absent", IndexNotFoundError("no published index for absent"))
+    assert payload == {"error": "no published index for absent"}
+
+
+def test_error_payload_does_not_mask_other_faults_on_a_degraded_repo(tmp_path: Path, monkeypatch):
+    """A query fault on a degraded repo is not a degradation explanation:
+    structured keys apply to the IndexNotFoundError branch only, so a
+    RuntimeError keeps its existing bare shape (no masking)."""
+    from jarvis.registry import ORIGIN_SIGNATURE, Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only",
+                        search_only=True, status_origin=ORIGIN_SIGNATURE,
+                        status_reason="the build produced no SCIP shards")
+    finally:
+        registry.close()
+
+    payload = server._error_payload("gorepo", RuntimeError("kaboom"))
+    assert payload == {"error": "kaboom"}
+
+
+def test_error_payload_degrades_to_bare_error_when_registry_is_unreadable(tmp_path: Path, monkeypatch):
+    """A broken registry degrades the lookup, never replaces one error with
+    another (the `_registry_status` best-effort convention)."""
+    from jarvis import registry as registry_module
+    from jarvis.index_reader import IndexNotFoundError
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
+    finally:
+        registry.close()
+
+    def _unusable(*args, **kwargs):
+        raise RuntimeError("registry unreadable")
+
+    monkeypatch.setattr(registry_module, "Registry", _unusable)
+
+    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
+    assert payload == {"error": "no pointer"}
+
+
 def test_get_index_status_reports_search_only_status():
     """The MCP tool itself (not QueryService.get_index_status directly)
     must surface the registry's status so a caller can distinguish
