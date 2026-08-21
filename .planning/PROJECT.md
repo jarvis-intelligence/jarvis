@@ -13,6 +13,21 @@ the Swift indexer toolchain.
 An indexing failure should never leave a repo with nothing: when full SCIP navigation isn't
 possible, search still works and the system explains why and how to recover.
 
+## Current Milestone: v1.0 Indexing Robustness & scip-swift Update
+
+**Goal:** An indexing failure never leaves a repo with nothing — search keeps
+working, and the system explains why and how to recover.
+
+**Target features:**
+- scip-swift pin bump v0.1.2 → v0.2.1 with `_swift_indexer_cmd` compatibility verification
+- Generic opt-in fallback: any scip indexer failure degrades to a search-only publish
+- Self-healing fallback: every reindex retries the full build, degrades only on fresh failure
+- Opt-in controls: persisted per-repo CLI flag + global env var
+- scip-swift failure signatures join the automatic `_SEARCH_ONLY_SIGNATURES` fallback
+- Degradation reporting in `jarvis status` / `getIndexStatus`: cause, origin, recovery
+- TTY-gated semantic-extra install prompt with per-repo decline memory
+- Non-TTY paths (watch, MCP reindex) keep silent skip + stderr hint
+
 ## Requirements
 
 ### Validated
@@ -106,4 +121,5 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-16 after initialization*
+*Last updated: 2026-08-21 after milestone v1.0 start*
+
