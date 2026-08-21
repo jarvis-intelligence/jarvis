@@ -17,7 +17,7 @@ from jarvis import config
 from jarvis.graph import GraphStore, blast_radius
 from jarvis.index_reader import IndexNotFoundError
 from jarvis.query import FreshnessSnapshot, QueryService
-from jarvis.registry import SEARCH_ONLY_STATUS
+from jarvis.registry import SEARCH_ONLY_STATUS, RegisteredRepo, origin_of, recovery_for
 from jarvis.search import ZoektLifecycle, search_zoekt, zoekt_repo_documents
 from jarvis.symbols import AmbiguousSymbolError
 
@@ -63,20 +63,28 @@ def _freshness_fields(snapshot: FreshnessSnapshot) -> dict[str, Any]:
     return _json_safe(asdict(snapshot))
 
 
-def _registry_status(repo: str) -> str | None:
-    """Best-effort registry lookup for error messaging only. Any failure
-    returns None so a broken registry degrades the message rather than
-    replacing one error with another."""
+def _registry_entry(repo: str) -> RegisteredRepo | None:
+    """Best-effort full-row registry lookup. Any failure returns None so a
+    broken registry degrades the message rather than replacing one error
+    with another. The `Registry` class stays a deferred import; the row
+    shape and the origin helpers are plain module-level imports."""
     try:
         from jarvis.registry import Registry
 
         registry = Registry(config.data_dir() / "registry.db")
         try:
-            entry = registry.get(repo)
+            return registry.get(repo)
         finally:
             registry.close()
     except Exception:
         return None
+
+
+def _registry_status(repo: str) -> str | None:
+    """Best-effort registry lookup for error messaging only. Any failure
+    returns None so a broken registry degrades the message rather than
+    replacing one error with another."""
+    entry = _registry_entry(repo)
     return entry.status if entry is not None else None
 
 
@@ -136,16 +144,36 @@ def _search_coverage_fields(repo: str) -> dict[str, Any]:
 def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
     """Turn a missing SCIP index into an explanation when the repo was
     deliberately published search-only. Every other error passes through
-    unchanged, so this never hides a real fault."""
-    if isinstance(exc, IndexNotFoundError) and _registry_status(repo) == SEARCH_ONLY_STATUS:
-        return {
-            "error": (
-                f"{repo} is indexed search-only: it has no SCIP index, so navigation "
-                "tools cannot answer. searchCode and semanticSearch do work on it. "
-                "This happens when the language's indexer cannot build the repo — "
-                "for example an Android/Gradle project."
-            )
-        }
+    unchanged, so this never hides a real fault.
+
+    D-14: when the registry row explains the state, the IndexNotFoundError
+    branch also carries `state` (origin slug), `cause` (one-line reason),
+    and `recovery` (derived command) as structured keys alongside the prose
+    `error` string — additive, so prose-only clients keep working. Keys
+    appear only when a row with an origin exists; `status_stderr` never
+    enters a payload (it can be megabytes)."""
+    if isinstance(exc, IndexNotFoundError):
+        entry = _registry_entry(repo)
+        if entry is not None and entry.status == SEARCH_ONLY_STATUS:
+            payload = {
+                "error": (
+                    f"{repo} is indexed search-only: it has no SCIP index, so navigation "
+                    "tools cannot answer. searchCode and semanticSearch do work on it. "
+                    "This happens when the language's indexer cannot build the repo — "
+                    "for example an Android/Gradle project."
+                )
+            }
+        else:
+            payload = {"error": str(exc)}
+        origin = origin_of(entry) if entry is not None else None
+        if origin is not None:
+            payload["state"] = origin
+            if entry.status_reason:
+                payload["cause"] = entry.status_reason
+            recovery = recovery_for(entry)
+            if recovery is not None:
+                payload["recovery"] = recovery
+        return payload
     if isinstance(exc, AmbiguousSymbolError):
         hint = exc.candidates[0].dotted_path if exc.candidates else exc.query
         return {
