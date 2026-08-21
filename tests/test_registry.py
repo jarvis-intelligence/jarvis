@@ -16,6 +16,10 @@ def test_upsert_then_get_roundtrips(tmp_path: Path):
     assert repo.language == "python"
     assert repo.commit_sha == "abc123"
     assert repo.status == "indexed"
+    # A plain success upsert carries no failure cause (D-04).
+    assert repo.status_origin is None
+    assert repo.status_reason is None
+    assert repo.status_stderr is None
     reg.close()
 
 
@@ -449,3 +453,59 @@ def test_upsert_clears_failure_fields_on_success(tmp_path: Path):
         assert entry.status_stderr is None
     finally:
         registry.close()
+
+
+def test_failure_columns_migrate_onto_an_existing_database(tmp_path: Path):
+    """SC5: a registry created before the three failure columns existed
+    opens via Registry, gains them additively, keeps its rows, and leaves
+    legacy search_only=1 semantics untouched (values are never rewritten)."""
+    from jarvis.registry import SEARCH_ONLY_STATUS, Registry
+
+    db = tmp_path / "registry.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE repos (slug TEXT PRIMARY KEY, path TEXT NOT NULL, "
+        "language TEXT NOT NULL, commit_sha TEXT, last_indexed TEXT NOT NULL, "
+        "status TEXT NOT NULL, scheme_override TEXT, semantic_indexed_at TEXT, "
+        "semantic_include TEXT, language_override TEXT, "
+        "search_only INTEGER NOT NULL DEFAULT 0, tracked_files INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO repos VALUES ('indexed-old', '/p', 'python', 'abc', "
+        "'2026-01-01T00:00:00+00:00', 'indexed', NULL, NULL, NULL, NULL, 0, 42)"
+    )
+    conn.execute(
+        "INSERT INTO repos VALUES ('search-only-old', '/q', 'unknown', NULL, "
+        "'2026-01-02T00:00:00+00:00', 'search-only', NULL, NULL, NULL, NULL, 1, 7)"
+    )
+    conn.commit()
+    conn.close()
+
+    registry = Registry(db)
+    try:
+        indexed = registry.get("indexed-old")
+        assert indexed is not None
+        assert indexed.status == "indexed"
+        assert indexed.commit_sha == "abc"
+        assert indexed.tracked_files == 42
+        assert indexed.status_origin is None
+        assert indexed.status_reason is None
+        assert indexed.status_stderr is None
+
+        legacy = registry.get("search-only-old")
+        assert legacy is not None
+        assert legacy.status == SEARCH_ONLY_STATUS
+        assert legacy.search_only is True  # untouched by the migration (SC5)
+        assert legacy.tracked_files == 7
+        assert legacy.status_origin is None
+        assert legacy.status_reason is None
+        assert legacy.status_stderr is None
+    finally:
+        registry.close()
+
+    probe = sqlite3.connect(str(db))
+    try:
+        cols = {row[1] for row in probe.execute("PRAGMA table_info(repos)")}
+        assert {"status_origin", "status_reason", "status_stderr"} <= cols
+    finally:
+        probe.close()

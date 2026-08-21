@@ -195,7 +195,14 @@ class Registry:
             "scheme_override=excluded.scheme_override, "
             "semantic_include=excluded.semantic_include, "
             "language_override=excluded.language_override, "
-            "search_only=excluded.search_only",
+            "search_only=excluded.search_only, "
+            # D-04: the INSERT column list never names these, so excluded.*
+            # is NULL on every success path -- listing them here is what
+            # clears a stale failure on the next successful index. The
+            # documented inverse of tracked_files' deliberate exclusion.
+            "status_origin=excluded.status_origin, "
+            "status_reason=excluded.status_reason, "
+            "status_stderr=excluded.status_stderr",
             (slug, path, language, commit_sha, last_indexed.isoformat(), status,
              scheme_override, _join_include(semantic_include), language_override,
              int(search_only)),
