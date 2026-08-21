@@ -926,7 +926,21 @@ def _cmd_list(args: argparse.Namespace) -> int:
     registry = Registry(config.data_dir() / "registry.db")
     try:
         for repo in registry.list():
-            print(f"{repo.slug}\t{repo.status}\t{repo.language}\t{repo.commit_sha or '-'}\t{repo.path}")
+            # D-08: the glyph prefixes the status field so the 5-column
+            # TSV order stays parseable by scripts; only failed rows gain
+            # a 6th field carrying the reason one-liner. `partial` is a
+            # success variant and stays in the ✓ family.
+            if repo.status == "failed":
+                marker = "✗"
+            elif repo.status == SEARCH_ONLY_STATUS:
+                marker = "◐"
+            else:
+                marker = "✓"
+            line = (f"{repo.slug}\t{marker} {repo.status}\t{repo.language}"
+                    f"\t{repo.commit_sha or '-'}\t{repo.path}")
+            if repo.status == "failed":
+                line += f"\t{repo.status_reason or repo.status}"
+            print(line)
     finally:
         registry.close()
     return 0
@@ -958,6 +972,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"cause: {repo.status_reason or repo.status}")
         if recovery is not None:
             print(f"recovery: {recovery}")
+    if repo.status_stderr:
+        # Display shows only the tail (resolution #4); the status_stderr
+        # column itself is persisted unbounded (D-02) -- the full text is
+        # one registry read away.
+        print()
+        for line in repo.status_stderr.splitlines()[-20:]:
+            print(line)
+        print("full log: persisted in the registry (status_stderr column)")
     return 0
 
 
