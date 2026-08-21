@@ -40,12 +40,15 @@ JARVIS_REPO="jarvis-intelligence/jarvis"
 ZOEKT_RELEASE_REPO="jarvis-intelligence/jarvis-index"
 SCIP_RELEASE_REPO="jarvis-intelligence/jarvis-index"
 
-# v0.1.1 is the first release whose binary supports `scip-swift index …`, the
-# form index_cli.py invokes. v0.1.0 predates that subcommand and cannot be
-# driven by jarvis at all. v0.1.2 is the first whose xcodebuild backend
-# disables code signing, without which repos containing signed app-extension
-# targets fail during GatherProvisioningInputs before compiling anything.
-SCIP_SWIFT_VERSION="v0.1.2"
+# scip-swift auto-rolls to the LATEST release at install time (resolved
+# from the GitHub Releases API — a user decision, unlike the exact-tag
+# scip/zoekt pins) and is guarded by this floor instead. v0.2.0/v0.2.1
+# silently ignore --build-tool xcodebuild (dispatch regression), and the
+# fix landed in 0.3.0 (upstream commit 9bcf1688), so the floor is
+# inclusive: a hypothetical 0.2.2 cut from the pre-fix branch would
+# still be broken. The v0.1.x-era floors (the `index` subcommand,
+# code-signing overrides) are subsumed by 0.3.0.
+SCIP_SWIFT_MIN_VERSION="0.3.0"
 # Moved from the personal `phuongddx` owner to the org. GitHub serves no
 # redirect for the old path, so it 404s rather than forwarding -- every
 # `--only scip-swift` run failed until this was repointed.
@@ -251,6 +254,28 @@ download_to() {
 	curl -fsSL --retry 3 -o "$2" "$1"
 }
 
+# True when $1 >= $2 compared as numeric major.minor.patch fields.
+# Lexicographic comparison gets 0.10.0 vs 0.3.0 wrong ("10" < "3" as
+# strings) and sort -V is GNU-only (absent on macOS/BSD), so compare
+# field by field with cut. A leading `v` (git tag form) and missing
+# trailing fields are tolerated; equal versions count as "greater or
+# equal".
+version_ge() {
+	_v1=$(printf '%s' "$1" | tr -d 'v')
+	_v2=$(printf '%s' "$2" | tr -d 'v')
+	_i=1
+	while [ "$_i" -le 3 ]; do
+		_a=$(printf '%s' "$_v1" | cut -d. -f"$_i")
+		_b=$(printf '%s' "$_v2" | cut -d. -f"$_i")
+		[ -z "$_a" ] && _a=0
+		[ -z "$_b" ] && _b=0
+		[ "$_a" -gt "$_b" ] && return 0
+		[ "$_a" -lt "$_b" ] && return 1
+		_i=$((_i + 1))
+	done
+	return 0
+}
+
 # Download a .tar.gz plus its .sha256 sidecar, verify, extract one member,
 # and install it into bin_dir() under dest_name.
 #
@@ -302,6 +327,55 @@ install_tarball_binary() {
 	rm -rf "$_tmp"
 	trap - EXIT
 }
+
+# Download a .tar.gz, verify it against an expected sha256 hex digest
+# supplied by the caller, extract one member, and install it into
+# bin_dir() under dest_name. Sibling of install_tarball_binary, not a
+# refactor of it: zoekt/scip releases publish .sha256 sidecars (that
+# helper's contract), while scip-swift stopped publishing sidecars at
+# v0.2.0 — GitHub's API offers the same guarantee via the immutable,
+# server-computed asset `digest` field, which the caller passes here.
+#
+#   install_tarball_binary_with_digest <tar_url> <expected_hex> <member> <dest_name>
+install_tarball_binary_with_digest() {
+	_tar_url=$1
+	_expected=$2
+	_member=$3
+	_dest_name=$4
+
+	_tmp=$(mktemp -d)
+	# Clean up the temp dir on every exit path, including failure.
+	# shellcheck disable=SC2064
+	trap "rm -rf '$_tmp'" EXIT
+
+	if ! download_to "$_tar_url" "${_tmp}/archive.tar.gz"; then
+		log_error "download failed: ${_tar_url}"
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	if ! verify_sha256 "${_tmp}/archive.tar.gz" "$_expected"; then
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	if ! tar -xzf "${_tmp}/archive.tar.gz" -C "$_tmp" "$_member" 2>/dev/null; then
+		log_error "could not extract '${_member}' from archive"
+		rm -rf "$_tmp"
+		trap - EXIT
+		return 1
+	fi
+
+	ensure_bin_dir
+	mv "${_tmp}/${_member}" "$(bin_dir)/${_dest_name}"
+	chmod +x "$(bin_dir)/${_dest_name}"
+
+	rm -rf "$_tmp"
+	trap - EXIT
+}
+
 
 # Download a bare (non-archive) binary plus its .sha256 sidecar, verify it, and
 # install it into bin_dir() under dest_name. Separate from
@@ -539,40 +613,138 @@ install_zoekt() {
 	log_info "zoekt: installed"
 }
 
-# Note: the asset says "macos", not "darwin" — different vocabulary from
-# scip's own assets. Only arm64 is published.
-scip_swift_asset_name() {
-	echo "scip-swift-${SCIP_SWIFT_VERSION}-macos-arm64.tar.gz"
-}
-
 install_scip_swift() {
 	_os=$1
 	_arch=$2
 
 	# Swift indexing reads an Xcode-produced IndexStore, so it is inherently
 	# macOS-only; and only an arm64 binary is published. Skipping is expected
-	# behavior on other platforms, not a failure.
+	# behavior on other platforms, not a failure. This gate stays FIRST so
+	# non-macOS hosts (Linux CI legs) exit without touching the API at all.
 	if [ "$_os" != "darwin" ] || [ "$_arch" != "arm64" ]; then
 		log_info "scip-swift: not available for ${_os}/${_arch} (macOS arm64 only) — skipping"
 		return 0
 	fi
 
-	if [ "${FORCE:-0}" != "1" ] && already_installed scip-swift; then
-		log_info "scip-swift: already installed, skipping"
-		return 0
+	# One anonymous API call serves tag + asset URL + checksum: upstream
+	# stopped publishing .sha256 sidecars at v0.2.0, and the API asset
+	# `digest` is the server-computed, immutable sha256. Constructing the
+	# URL from the tag instead is the documented anti-pattern — the asset
+	# naming convention already changed once (v0.1.2 -> v0.2.0).
+	# SCIP_SWIFT_API_URL is overridable so tests can serve local JSON
+	# (ZOEKT_BASE_URL pattern).
+	_api="${SCIP_SWIFT_API_URL:-https://api.github.com/repos/${SCIP_SWIFT_REPO}/releases/latest}"
+
+	_meta=$(mktemp -d)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$_meta'" EXIT
+	if ! download_to "$_api" "${_meta}/latest.json"; then
+		log_error "scip-swift: could not fetch release metadata (${_api})"
+		rm -rf "$_meta"; trap - EXIT; return 1
+	fi
+	_json="${_meta}/latest.json"
+
+	# api.github.com returns pretty-printed JSON, so line-oriented
+	# sed/grep extraction suffices (dash-safe, no jq dependency).
+	_tag=$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' "$_json" | head -1)
+	_digest=$(grep -o '"digest": *"[^"]*"' "$_json" | head -1 | sed 's/^"digest": *"//; s/"$//')
+	_url=$(grep -o '"browser_download_url": *"[^"]*\.tar\.gz"' "$_json" | head -1 | sed 's/^"browser_download_url": *"//; s/"$//')
+
+	if [ -z "$_tag" ] || [ -z "$_digest" ] || [ -z "$_url" ]; then
+		log_error "scip-swift: release metadata missing tag, digest, or asset URL (${_api})"
+		rm -rf "$_meta"; trap - EXIT; return 1
 	fi
 
-	_asset=$(scip_swift_asset_name)
-	_base="https://github.com/${SCIP_SWIFT_REPO}/releases/download/${SCIP_SWIFT_VERSION}"
+	# The API response is untrusted network input flowing into shell
+	# variables, a curl URL, and version comparisons — shape-validate every
+	# field before use. A wildcard case pattern alone accepts
+	# "v0.3.0; touch pwned" (the trailing * swallows the payload), so the
+	# tag check pairs it with a complement strip: after deleting every
+	# character legal in v<digits>.<digits>.<digits>, nothing may remain.
+	case "$_tag" in
+	v[0-9]*.[0-9]*.[0-9]*) : ;;
+	*)
+		log_error "scip-swift: release tag is not v<digits>.<digits>.<digits>: ${_tag}"
+		rm -rf "$_meta"; trap - EXIT; return 1
+		;;
+	esac
+	_stray=$(printf '%s' "$_tag" | tr -d 'v0123456789.')
+	if [ -n "$_stray" ]; then
+		log_error "scip-swift: release tag carries unexpected characters: ${_tag}"
+		rm -rf "$_meta"; trap - EXIT; return 1
+	fi
 
-	log_info "scip-swift: installing ${SCIP_SWIFT_VERSION}"
-	if install_tarball_binary "${_base}/${_asset}" "${_base}/${_asset}.sha256" scip-swift scip-swift; then
+	case "$_digest" in
+	sha256:*) : ;;
+	*)
+		log_error "scip-swift: asset digest is not sha256-prefixed: ${_digest}"
+		rm -rf "$_meta"; trap - EXIT; return 1
+		;;
+	esac
+	_digest_hex=${_digest#sha256:}
+	if [ "${#_digest_hex}" -ne 64 ]; then
+		log_error "scip-swift: asset digest is not 64 characters: ${_digest}"
+		rm -rf "$_meta"; trap - EXIT; return 1
+	fi
+	case "$_digest_hex" in
+	*[!0-9a-f]*)
+		log_error "scip-swift: asset digest is not lowercase hex: ${_digest}"
+		rm -rf "$_meta"; trap - EXIT; return 1
+		;;
+	esac
+
+	# file:// exists solely as the test seam (ZOEKT_BASE_URL pattern);
+	# real release assets are always served over https.
+	case "$_url" in
+	https://* | file://*) : ;;
+	*)
+		log_error "scip-swift: asset URL is not https: ${_url}"
+		rm -rf "$_meta"; trap - EXIT; return 1
+		;;
+	esac
+
+	if ! version_ge "$_tag" "$SCIP_SWIFT_MIN_VERSION"; then
+		log_error "scip-swift: latest release is ${_tag}, below the required ${SCIP_SWIFT_MIN_VERSION}"
+		log_error "scip-swift: no good release exists yet — nothing to install"
+		rm -rf "$_meta"; trap - EXIT; return 1
+	fi
+
+	# Version-gated, not presence-gated (installed_scip_matches_pin
+	# pattern): installs auto-roll to latest, so a stale v0.1.2 left on
+	# disk must upgrade, not skip. Compare the installed binary against
+	# the RESOLVED tag; bin_dir first, PATH fallback.
+	if [ "${FORCE:-0}" != "1" ]; then
+		_installed=""
+		if [ -x "$(bin_dir)/scip-swift" ]; then
+			_installed=$("$(bin_dir)/scip-swift" --version 2>/dev/null || true)
+		elif have_cmd scip-swift; then
+			_installed=$(scip-swift --version 2>/dev/null || true)
+		fi
+		if [ -n "$_installed" ]; then
+			# scip-swift prints "0.3.0 (swift 6.2.4)"; the version is
+			# the first space-delimited token.
+			_installed=$(printf '%s' "$_installed" | cut -d' ' -f1)
+			if version_ge "$_installed" "$_tag"; then
+				log_info "scip-swift: ${_installed} already installed (latest is ${_tag}) — skipping"
+				rm -rf "$_meta"; trap - EXIT
+				return 0
+			fi
+			log_info "scip-swift: upgrading installed ${_installed} to ${_tag}"
+		fi
+	fi
+
+	rm -rf "$_meta"
+	trap - EXIT
+
+	log_info "scip-swift: installing ${_tag} (digest-verified)"
+	if install_tarball_binary_with_digest "$_url" "$_digest_hex" scip-swift scip-swift; then
 		log_info "scip-swift: installed"
 	else
 		log_error "scip-swift: install failed — build from source: https://github.com/${SCIP_SWIFT_REPO}"
 		return 1
 	fi
 }
+
 
 # scip-typescript and scip-python are plain npm globals whose bin name matches
 # the binary, so one helper covers both.
