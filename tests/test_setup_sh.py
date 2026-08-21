@@ -1049,6 +1049,55 @@ def test_install_scip_swift_reinstalls_when_installed_version_outdated(tmp_path)
     assert (bin_path / "scip-swift").is_file()
 
 
+def test_install_scip_swift_reinstalls_when_installed_version_unparseable(tmp_path):
+    """WR-02: version_ge treats a comparison error as equality, so a
+    garbage first --version token (a "name version" format, a wrapper that
+    prints a warning line first) must NOT count as current -- that skip is
+    what strands the upgrade: setup.sh skips, the runtime floor says
+    "re-run setup.sh", which skips again."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    stub = fake_bin / "scip-swift"
+    stub.write_text("#!/bin/sh\necho 'scip-swift version 0.3.0 (swift 6.2.4)'\n")
+    stub.chmod(0o755)
+    api_url = _stage_scip_swift_release(tmp_path, tag="v0.3.0")
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(bin_path),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert (bin_path / "scip-swift").is_file(), "unparseable must mean reinstall, not skip"
+
+
+def test_install_scip_swift_reinstalls_when_installed_version_carries_suffix(tmp_path):
+    """WR-02, the equal-tri-version case: "0.3.0-rc1" vs latest v0.3.0
+    short-circuits every field compare as false and falls through to
+    "greater or equal" -- keeping the rc build on skip. The stray-character
+    check (mirroring _tag validation) must treat it as unparseable."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    stub = fake_bin / "scip-swift"
+    stub.write_text("#!/bin/sh\necho '0.3.0-rc1 (swift 6.2.4)'\n")
+    stub.chmod(0o755)
+    api_url = _stage_scip_swift_release(tmp_path, tag="v0.3.0")
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(bin_path),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert (bin_path / "scip-swift").is_file(), "a suffixed version must not satisfy the skip gate"
+
+
 def test_install_scip_swift_linux_skips_before_any_fetch(tmp_path):
     """Platform gate first: Linux exits 0 without touching the API at all."""
     result = run_func(

@@ -748,12 +748,38 @@ install_scip_swift() {
 			# scip-swift prints "0.3.0 (swift 6.2.4)"; the version is
 			# the first space-delimited token.
 			_installed=$(printf '%s' "$_installed" | cut -d' ' -f1)
-			if version_ge "$_installed" "$_tag"; then
+			# Shape-validate that token like _tag above -- minus _tag's
+			# mandatory v, because the binary prints "0.3.0" while
+			# GitHub tags are "v0.3.0" -- before comparing: version_ge
+			# treats a comparison error as equality, so an unparseable
+			# token ("name version" format, a warning line printed
+			# first, an rc suffix) would count as current, skip the
+			# install, and deadlock against the runtime floor (which
+			# says "re-run setup.sh" -- which skips again). Unparseable
+			# means outdated: clear the token and let the install
+			# proceed.
+			case "$_installed" in
+			v[0-9]*.[0-9]*.[0-9]* | [0-9]*.[0-9]*.[0-9]*) : ;;
+			*)
+				log_info "scip-swift: installed version unparseable (${_installed}) — reinstalling"
+				_installed=""
+				;;
+			esac
+			if [ -n "$_installed" ]; then
+				_stray=$(printf '%s' "$_installed" | tr -d 'v0123456789.')
+				if [ -n "$_stray" ]; then
+					log_info "scip-swift: installed version unparseable (${_installed}) — reinstalling"
+					_installed=""
+				fi
+			fi
+			if [ -n "$_installed" ] && version_ge "$_installed" "$_tag"; then
 				log_info "scip-swift: ${_installed} already installed (latest is ${_tag}) — skipping"
 				rm -rf "$_meta"; trap - EXIT
 				return 0
 			fi
-			log_info "scip-swift: upgrading installed ${_installed} to ${_tag}"
+			if [ -n "$_installed" ]; then
+				log_info "scip-swift: upgrading installed ${_installed} to ${_tag}"
+			fi
 		fi
 	fi
 
