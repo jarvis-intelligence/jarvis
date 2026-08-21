@@ -2211,3 +2211,100 @@ def test_cmd_status_explains_a_failed_repo(tmp_path: Path, monkeypatch, capsys):
     assert "origin: failed_hard" in out
     assert "cause: scip-python index failed (scip-python)" in out
     assert "recovery: jarvis index /abs/path/failing" in out
+
+
+def test_cmd_list_marks_repo_health_at_a_glance(tmp_path: Path, monkeypatch, capsys):
+    """D-08: glyphs in the status field (✗ failed / ◐ search-only / ✓
+    everything else), reason one-liner as a 6th field on failed rows only;
+    columns 1-5 keep the existing TSV order for scripts."""
+    import argparse
+
+    from jarvis.index_cli import _cmd_list
+    from jarvis.registry import ORIGIN_FAILED_HARD, SEARCH_ONLY_STATUS, Registry
+
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.record_failure("broken", "/repos/broken", "python",
+                                ORIGIN_FAILED_HARD, "scip-python index failed",
+                                "scip-python index failed:\nboom")
+        registry.upsert("legacy", "/repos/legacy", "unknown", None,
+                        SEARCH_ONLY_STATUS, search_only=True)
+        registry.upsert("healthy", "/repos/healthy", "python", "abc123", "indexed")
+    finally:
+        registry.close()
+
+    assert _cmd_list(argparse.Namespace()) == 0
+    rows = {line.split("\t")[0]: line.split("\t")
+            for line in capsys.readouterr().out.splitlines()}
+
+    failed = rows["broken"]
+    assert failed[1] == "✗ failed"
+    assert failed[2] == "python"
+    assert failed[3] == "-"
+    assert failed[4] == "/repos/broken"
+    assert failed[5] == "scip-python index failed"  # 6th field: reason only
+
+    search_only = rows["legacy"]
+    assert search_only[1] == "◐ search-only"
+    assert len(search_only) == 5  # no trailing empty 6th field
+
+    healthy = rows["healthy"]
+    assert healthy[1] == "✓ indexed"
+    assert healthy[3] == "abc123"
+    assert len(healthy) == 5
+
+
+def test_cmd_status_prints_stderr_tail_and_pointer(tmp_path: Path, monkeypatch, capsys):
+    """D-02 display side: only the last ~20 lines are printed plus a
+    pointer to the persisted full log; persistence itself stays unbounded."""
+    import argparse
+
+    from jarvis.index_cli import _cmd_status
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
+
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    stderr = "\n".join(f"stderr line {i:02d}" for i in range(40))
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.record_failure("broken", "/repos/broken", "python",
+                                ORIGIN_FAILED_HARD, "scip-python index failed",
+                                f"scip-python index failed:\n{stderr}")
+    finally:
+        registry.close()
+
+    rc = _cmd_status(argparse.Namespace(slug="broken"))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "stderr line 00" not in out  # head is display-truncated...
+    assert "stderr line 19" not in out  # ...at the last 20 lines
+    assert "stderr line 20" in out
+    assert "stderr line 39" in out
+    assert "persisted in the registry" in out
+
+
+def test_cmd_status_omits_stderr_block_when_absent(tmp_path: Path, monkeypatch, capsys):
+    """A row with no persisted stderr (every success path) must print no
+    stderr block at all."""
+    import argparse
+
+    from jarvis.index_cli import _cmd_status
+    from jarvis.registry import Registry
+
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert("healthy", "/repos/healthy", "python", "abc123", "indexed")
+    finally:
+        registry.close()
+
+    rc = _cmd_status(argparse.Namespace(slug="healthy"))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "stderr" not in out
+    assert "full log" not in out
