@@ -18,8 +18,8 @@ Requirements for milestone v1.0. Each maps to roadmap phases.
 ### Status & Reporting
 
 - [x] **STAT-01**: `jarvis status` / `getIndexStatus` report degradation: origin (signature/opt-in/manual), persisted cause, recovery command
-- [ ] **STAT-02**: Nav tools' error payloads explain degraded/search-only state with cause + recovery
-- [ ] **STAT-03**: `getIndexStatus` exposes machine-readable capability fields (navigation availability, reason, recovery)
+- [x] **STAT-02**: Nav tools' error payloads explain degraded/search-only state with cause + recovery
+- [x] **STAT-03**: `getIndexStatus` exposes machine-readable capability fields (navigation availability, reason, recovery)
 
 ### Swift Toolchain
 
@@ -67,8 +67,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FALL-04 | Phase 3 | Pending |
 | FALL-05 | Phase 3 | Pending |
 | STAT-01 | Phase 1 | Complete |
-| STAT-02 | Phase 1 | Pending |
-| STAT-03 | Phase 1 | Pending |
+| STAT-02 | Phase 1 | Complete |
+| STAT-03 | Phase 1 | Complete |
 | SWFT-01 | Phase 2 | Pending |
 | SWFT-02 | Phase 2 | Pending |
 | SWFT-03 | Phase 2 | Pending |

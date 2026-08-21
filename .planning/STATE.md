@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 01
 current_phase_name: Registry Foundation & Degradation Reporting
-status: executing
-stopped_at: Completed 01-02-PLAN.md (origin persistence across every index_repo outcome)
-last_updated: "2026-08-21T17:12:11.588Z"
+status: verifying
+stopped_at: Completed 01-03-PLAN.md (degradation-aware MCP payloads)
+last_updated: "2026-08-21T17:23:22.265Z"
 last_activity: 2026-08-21
 last_activity_desc: Phase 01 execution started
-state_head: 75be95184c7b6adcb949f0f9f2be0715008f417b
+state_head: 6d445035f087a847f83c1f3089f935b4fabcfe3f
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 3
-  completed_plans: 2
+  completed_plans: 3
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-21)
 
 Phase: 01 (Registry Foundation & Degradation Reporting) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-21 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -69,6 +69,7 @@ Progress: [░░░░░░░░░░] 0%
 |------|----------|-------|-------|
 | Phase 01 P01 | 9min | 3 tasks | 4 files |
 | Phase 01 P02 | 9min | 3 tasks | 4 files |
+| Phase 01 P03 | 9min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-02: duplicate-slug gate rejects the REQUEST (path already under another slug) — stays a plain close-and-raise; a failure stamp would create a phantom row that re-trips the gate forever
 - [Phase 01]: 01-02: pre-pipeline failures record language='unknown' until resolution completes (resolved_language sentinel) — D-06 full-overwrite, never last-good facts
 - [Phase 01]: 01-02: search-only writes are origin-stamped on the success upsert (manual/signature + matched reason verbatim); status_reason carries reasons only, remedies stay out (D-11)
+- [Phase 01]: 01-03: last_index_run.origin derives from origin_of() not raw status_origin — keeps origin consistent with recovery_for on legacy search-only rows (manual fallback)
+- [Phase 01]: 01-03: MCP degradation payloads are additive-only — nav errors gain conditional state/cause/recovery (D-14), getIndexStatus gains last_index_run + pointer-truth capabilities (D-13/D-15); Phase 3's degraded origin slots in with zero reshaping
+- [Phase 01]: 01-03: capability derivation is double-layer never-raise and never spawns — filesystem zoekt glob + row read only, enforced by monkeypatched subprocess/ZoektLifecycle raiser tests (A5)
 
 ### Pending Todos
 
@@ -105,6 +109,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-21T17:12:11.576Z
-Stopped at: Completed 01-02-PLAN.md (origin persistence across every index_repo outcome)
+Last session: 2026-08-21T17:23:22.254Z
+Stopped at: Completed 01-03-PLAN.md (degradation-aware MCP payloads)
 Resume file: None
