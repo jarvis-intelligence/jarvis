@@ -1031,6 +1031,62 @@ def test_forget_removes_lance_table_dir(tmp_path: Path, monkeypatch):
     assert not lance_dir.exists()
 
 
+def test_forget_removes_swift_cache_dir_sparing_siblings(tmp_path: Path, monkeypatch, capsys):
+    """D-06: forgetting a repo removes everything jarvis stored for it --
+    including the out-of-repo scip-swift cache -- and only its own: the
+    sweep path is built solely from the slug, so a sibling slug's cache
+    must survive untouched."""
+    import argparse
+
+    from jarvis import config
+    from jarvis.index_cli import _cmd_forget
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("gone", str(tmp_path / "repo"), "swift", "abc123", "indexed")
+    registry.close()
+
+    cache = config.swift_cache_dir("gone")
+    cache.mkdir(parents=True)
+    (cache / "manifest.json").write_text("{}")
+
+    sibling = config.swift_cache_dir("keeper")
+    sibling.mkdir(parents=True)
+    (sibling / "manifest.json").write_text("{}")
+
+    rc = _cmd_forget(argparse.Namespace(slug="gone"))
+
+    assert rc == 0
+    assert not cache.exists(), "the forgotten repo's cache must die with it"
+    assert sibling.exists(), "a sibling slug's cache must survive"
+    assert "forgot gone" in capsys.readouterr().out
+
+
+def test_forget_succeeds_when_swift_cache_dir_absent(tmp_path: Path, monkeypatch, capsys):
+    """The cache legitimately may not exist (never-Swift repo, or cache
+    never created) -- forget must stay non-fatal and print the forgot line."""
+    import argparse
+
+    from jarvis import config
+    from jarvis.index_cli import _cmd_forget
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("plainpy", str(tmp_path / "repo"), "python", None, "indexed")
+    registry.close()
+
+    assert not config.swift_cache_dir("plainpy").exists()
+
+    rc = _cmd_forget(argparse.Namespace(slug="plainpy"))
+
+    assert rc == 0
+    assert "forgot plainpy" in capsys.readouterr().out
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
 def test_index_repo_builds_semantic_index_and_searches(tmp_path: Path, monkeypatch):
