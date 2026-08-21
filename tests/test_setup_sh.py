@@ -751,7 +751,8 @@ def test_install_zoekt_extracts_both_binaries(tmp_path):
 
 
 def _stage_scip_swift_release(
-    tmp_path: Path, tag: str = "v0.3.0", digest: str | None = None
+    tmp_path: Path, tag: str = "v0.3.0", digest: str | None = None,
+    decoy_assets: list[str] | None = None,
 ) -> str:
     """Stage a local tarball (member `scip-swift`) plus a GitHub-shaped
     releases/latest JSON pointing at it; return the file:// API URL.
@@ -759,7 +760,11 @@ def _stage_scip_swift_release(
     Mirrors api.github.com's pretty-printed shape (tag_name, assets[] with
     name/digest/browser_download_url) so the sed/grep extraction in
     setup.sh exercises its real parsing path. `digest` overrides the real
-    hash so a test can serve a tampered checksum.
+    hash so a test can serve a tampered checksum. `decoy_assets` stages
+    extra tarballs -- each with its own CORRECT digest and a stub printing
+    a decoy marker -- listed BEFORE the real asset: the wrong-platform-
+    asset-listed-first shape WR-01's name-anchored selection guards
+    against (first-match extraction would pick the decoy and "verify" it).
     """
     stage = tmp_path / "stage"
     stage.mkdir()
@@ -768,11 +773,32 @@ def _stage_scip_swift_release(
     with tarfile.open(tar_path, "w:gz") as tf:
         tf.add(stage / "scip-swift", arcname="scip-swift")
     real = hashlib.sha256(tar_path.read_bytes()).hexdigest()
+
+    assets_json = ""
+    for i, name in enumerate(decoy_assets or []):
+        decoy_stage = tmp_path / f"decoy-stage-{i}"
+        decoy_stage.mkdir()
+        (decoy_stage / "scip-swift").write_text(
+            "#!/bin/sh\necho '0.3.0-decoy-do-not-install'\n"
+        )
+        decoy_tar = tmp_path / f"decoy-{i}.tar.gz"
+        with tarfile.open(decoy_tar, "w:gz") as tf:
+            tf.add(decoy_stage / "scip-swift", arcname="scip-swift")
+        decoy_digest = hashlib.sha256(decoy_tar.read_bytes()).hexdigest()
+        assets_json += (
+            "    {\n"
+            f'      "name": "{name}",\n'
+            f'      "digest": "sha256:{decoy_digest}",\n'
+            f'      "browser_download_url": "file://{decoy_tar}"\n'
+            "    },\n"
+        )
+
     api_json = tmp_path / "latest.json"
     api_json.write_text(
         "{\n"
         f'  "tag_name": "{tag}",\n'
         '  "assets": [\n'
+        f"{assets_json}"
         "    {\n"
         f'      "name": "scip-swift-{tag.lstrip("v")}.tar.gz",\n'
         f'      "digest": "sha256:{real if digest is None else digest}",\n'
@@ -895,6 +921,88 @@ def test_install_scip_swift_rejects_tag_with_shell_metacharacters(tmp_path):
     assert result.returncode != 0
     assert not payload.exists(), "shape validation must fire before any use"
     assert not (tmp_path / "bin" / "scip-swift").exists()
+
+
+def test_install_scip_swift_picks_macos_asset_over_linux_asset_listed_first(tmp_path):
+    """WR-01: extraction must anchor on the macOS asset's NAME, not on
+    whichever asset is listed first. A linux tarball listed first carries
+    its own consistent (url, digest) pair, so first-match extraction would
+    download it, digest-verify it, and install the wrong-platform binary --
+    the failure surfacing only later as an exec-format error."""
+    api_url = _stage_scip_swift_release(
+        tmp_path, tag="v0.3.0", decoy_assets=["scip-swift-0.3.0-linux-amd64.tar.gz"]
+    )
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(bin_path),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    installed = bin_path / "scip-swift"
+    assert installed.is_file()
+    probe = subprocess.run([str(installed), "--version"], capture_output=True, text=True)
+    assert "0.3.0" in probe.stdout
+    assert "decoy" not in probe.stdout.lower(), "the linux asset must never be installed"
+
+
+
+def test_install_scip_swift_fails_loudly_when_no_macos_asset_exists(tmp_path):
+    """WR-01: a release shipping only non-macos assets must be refused at
+    metadata time, not downloaded and installed as a wrong-platform binary."""
+    api_json = tmp_path / "linux-only.json"
+    api_json.write_text(
+        "{\n"
+        '  "tag_name": "v0.3.0",\n'
+        '  "assets": [\n'
+        "    {\n"
+        '      "name": "scip-swift-0.3.0-linux-amd64.tar.gz",\n'
+        f'      "digest": "sha256:{"0" * 64}",\n'
+        '      "browser_download_url": "file:///nonexistent/scip-swift-0.3.0-linux-amd64.tar.gz"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+    )
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(tmp_path / "bin"),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SCIP_SWIFT_API_URL": f"file://{api_json}",
+        },
+    )
+    assert result.returncode != 0
+    assert "macos" in (result.stdout + result.stderr).lower()
+    assert not (tmp_path / "bin" / "scip-swift").exists()
+
+
+
+def test_install_scip_swift_pairs_digest_and_url_from_the_same_asset(tmp_path):
+    """WR-01's cross-asset half: a non-.tar.gz asset listed first would
+    contribute its digest while the URL came from the .tar.gz asset -- a
+    guaranteed checksum mismatch and hard install failure. Name-anchored
+    selection never mixes fields across assets."""
+    api_url = _stage_scip_swift_release(
+        tmp_path, tag="v0.3.0", decoy_assets=["scip-swift-0.3.0-darwin-amd64.zip"]
+    )
+    bin_path = tmp_path / "bin"
+    result = run_func(
+        "install_scip_swift darwin arm64",
+        env={
+            "JARVIS_BIN_DIR": str(bin_path),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "SCIP_SWIFT_API_URL": api_url,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    installed = bin_path / "scip-swift"
+    assert installed.is_file()
+    probe = subprocess.run([str(installed), "--version"], capture_output=True, text=True)
+    assert "0.3.0" in probe.stdout
+    assert "decoy" not in probe.stdout.lower()
 
 
 def test_install_scip_swift_skips_when_installed_version_is_current(tmp_path):

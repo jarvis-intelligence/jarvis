@@ -645,13 +645,37 @@ install_scip_swift() {
 	_json="${_meta}/latest.json"
 
 	# api.github.com returns pretty-printed JSON, so line-oriented
-	# sed/grep extraction suffices (dash-safe, no jq dependency).
+	# sed/grep/awk extraction suffices (dash-safe, no jq dependency).
 	_tag=$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' "$_json" | head -1)
-	_digest=$(grep -o '"digest": *"[^"]*"' "$_json" | head -1 | sed 's/^"digest": *"//; s/"$//')
-	_url=$(grep -o '"browser_download_url": *"[^"]*\.tar\.gz"' "$_json" | head -1 | sed 's/^"browser_download_url": *"//; s/"$//')
+	# Digest and URL must come from the SAME asset -- the macOS one. Taking
+	# the first "digest" and the first ".tar.gz" URL independently selects
+	# whatever asset happens to be listed first: a future linux asset
+	# listed first would be downloaded, digest-verified (its own consistent
+	# pair!), and installed, failing only later as an exec-format error.
+	# Anchor on the asset NAME instead: upstream publishes
+	# `scip-swift-<version>.tar.gz` today (the platform was dropped from
+	# the name at v0.2.0, macOS arm64-only by implication) and published
+	# `...-macos-arm64.tar.gz` before that -- accept exactly those two
+	# shapes so any other platform's asset can never be selected.
+	_asset_name=$(grep -oE '"name": *"scip-swift-[0-9][0-9.]*(-macos-arm64)?\.tar\.gz"' "$_json" | head -1 | sed 's/^"name": *"//; s/"$//')
+	if [ -z "$_asset_name" ]; then
+		log_error "scip-swift: no macOS arm64 .tar.gz asset in release ${_tag:-<no tag>} (${_api})"
+		rm -rf "$_meta"; trap - EXIT; return 1
+	fi
+	# Read digest and URL from that asset's own JSON object: awk flips a
+	# flag at every "name" line, so the release title's "name" and every
+	# sibling asset are excluded, and the pair is correlated by
+	# construction (digest/browser_download_url appear only inside asset
+	# objects).
+	_block=$(awk -v _needle="\"${_asset_name}\"" '
+		/"name":/ { _in = index($0, _needle); next }
+		_in { print }
+	' "$_json")
+	_digest=$(printf '%s\n' "$_block" | grep -o '"digest": *"[^"]*"' | head -1 | sed 's/^"digest": *"//; s/"$//')
+	_url=$(printf '%s\n' "$_block" | grep -o '"browser_download_url": *"[^"]*\.tar\.gz"' | head -1 | sed 's/^"browser_download_url": *"//; s/"$//')
 
 	if [ -z "$_tag" ] || [ -z "$_digest" ] || [ -z "$_url" ]; then
-		log_error "scip-swift: release metadata missing tag, digest, or asset URL (${_api})"
+		log_error "scip-swift: tag, digest, or asset URL missing for ${_asset_name} (${_api})"
 		rm -rf "$_meta"; trap - EXIT; return 1
 	fi
 
