@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 01
 current_phase_name: Registry Foundation & Degradation Reporting
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-08-21T16:42:42.064Z"
+stopped_at: "Completed 01-01-PLAN.md (registry foundation: failure persistence + status/list reporting)"
+last_updated: "2026-08-21T16:56:40.981Z"
 last_activity: 2026-08-21
 last_activity_desc: Phase 01 execution started
-state_head: 2fd90c908a594c87ea4013d0b145eef0b5e82a2f
+state_head: c1fc05da7d250cc9dc3a51d95a27efae11d7fb09
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 3
-  completed_plans: 0
+  completed_plans: 1
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-21)
 ## Current Position
 
 Phase: 01 (Registry Foundation & Degradation Reporting) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 01
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-08-21 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -63,6 +63,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: —
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 9min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -74,6 +79,9 @@ Recent decisions affecting current work:
 - [Roadmap]: Reporting (Phase 1) ships before fallback (Phase 3) — degradation reporting is the safety valve that makes opt-in fallback acceptable
 - [Roadmap]: scip-swift pin bump (Phase 2) precedes signature capture (Phase 4) — stderr signature strings are version-specific to the pinned binary
 - [Roadmap]: Generic fallback uses a distinct self-healing DEGRADED state, never reuses permanent `search_only=1`
+- [Phase 01]: Failure cause persists as origin slug + one-line reason + untruncated stderr in three additive registry columns; recovery commands are derived at read time per origin, never persisted (D-02/D-03/D-09)
+- [Phase 01]: record_failure is an INSERT..ON CONFLICT write that overwrites run facts but preserves search_only/overrides/tracked_files; upsert's conflict list NULL-clears the failure fields on success (D-04/D-05/D-06)
+- [Phase 01]: jarvis list keeps the 5-column TSV contract with glyph-prefixed status (✗/◐/✓) and a 6th reason field on failed rows only; jarvis status prints origin/cause/recovery plus a 20-line stderr tail with persistence pointer (D-08, resolution #4)
 
 ### Pending Todos
 
@@ -93,6 +101,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-21T15:42:54.592Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-scip-swift-toolchain-update/02-CONTEXT.md
+Last session: 2026-08-21T16:56:40.971Z
+Stopped at: Completed 01-01-PLAN.md (registry foundation: failure persistence + status/list reporting)
+Resume file: None

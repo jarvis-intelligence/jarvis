@@ -17,7 +17,7 @@ Requirements for milestone v1.0. Each maps to roadmap phases.
 
 ### Status & Reporting
 
-- [ ] **STAT-01**: `jarvis status` / `getIndexStatus` report degradation: origin (signature/opt-in/manual), persisted cause, recovery command
+- [x] **STAT-01**: `jarvis status` / `getIndexStatus` report degradation: origin (signature/opt-in/manual), persisted cause, recovery command
 - [ ] **STAT-02**: Nav tools' error payloads explain degraded/search-only state with cause + recovery
 - [ ] **STAT-03**: `getIndexStatus` exposes machine-readable capability fields (navigation availability, reason, recovery)
 
@@ -66,7 +66,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FALL-03 | Phase 3 | Pending |
 | FALL-04 | Phase 3 | Pending |
 | FALL-05 | Phase 3 | Pending |
-| STAT-01 | Phase 1 | Pending |
+| STAT-01 | Phase 1 | Complete |
 | STAT-02 | Phase 1 | Pending |
 | STAT-03 | Phase 1 | Pending |
 | SWFT-01 | Phase 2 | Pending |
@@ -77,6 +77,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SEMA-02 | Phase 5 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 14 total
 - Mapped to phases: 14
 - Unmapped: 0 ✓

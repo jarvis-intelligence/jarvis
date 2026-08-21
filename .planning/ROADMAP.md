@@ -34,12 +34,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. `getIndexStatus` exposes machine-readable capability fields (navigation availability, reason, recovery) that an MCP client can branch on without parsing prose
   5. An existing pre-v1.0 registry upgrades in place on next run (additive `_ensure_column` migrations only); persisted `search_only=1` repos keep their current semantics
 
-**Plans**: 3 plans
+**Plans**: 1/3 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Registry failure record (tracer): status_origin/reason/stderr columns, record_failure, recovery_for, hard-failure hook, jarvis status/list reporting, D-04 clearing, legacy migration
+- [x] 01-01-PLAN.md — Registry failure record (tracer): status_origin/reason/stderr columns, record_failure, recovery_for, hard-failure hook, jarvis status/list reporting, D-04 clearing, legacy migration
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -112,7 +112,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Registry Foundation & Degradation Reporting | 0/TBD | Not started | - |
+| 1. Registry Foundation & Degradation Reporting | 1/3 | In Progress|  |
 | 2. scip-swift Toolchain Update | 0/TBD | Not started | - |
 | 3. Opt-In Self-Healing Fallback | 0/TBD | Not started | - |
 | 4. Swift Failure Signatures | 0/TBD | Not started | - |
