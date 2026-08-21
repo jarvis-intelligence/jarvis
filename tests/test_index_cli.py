@@ -1668,6 +1668,161 @@ def test_indexer_failure_without_known_signature_still_fails(tmp_path: Path, mon
         registry.close()
 
 
+def test_manual_search_only_publish_stamps_manual_origin(tmp_path: Path, monkeypatch):
+    """STAT-01 SC2: a `--search-only` publish must record WHICH path
+    produced it -- origin 'manual', no reason (the user asked for it),
+    no stderr (success paths never carry one)."""
+    from jarvis.index_cli import SEARCH_ONLY_STATUS, index_repo
+    from jarvis.registry import ORIGIN_MANUAL
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run",
+                        lambda cmd, **kw: _fake_completed_process(cmd))
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root, search_only=True)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == SEARCH_ONLY_STATUS
+        assert entry.search_only is True
+        assert entry.status_origin == ORIGIN_MANUAL
+        assert entry.status_reason is None
+        assert entry.status_stderr is None
+    finally:
+        registry.close()
+
+
+def test_signature_fallback_stamps_signature_origin_and_matched_reason(
+    tmp_path: Path, monkeypatch
+):
+    """The signature path's status_reason is the matched per-signature
+    REASON text verbatim (the human explanation) -- never a remedy
+    (D-11: recovery stays the generic read-time per-origin mapping)."""
+    from jarvis.index_cli import (
+        SEARCH_ONLY_STATUS,
+        _SEARCH_ONLY_SIGNATURES,
+        IndexingError,
+        index_repo,
+    )
+    from jarvis.registry import ORIGIN_SIGNATURE
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    carrier = (
+        "e: java.lang.AbstractMethodError: "
+        "org.jetbrains.kotlin.fir.analysis.checkers.expression.FirSafeCallChecker.check()"
+    )
+    kotlin_reason = next(
+        reason for tokens, reason in _SEARCH_ONLY_SIGNATURES
+        if tokens == ("AbstractMethodError", "org.jetbrains.kotlin.fir")
+    )
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        # " index" (leading space) matches only the indexer step (e.g.
+        # "scip-python index"), not the later "zoekt-git-index" step that
+        # _publish_search_only must still be allowed to run for real.
+        if step.endswith(" index"):
+            raise IndexingError(carrier)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == SEARCH_ONLY_STATUS
+        assert entry.search_only is True
+        assert entry.status_origin == ORIGIN_SIGNATURE
+        assert entry.status_reason == kotlin_reason  # verbatim, not a paraphrase
+    finally:
+        registry.close()
+
+
+def test_failed_search_only_publish_records_a_full_failure_row(tmp_path: Path, monkeypatch):
+    """A search-only run whose OWN publish fails must record a full failed
+    row (origin 'failed_hard' + cause), not a bare status flip -- the row
+    is what `jarvis status`/`reindex` need to explain and recover (D-05)."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("zoekt-git-index exploded")
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._publish_search_only", _boom)
+
+    with pytest.raises(IndexingError):
+        index_repo(repo_dir, root=data_root, search_only=True)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(config.repo_slug(repo_dir.name))
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.status_reason  # non-empty one-liner (D-03)
+        assert "zoekt-git-index exploded" in entry.status_stderr
+    finally:
+        registry.close()
+
+
+def test_unmatched_indexer_failure_never_gains_a_signature_origin(tmp_path: Path, monkeypatch):
+    """Fail-loudly guard: an unrecognized indexer error must hard-fail with
+    origin 'failed_hard' -- never laundered into a search-only row or a
+    signature origin it did not match (index_cli's design intent)."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError("error: could not resolve dependency com.example:thing:1.0")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    with pytest.raises(IndexingError):
+        index_repo(repo_dir, root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(config.repo_slug(repo_dir.name))
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.search_only is False
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert "could not resolve dependency" in entry.status_stderr
+    finally:
+        registry.close()
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(bool(_missing_java), reason=f"missing required binaries: {_missing_java}")
 def test_index_repo_end_to_end_for_java_repo(tmp_path: Path):
