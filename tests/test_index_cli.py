@@ -744,6 +744,51 @@ def test_index_repo_non_swift_never_probes_scip_swift_version(tmp_path: Path, mo
         cli.index_repo(tmp_path, slug="pure-py", root=tmp_path / "data")
 
 
+def test_index_repo_search_only_swift_never_probes_scip_swift_version(
+    tmp_path: Path, monkeypatch
+):
+    """CR-01 sentinel, mirroring the non-Swift one above: a --search-only
+    run never invokes the language indexer, and setup.sh deliberately never
+    installs scip-swift off darwin/arm64 -- so probing the binary there
+    would hard-fail zoekt-only indexing of Swift repos on every Linux host
+    (and reindex of a persisted search-only Swift repo likewise)."""
+    from jarvis.index_cli import SEARCH_ONLY_STATUS
+
+    import jarvis.index_cli as cli
+
+    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    (tmp_path / "App.swift").write_text("let x = 1\n")
+    _init_git_repo(tmp_path)
+
+    def boom():
+        raise AssertionError("scip-swift must not be probed for a search-only run")
+
+    monkeypatch.setattr(cli, "_scip_swift_version_output", boom)
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+    monkeypatch.setattr(
+        cli, "_run",
+        lambda cmd, **kw: _fake_completed_process(cmd)
+        if cmd[0] in ("zoekt-git-index", "git") else boom(),
+    )
+    monkeypatch.setattr(cli, "_run_semantic_stage", lambda *a, **k: False)
+
+    # With the probe misplaced, its AssertionError (not a clean publish)
+    # propagates through the pre-pipeline failure wrap and fails here.
+    slug = cli.index_repo(tmp_path, slug="swift-searchless",
+                          root=tmp_path / "data", search_only=True)
+
+    registry = Registry(config.data_dir(tmp_path / "data") / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == SEARCH_ONLY_STATUS
+        assert entry.search_only is True
+    finally:
+        registry.close()
+
+    assert not (config.index_dir(slug, tmp_path / "data") / "current").exists()
+
+
 def test_zoekt_index_cmd_uses_git_index_with_pinned_flags(tmp_path: Path):
     """-incremental=false because the default would refuse to repair an
     already-published incomplete shard. -submodules=false because submodules

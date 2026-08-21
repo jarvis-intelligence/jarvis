@@ -840,10 +840,14 @@ def index_repo(
         scheme = _resolve_scheme(registry, slug, scheme)
         semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
 
-        if language == "swift":
+        if language == "swift" and not search_only:
             # Swift-only floor check (D-04): raising here flows through the
             # pre-pipeline failure wrap above, so the run is persisted as a
             # failed_hard row with the cause -- no new wiring needed.
+            # Search-only runs never invoke the language indexer, and
+            # setup.sh skips scip-swift entirely off darwin/arm64, so
+            # probing here would break --search-only Swift repos on Linux
+            # hosts (and reindex of a persisted search-only Swift repo).
             check_scip_swift_version()
             # Cache outside the repo tree keeps scip-swift's build
             # products out of the working copy and out of
