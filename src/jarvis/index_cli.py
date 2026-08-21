@@ -25,7 +25,13 @@ from typing import TYPE_CHECKING
 
 from jarvis import config
 from jarvis.graph import GraphStore, populate_graph_for_repo
-from jarvis.registry import SEARCH_ONLY_STATUS, Registry
+from jarvis.registry import (
+    ORIGIN_FAILED_HARD,
+    SEARCH_ONLY_STATUS,
+    Registry,
+    origin_of,
+    recovery_for,
+)
 from jarvis.watch import Debouncer, should_ignore_path
 
 if TYPE_CHECKING:
@@ -885,7 +891,14 @@ def index_repo(
                 file=sys.stderr,
             )
     except Exception as exc:
-        registry.mark_status(slug, "failed")
+        text = str(exc)
+        # One-line classified reason (D-03): the carrier's first non-empty
+        # line is "{step} failed ({cmd})". The complete text is persisted
+        # verbatim and unbounded (D-02) -- truncation is display-only.
+        reason = next((line for line in text.splitlines() if line.strip()),
+                      exc.__class__.__name__)
+        registry.record_failure(slug, str(repo_path), language, ORIGIN_FAILED_HARD,
+                                reason, text)
         raise IndexingError(str(exc)) from exc
     finally:
         registry.close()
@@ -937,6 +950,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"commit: {repo.commit_sha or '-'}\nlast_indexed: {repo.last_indexed.isoformat()}")
     semantic = repo.semantic_indexed_at.isoformat() if repo.semantic_indexed_at else "-"
     print(f"semantic: {semantic}")
+    recovery = recovery_for(repo)
+    if repo.status_origin or repo.status_reason or recovery is not None:
+        print(f"origin: {origin_of(repo)}")
+        # Legacy failed rows predate status_reason; the status string is
+        # all the cause they carry.
+        print(f"cause: {repo.status_reason or repo.status}")
+        if recovery is not None:
+            print(f"recovery: {recovery}")
     return 0
 
 

@@ -20,6 +20,14 @@ from pathlib import Path
 # which means a SCIP index exists but carries no occurrence ranges.
 SEARCH_ONLY_STATUS = "search-only"
 
+# Origin taxonomy for degraded/failed rows (D-01): stored as readable slugs
+# so they can be inspected straight from the sqlite3 CLI. Additive -- Phase
+# 3's `degraded` slots in as one new constant plus one recovery_for branch,
+# with no schema or payload change.
+ORIGIN_FAILED_HARD = "failed_hard"
+ORIGIN_SIGNATURE = "signature"
+ORIGIN_MANUAL = "manual"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS repos (
     slug TEXT PRIMARY KEY,
@@ -33,7 +41,10 @@ CREATE TABLE IF NOT EXISTS repos (
     semantic_include TEXT,
     language_override TEXT,
     search_only INTEGER NOT NULL DEFAULT 0,
-    tracked_files INTEGER
+    tracked_files INTEGER,
+    status_origin TEXT,
+    status_reason TEXT,
+    status_stderr TEXT
 )
 """
 
@@ -82,12 +93,18 @@ class RegisteredRepo:
     language_override: str | None = None
     search_only: bool = False
     tracked_files: int | None = None
+    # Failure/degradation cause (Phase 1): origin slug (D-01), one-line
+    # classified reason (D-03), and the complete failure text (D-02).
+    # NULL on every successful run -- `upsert` clears all three (D-04).
+    status_origin: str | None = None
+    status_reason: str | None = None
+    status_stderr: str | None = None
 
 
 def _row_to_repo(row: tuple) -> RegisteredRepo:
     (slug, path, language, commit_sha, last_indexed, status,
      scheme_override, semantic_indexed_at, semantic_include, language_override,
-     search_only, tracked_files) = row
+     search_only, tracked_files, status_origin, status_reason, status_stderr) = row
     return RegisteredRepo(
         slug=slug,
         path=path,
@@ -101,7 +118,36 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
         language_override=language_override,
         search_only=bool(search_only),
         tracked_files=tracked_files,
+        status_origin=status_origin,
+        status_reason=status_reason,
+        status_stderr=status_stderr,
     )
+
+
+def origin_of(entry: RegisteredRepo) -> str | None:
+    """Origin slug for a row at read time. Pre-migration search_only=1 rows
+    carry a NULL origin -- manual vs signature is unrecoverable post-hoc,
+    and the manual escape is valid for whichever created the row, so they
+    read as 'manual'."""
+    if entry.status_origin is not None:
+        return entry.status_origin
+    return ORIGIN_MANUAL if entry.search_only else None
+
+
+def recovery_for(entry: RegisteredRepo) -> str | None:
+    """Derive the recovery command from the row's origin at read time
+    (D-09) -- a mapping in code, never persisted per-row, so wording
+    changes and Phase 3's `degraded` origin need no data migration.
+    Returns None when there is nothing to recover from (successful rows,
+    origin-less rows, unknown future origins)."""
+    origin = origin_of(entry)
+    if origin == ORIGIN_FAILED_HARD:
+        return f"jarvis index {entry.path}"  # D-12: the full original command
+    if origin == ORIGIN_SIGNATURE:
+        return f"jarvis reindex {entry.slug}"  # D-11: generic; per-signature remedy prose stays out
+    if origin == ORIGIN_MANUAL:
+        return f"jarvis forget {entry.slug} && jarvis index {entry.path}"  # D-10: the one-way-flag escape
+    return None
 
 
 class Registry:
@@ -121,6 +167,9 @@ class Registry:
         _ensure_column(self._conn, "language_override", "TEXT")
         _ensure_column(self._conn, "search_only", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(self._conn, "tracked_files", "INTEGER")
+        _ensure_column(self._conn, "status_origin", "TEXT")
+        _ensure_column(self._conn, "status_reason", "TEXT")
+        _ensure_column(self._conn, "status_stderr", "TEXT")
 
     def upsert(
         self,
@@ -166,6 +215,44 @@ class Registry:
         )
         self._conn.commit()
 
+    def record_failure(
+        self,
+        slug: str,
+        path: str,
+        language: str,
+        origin: str,
+        reason: str,
+        stderr: str,
+    ) -> RegisteredRepo:
+        """Persist a failed run's cause (D-05/D-06) and return the row.
+
+        INSERT ... ON CONFLICT, not `mark_status`: a bare UPDATE silently
+        no-ops when the failure preceded the first `upsert` -- exactly the
+        hard-failed-first-index case this exists to record. The conflict
+        branch deliberately does NOT touch `search_only`, the overrides,
+        `semantic_indexed_at`, or `tracked_files`: losing `search_only`
+        would make `_resolve_search_only` re-run a build that already
+        proved un-indexable, and the others are facts about the last good
+        run, not about the failure.
+        """
+        last_indexed = datetime.now(UTC)
+        self._conn.execute(
+            "INSERT INTO repos (slug, path, language, commit_sha, last_indexed, status, "
+            "status_origin, status_reason, status_stderr) "
+            "VALUES (?, ?, ?, NULL, ?, 'failed', ?, ?, ?) "
+            "ON CONFLICT(slug) DO UPDATE SET "
+            "path=excluded.path, language=excluded.language, commit_sha=NULL, "
+            "last_indexed=excluded.last_indexed, status='failed', "
+            "status_origin=excluded.status_origin, "
+            "status_reason=excluded.status_reason, "
+            "status_stderr=excluded.status_stderr",
+            (slug, path, language, last_indexed.isoformat(), origin, reason, stderr),
+        )
+        self._conn.commit()
+        entry = self.get(slug)
+        assert entry is not None  # the INSERT above guarantees the row exists
+        return entry
+
     def mark_semantic_indexed(self, slug: str) -> None:
         self._conn.execute(
             "UPDATE repos SET semantic_indexed_at = ? WHERE slug = ?",
@@ -176,7 +263,8 @@ class Registry:
     def get(self, slug: str) -> RegisteredRepo | None:
         row = self._conn.execute(
             "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, "
-            "semantic_indexed_at, semantic_include, language_override, search_only, tracked_files "
+            "semantic_indexed_at, semantic_include, language_override, search_only, tracked_files, "
+            "status_origin, status_reason, status_stderr "
             "FROM repos WHERE slug = ?",
             (slug,),
         ).fetchone()
@@ -185,7 +273,8 @@ class Registry:
     def list(self) -> list[RegisteredRepo]:
         rows = self._conn.execute(
             "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, "
-            "semantic_indexed_at, semantic_include, language_override, search_only, tracked_files "
+            "semantic_indexed_at, semantic_include, language_override, search_only, tracked_files, "
+            "status_origin, status_reason, status_stderr "
             "FROM repos ORDER BY slug"
         ).fetchall()
         return [_row_to_repo(row) for row in rows]
