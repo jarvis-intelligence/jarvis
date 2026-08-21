@@ -671,6 +671,79 @@ def test_check_scip_version_tolerates_unparseable(monkeypatch):
     cli.check_scip_version()  # must not raise
 
 
+def test_check_scip_swift_version_rejects_v021(monkeypatch):
+    """v0.2.1 predates the xcodebuild-dispatch fix (restored in 0.3.0):
+    indexing an .xcodeproj repo through it would silently produce a broken
+    index, so it must fail loudly with a recovery hint."""
+    import jarvis.index_cli as cli
+
+    monkeypatch.setattr(cli, "_scip_swift_version_output", lambda: "0.2.1 (swift 6.1.0)")
+    with pytest.raises(cli.IndexingError) as exc:
+        cli.check_scip_swift_version()
+    message = str(exc.value)
+    assert "0.2.1" in message, "must name the installed version"
+    assert "0.3.0" in message, "must state the required floor"
+    assert "setup.sh" in message, "must name the recovery path"
+
+
+def test_check_scip_swift_version_accepts_v030_real_format(monkeypatch):
+    """scip-swift prints "0.3.0 (swift 6.2.4)" -- no v prefix. The floor
+    must accept the real output format, not a v-prefixed stand-in."""
+    import jarvis.index_cli as cli
+
+    monkeypatch.setattr(cli, "_scip_swift_version_output", lambda: "0.3.0 (swift 6.2.4)")
+    cli.check_scip_swift_version()  # must not raise
+
+
+def test_check_scip_swift_version_tolerates_unparseable(monkeypatch):
+    """Warn-by-omission, same policy as check_scip_version: an unexpected
+    build string must not block indexing outright."""
+    import jarvis.index_cli as cli
+
+    monkeypatch.setattr(cli, "_scip_swift_version_output", lambda: "weird build")
+    cli.check_scip_swift_version()  # must not raise
+
+
+def test_scip_swift_version_output_missing_binary_names_setup_sh(monkeypatch):
+    """A missing binary surfaces as IndexingError naming setup.sh, mirroring
+    _scip_version_output's FileNotFoundError wrap."""
+    import jarvis.index_cli as cli
+
+    def _no_binary(*_args, **_kwargs):
+        raise FileNotFoundError("scip-swift")
+
+    monkeypatch.setattr(cli.subprocess, "run", _no_binary)
+    with pytest.raises(cli.IndexingError, match="setup.sh"):
+        cli._scip_swift_version_output()
+
+
+def test_index_repo_non_swift_never_probes_scip_swift_version(tmp_path: Path, monkeypatch):
+    """The floor gate is Swift-only (D-04): a non-Swift index must not need
+    the scip-swift binary at all -- hosts without Swift repos may never
+    install it (setup.sh skips it off darwin/arm64)."""
+    import jarvis.index_cli as cli
+
+    for i in range(3):
+        (tmp_path / f"m{i}.py").write_text("x = 1\n")
+    _init_git_repo(tmp_path)
+
+    def boom():
+        raise AssertionError("scip-swift must not be probed for a non-swift repo")
+
+    monkeypatch.setattr(cli, "_scip_swift_version_output", boom)
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    def fake_run(cmd, *, cwd, step, env=None):
+        raise cli.IndexingError("stop after the indexer command is built")
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    # If the probe fired, its AssertionError (not IndexingError) propagates
+    # through the pre-pipeline failure wrap's bare `raise` and fails here.
+    with pytest.raises(cli.IndexingError, match="stop after the indexer"):
+        cli.index_repo(tmp_path, slug="pure-py", root=tmp_path / "data")
+
+
 def test_zoekt_index_cmd_uses_git_index_with_pinned_flags(tmp_path: Path):
     """-incremental=false because the default would refuse to repair an
     already-published incomplete shard. -submodules=false because submodules
