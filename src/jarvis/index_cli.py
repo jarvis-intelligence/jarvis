@@ -72,6 +72,14 @@ _IGNORED_DIRS = config.IGNORED_DIRS
 # query then returns empty. Verified: the same .scip file yields chunks=0/
 # mentions=0 under v0.7.0 and chunks=1/mentions=14 under v0.9.0.
 MIN_SCIP_VERSION = (0, 9, 0)
+# scip-swift before 0.3.0 mis-dispatches xcodebuild for .xcodeproj repos
+# (upstream fix 9bcf1688, first released in 0.3.0), silently producing
+# broken indexes. Since 02-01, setup.sh auto-rolls installs to the latest
+# release, so this runtime gate is the defense against a stale binary left
+# earlier on PATH -- the same PATH-shadowing hazard the scip floor above
+# guards against.
+MIN_SCIP_SWIFT_VERSION = (0, 3, 0)
+
 
 # Registry status for an index that published real symbols but no navigable
 # positions -- the fingerprint of a converter or indexer that dropped every
@@ -402,6 +410,39 @@ def _scip_version_output() -> str:
     except FileNotFoundError as exc:
         raise IndexingError("scip not found on PATH — run setup.sh") from exc
     return f"{result.stdout}\n{result.stderr}"
+
+
+def _scip_swift_version_output() -> str:
+    """Isolated for tests to monkeypatch."""
+    try:
+        result = subprocess.run(["scip-swift", "--version"], capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        raise IndexingError("scip-swift not found on PATH — run setup.sh") from exc
+    return f"{result.stdout}\n{result.stderr}"
+
+
+def check_scip_swift_version() -> None:
+    """Raise IndexingError when `scip-swift` is too old for the argv contract.
+
+    Reuses parse_scip_version verbatim -- its v-optional regex already
+    parses scip-swift's output, which prints `0.3.0 (swift 6.2.4)` with
+    no `v` prefix.
+    """
+    version = parse_scip_version(_scip_swift_version_output())
+    if version is None:
+        # Unknown format: warn-by-omission rather than block, exactly as
+        # check_scip_version does -- a wrong guess here would make Swift
+        # indexing impossible against a valid future build.
+        return
+    if version < MIN_SCIP_SWIFT_VERSION:
+        current = ".".join(str(p) for p in version)
+        required = ".".join(str(p) for p in MIN_SCIP_SWIFT_VERSION)
+        raise IndexingError(
+            f"scip-swift v{current} is too old (need >= v{required}): versions before "
+            "0.3.0 dispatch xcodebuild incorrectly for .xcodeproj repos and produce "
+            "broken indexes. Re-run setup.sh, and remove any older scip-swift "
+            "earlier on PATH."
+        )
 
 
 def check_scip_version() -> None:
@@ -800,6 +841,10 @@ def index_repo(
         semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
 
         if language == "swift":
+            # Swift-only floor check (D-04): raising here flows through the
+            # pre-pipeline failure wrap above, so the run is persisted as a
+            # failed_hard row with the cause -- no new wiring needed.
+            check_scip_swift_version()
             # Cache outside the repo tree keeps scip-swift's build
             # products out of the working copy and out of
             # ~/Library/Developer/Xcode/DerivedData.
