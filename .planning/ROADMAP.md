@@ -30,7 +30,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Calling a navigation tool (e.g. `goToDefinition`) on a search-only repo returns an error payload naming the state, its cause, and the recovery command — not a bare "index not found"
   4. `getIndexStatus` exposes machine-readable capability fields (navigation availability, reason, recovery) that an MCP client can branch on without parsing prose
   5. An existing pre-v1.0 registry upgrades in place on next run (additive `_ensure_column` migrations only); persisted `search_only=1` repos keep their current semantics
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Registry failure record (tracer): status_origin/reason/stderr columns, record_failure, recovery_for, hard-failure hook, jarvis status/list reporting, D-04 clearing, legacy migration
+- [ ] 01-02-PLAN.md — Search-only origin stamping (manual/signature) + pre-pipeline failure rows (D-05)
+- [ ] 01-03-PLAN.md — MCP surfaces: _error_payload state/cause/recovery (D-14) + getIndexStatus capabilities/last_index_run (D-13/D-15)
 
 ### Phase 2: scip-swift Toolchain Update
 **Goal**: jarvis installs and drives a working scip-swift release — the pin moves off v0.1.2 to a fixed release cut from main, with setup.sh, caching, and watch adapted to the new binary's contract
