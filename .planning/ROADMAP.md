@@ -58,12 +58,12 @@ Plans:
   3. scip-swift's incremental cache lives under `~/.jarvis/` (via `--cache-dir`), and no indexer cache/build artifacts appear inside the indexed repo tree
   4. `jarvis watch` over a Swift repo never self-triggers reindexes from indexer artifacts (`.scip-cache`, `.build`, `DerivedData`)
 
-**Plans**: 3 plans
+**Plans**: 1/3 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Tracer: setup.sh latest-resolution + 0.3.0 floor + API-digest verification (D-01/D-02), per-repo swift_cache_dir + --cache-dir argv plumbing (D-05), end-to-end install→index proof
+- [x] 02-01-PLAN.md — Tracer: setup.sh latest-resolution + 0.3.0 floor + API-digest verification (D-01/D-02), per-repo swift_cache_dir + --cache-dir argv plumbing (D-05), end-to-end install→index proof
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -123,7 +123,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Registry Foundation & Degradation Reporting | 3/3 | In Progress|  |
-| 2. scip-swift Toolchain Update | 0/3 | Planned | - |
+| 2. scip-swift Toolchain Update | 1/3 | In Progress|  |
 | 3. Opt-In Self-Healing Fallback | 0/TBD | Not started | - |
 | 4. Swift Failure Signatures | 0/TBD | Not started | - |
 | 5. Semantic Install Onboarding | 0/TBD | Not started | - |

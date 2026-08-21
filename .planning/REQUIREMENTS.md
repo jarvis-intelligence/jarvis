@@ -23,9 +23,9 @@ Requirements for milestone v1.0. Each maps to roadmap phases.
 
 ### Swift Toolchain
 
-- [ ] **SWFT-01**: scip-swift pin moves off v0.1.2 to a fixed release cut from main (v0.2.0/v0.2.1 carry an xcodebuild-dispatch regression); `_swift_indexer_cmd` compatibility verified against the pinned release
-- [ ] **SWFT-02**: setup.sh handles the current release-asset naming; checksum verification retained
-- [ ] **SWFT-03**: scip-swift cache lives outside repo trees (`--cache-dir` under `~/.jarvis`); watch never self-triggers on it
+- [x] **SWFT-01**: scip-swift pin moves off v0.1.2 to a fixed release cut from main (v0.2.0/v0.2.1 carry an xcodebuild-dispatch regression); `_swift_indexer_cmd` compatibility verified against the pinned release
+- [x] **SWFT-02**: setup.sh handles the current release-asset naming; checksum verification retained
+- [x] **SWFT-03**: scip-swift cache lives outside repo trees (`--cache-dir` under `~/.jarvis`); watch never self-triggers on it
 - [ ] **SWFT-04**: Verified scip-swift failure signatures join `_SEARCH_ONLY_SIGNATURES`, captured from the pinned binary's real stderr
 
 ### Semantic Onboarding
@@ -69,9 +69,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STAT-01 | Phase 1 | Complete |
 | STAT-02 | Phase 1 | Complete |
 | STAT-03 | Phase 1 | Complete |
-| SWFT-01 | Phase 2 | Pending |
-| SWFT-02 | Phase 2 | Pending |
-| SWFT-03 | Phase 2 | Pending |
+| SWFT-01 | Phase 2 | Complete |
+| SWFT-02 | Phase 2 | Complete |
+| SWFT-03 | Phase 2 | Complete |
 | SWFT-04 | Phase 4 | Pending |
 | SEMA-01 | Phase 5 | Pending |
 | SEMA-02 | Phase 5 | Pending |

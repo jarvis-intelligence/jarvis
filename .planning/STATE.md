@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 2
+current_phase: 02
 current_phase_name: scip-swift Toolchain Update
 status: executing
-stopped_at: Completed 01-03-PLAN.md (degradation-aware MCP payloads)
-last_updated: "2026-08-21T18:17:10.214Z"
-last_activity: 2026-08-21
-last_activity_desc: Phase 01 execution started
-state_head: 2413d673e52ea194f64fb9d0020f7d6c60664937
+stopped_at: Completed 02-01-PLAN.md (scip-swift latest-resolution install + cache-dir plumbing)
+last_updated: "2026-08-21T18:32:29.202Z"
+last_activity: 2026-08-22
+last_activity_desc: Phase 02 execution started
+state_head: af650d23663d1ee763282ee23a53d503d0f1671e
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 6
-  completed_plans: 3
+  completed_plans: 4
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -24,14 +24,14 @@ milestone_name: Indexing Robustness & scip-swift Update
 See: .planning/PROJECT.md (updated 2026-08-21)
 
 **Core value:** An indexing failure never leaves a repo with nothing — search keeps working, and the system explains why and how to recover.
-**Current focus:** Phase 01 — Registry Foundation & Degradation Reporting
+**Current focus:** Phase 02 — scip-swift Toolchain Update
 
 ## Current Position
 
-Phase: 2 (scip-swift Toolchain Update) — READY TO EXECUTE
-Plan: 3 of 3
+Phase: 02 (scip-swift Toolchain Update) — EXECUTING
+Plan: 2 of 3
 Status: Ready to execute
-Last activity: 2026-08-21 — Phase 01 execution started
+Last activity: 2026-08-22 — Phase 02 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -70,6 +70,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P01 | 9min | 3 tasks | 4 files |
 | Phase 01 P02 | 9min | 3 tasks | 4 files |
 | Phase 01 P03 | 9min | 2 tasks | 2 files |
+| Phase 02 P01 | 13min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-03: last_index_run.origin derives from origin_of() not raw status_origin — keeps origin consistent with recovery_for on legacy search-only rows (manual fallback)
 - [Phase 01]: 01-03: MCP degradation payloads are additive-only — nav errors gain conditional state/cause/recovery (D-14), getIndexStatus gains last_index_run + pointer-truth capabilities (D-13/D-15); Phase 3's degraded origin slots in with zero reshaping
 - [Phase 01]: 01-03: capability derivation is double-layer never-raise and never spawns — filesystem zoekt glob + row read only, enforced by monkeypatched subprocess/ZoektLifecycle raiser tests (A5)
+- [Phase 02]: Phase 02-01: scip-swift installs resolve latest via one anonymous releases/latest API call with inclusive >= 0.3.0 floor (dispatch fix landed in 0.3.0; a hypothetical 0.2.2 stays excluded) — no exact-tag pin, auto-roll
+- [Phase 02]: Phase 02-01: checksum is the GitHub API asset digest (immutable, server-computed); no .sha256 sidecar probing — sidecar route for zoekt/scip untouched (add-alongside)
+- [Phase 02]: Phase 02-01: --cache-dir rides every Swift invocation to config.swift_cache_dir(slug); jarvis computes the path only, upstream scip-swift creates the dir and its manifest invalidates on binary/toolchain change
 
 ### Pending Todos
 
@@ -109,6 +113,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-21T17:23:22.254Z
-Stopped at: Completed 01-03-PLAN.md (degradation-aware MCP payloads)
+Last session: 2026-08-21T18:32:29.150Z
+Stopped at: Completed 02-01-PLAN.md (scip-swift latest-resolution install + cache-dir plumbing)
 Resume file: None
