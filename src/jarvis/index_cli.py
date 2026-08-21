@@ -27,6 +27,8 @@ from jarvis import config
 from jarvis.graph import GraphStore, populate_graph_for_repo
 from jarvis.registry import (
     ORIGIN_FAILED_HARD,
+    ORIGIN_MANUAL,
+    ORIGIN_SIGNATURE,
     SEARCH_ONLY_STATUS,
     Registry,
     origin_of,
@@ -794,12 +796,20 @@ def index_repo(
             semantic_ok, tracked = _publish_search_only(repo_path, slug, root, semantic_include)
             registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
                             scheme_override=scheme, semantic_include=semantic_include,
-                            language_override=language_override, search_only=True)
+                            language_override=language_override, search_only=True,
+                            status_origin=ORIGIN_MANUAL)
             registry.mark_tracked_files(slug, tracked)
             if semantic_ok:
                 registry.mark_semantic_indexed(slug)
         except Exception as exc:
-            registry.mark_status(slug, "failed")
+            # Full failure record, not a bare status flip: a search-only run
+            # whose own publish failed is still a failed run the status
+            # surfaces must explain and `reindex` must find (D-05).
+            text = str(exc)
+            reason = next((line for line in text.splitlines() if line.strip()),
+                          exc.__class__.__name__)
+            registry.record_failure(slug, str(repo_path), language, ORIGIN_FAILED_HARD,
+                                    reason, text)
             raise IndexingError(str(exc)) from exc
         finally:
             registry.close()
@@ -832,7 +842,8 @@ def index_repo(
                 semantic_ok, tracked = _publish_search_only(repo_path, slug, root, semantic_include)
                 registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
                                 scheme_override=scheme, semantic_include=semantic_include,
-                                language_override=language_override, search_only=True)
+                                language_override=language_override, search_only=True,
+                                status_origin=ORIGIN_SIGNATURE, status_reason=reason)
                 registry.mark_tracked_files(slug, tracked)
                 if semantic_ok:
                     registry.mark_semantic_indexed(slug)
