@@ -509,3 +509,66 @@ def test_failure_columns_migrate_onto_an_existing_database(tmp_path: Path):
         assert {"status_origin", "status_reason", "status_stderr"} <= cols
     finally:
         probe.close()
+
+
+def test_upsert_round_trips_origin_parameters(tmp_path: Path):
+    """Manual/signature origin stamps ride on the success upsert (D-01):
+    origin and reason persist verbatim, and no stderr ever appears --
+    `upsert` has no status_stderr parameter at all, so the column stays
+    NULL-by-omission on every success path (D-04)."""
+    from jarvis.registry import ORIGIN_MANUAL, Registry
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        returned = registry.upsert("mine", "/repos/mine", "python", "abc123",
+                                   "search-only", search_only=True,
+                                   status_origin=ORIGIN_MANUAL)
+        entry = registry.get("mine")
+        assert entry is not None
+        assert entry.status_origin == ORIGIN_MANUAL
+        assert entry.status_reason is None
+        assert entry.status_stderr is None
+        # The constructed return carries the stamp too, so callers can
+        # assert without a re-read.
+        assert returned.status_origin == ORIGIN_MANUAL
+        assert returned.status_reason is None
+    finally:
+        registry.close()
+
+
+def test_upsert_origin_parameters_replace_a_prior_failure_record(tmp_path: Path):
+    """A search-only success after a recorded failure must leave the row
+    describing THIS run: signature origin plus the matched reason, with
+    the stale failure's stderr cleared to NULL by the conflict list
+    (D-04) rather than lingering beside the new origin."""
+    from jarvis.registry import ORIGIN_FAILED_HARD, ORIGIN_SIGNATURE, Registry
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.record_failure("mine", "/repos/mine", "java", ORIGIN_FAILED_HARD,
+                                "scip-java index failed", "scip-java index failed:\nboom")
+        registry.upsert("mine", "/repos/mine", "java", "abc123", "search-only",
+                        search_only=True, status_origin=ORIGIN_SIGNATURE,
+                        status_reason="matched signature explanation")
+        entry = registry.get("mine")
+        assert entry is not None
+        assert entry.status_origin == ORIGIN_SIGNATURE
+        assert entry.status_reason == "matched signature explanation"
+        assert entry.status_stderr is None
+    finally:
+        registry.close()
+
+
+def test_plain_upsert_leaves_failure_fields_null(tmp_path: Path):
+    """Defaults keep D-04 exactly as before the parameters existed: every
+    plain success path (indexed/partial/indexing) persists NULL failure
+    fields, both in the row and in the constructed return value."""
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        returned = registry.upsert("mine", "/repos/mine", "python", "abc123", "indexed")
+        entry = registry.get("mine")
+        assert entry is not None
+        assert (entry.status_origin, entry.status_reason, entry.status_stderr) == (None, None, None)
+        assert (returned.status_origin, returned.status_reason, returned.status_stderr) == (None, None, None)
+    finally:
+        registry.close()
