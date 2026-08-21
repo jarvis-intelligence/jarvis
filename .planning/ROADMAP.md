@@ -58,7 +58,17 @@ Plans:
   3. scip-swift's incremental cache lives under `~/.jarvis/` (via `--cache-dir`), and no indexer cache/build artifacts appear inside the indexed repo tree
   4. `jarvis watch` over a Swift repo never self-triggers reindexes from indexer artifacts (`.scip-cache`, `.build`, `DerivedData`)
 
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 02-01-PLAN.md — Tracer: setup.sh latest-resolution + 0.3.0 floor + API-digest verification (D-01/D-02), per-repo swift_cache_dir + --cache-dir argv plumbing (D-05), end-to-end install→index proof
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 02-02-PLAN.md — Runtime guards & lifecycle: Swift-gated scip-swift version floor (D-04), watch Swift-artifact ignores (D-07/D-08), forget cache sweep (D-06)
+- [ ] 02-03-PLAN.md — CI dispatch proof: mini_xcode_repo .xcodeproj fixture (D-10) + setup-smoke post-install jarvis index step (D-09) with tree-cleanliness assertions
 
 **Notes — jarvis-side vs upstream-gated:** cutting the fixed scip-swift release from main (xcodebuild-dispatch fix + restored `.sha256` sidecars) is upstream work jarvis cannot do alone; v0.2.0/v0.2.1 are broken and out of the question. Jarvis-side work: the pin bump itself, setup.sh asset-naming adaptation, `--cache-dir` plumbing, watch-ignore coverage, and the macOS gate for the universal binary. Plan-time contingency required: if the upstream release isn't cut, hold this phase and proceed to Phase 3 (which verifies fallback via induced failures on working languages), or stay on v0.1.2 and defer Phase 4 signatures.
 
@@ -113,7 +123,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Registry Foundation & Degradation Reporting | 3/3 | In Progress|  |
-| 2. scip-swift Toolchain Update | 0/TBD | Not started | - |
+| 2. scip-swift Toolchain Update | 0/3 | Planned | - |
 | 3. Opt-In Self-Healing Fallback | 0/TBD | Not started | - |
 | 4. Swift Failure Signatures | 0/TBD | Not started | - |
 | 5. Semantic Install Onboarding | 0/TBD | Not started | - |
