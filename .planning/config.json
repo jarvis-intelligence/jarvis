@@ -49,7 +49,8 @@
     "security_block_on": "high",
     "tdd_mode": true,
     "ui_review": true,
-    "use_worktrees": true
+    "use_worktrees": false,
+    "_auto_chain_active": true
   },
   "ship": {
     "pr_body_sections": []
