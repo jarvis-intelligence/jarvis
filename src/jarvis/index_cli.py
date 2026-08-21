@@ -759,34 +759,55 @@ def index_repo(
     # repo path already registered under another slug shouldn't depend on
     # `scip` being installed at all -- there's no point checking a tool
     # version for a call that's about to be refused anyway.
-    check_scip_version()
-    # Resolved before language detection (not after, alongside scheme/
-    # semantic_include) because the except branch below reads it: a
-    # `jarvis reindex`/`watch` of a persisted search-only repo never
-    # re-passes `--search-only`, so this must already reflect the persisted
-    # value by the time detect_language() can raise.
-    search_only = _resolve_search_only(registry, slug, search_only)
-    language_override = _resolve_language(registry, slug, language)
-    if language_override is not None:
-        if language_override not in _INDEXER_BY_LANGUAGE:
-            raise UnsupportedLanguageError(
-                f"{slug!r} has a persisted language override {language_override!r} that is no "
-                f"longer supported (expected one of {sorted(_INDEXER_BY_LANGUAGE)})"
-            )
-        language, indexer_cmd = language_override, _INDEXER_BY_LANGUAGE[language_override]
-    else:
-        try:
-            language, indexer_cmd = detect_language(repo_path)
-        except UnsupportedLanguageError:
-            if not search_only:
-                raise
-            language, indexer_cmd = UNKNOWN_LANGUAGE, []
+    # D-05: every failure from here until the run's first upsert predates
+    # any registry write, so without this wrap a hard failure would leave
+    # no row at all -- nothing could explain it and `jarvis reindex
+    # <slug>` would report "no such repo". `_git_head` above stays outside
+    # deliberately: it runs before the Registry exists, and a repo with no
+    # commits is a malformed request, not a failed index run.
+    resolved_language: str | None = None
+    try:
+        check_scip_version()
+        # Resolved before language detection (not after, alongside scheme/
+        # semantic_include) because the except branch below reads it: a
+        # `jarvis reindex`/`watch` of a persisted search-only repo never
+        # re-passes `--search-only`, so this must already reflect the
+        # persisted value by the time detect_language() can raise.
+        search_only = _resolve_search_only(registry, slug, search_only)
+        language_override = _resolve_language(registry, slug, language)
+        if language_override is not None:
+            if language_override not in _INDEXER_BY_LANGUAGE:
+                raise UnsupportedLanguageError(
+                    f"{slug!r} has a persisted language override {language_override!r} that is no "
+                    f"longer supported (expected one of {sorted(_INDEXER_BY_LANGUAGE)})"
+                )
+            language, indexer_cmd = language_override, _INDEXER_BY_LANGUAGE[language_override]
+        else:
+            try:
+                language, indexer_cmd = detect_language(repo_path)
+            except UnsupportedLanguageError:
+                if not search_only:
+                    raise
+                language, indexer_cmd = UNKNOWN_LANGUAGE, []
+        resolved_language = language
+        scheme = _resolve_scheme(registry, slug, scheme)
+        semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
 
-    scheme = _resolve_scheme(registry, slug, scheme)
-    semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
-
-    if language == "swift":
-        indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
+        if language == "swift":
+            indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
+    except Exception as exc:
+        # `resolved_language` is None until resolution completes -- the
+        # honest record for a run that died before establishing one (D-06:
+        # the failed attempt's facts, never the last good run's).
+        text = str(exc)
+        reason = next((line for line in text.splitlines() if line.strip()),
+                      exc.__class__.__name__)
+        registry.record_failure(
+            slug, str(repo_path),
+            resolved_language if resolved_language is not None else UNKNOWN_LANGUAGE,
+            ORIGIN_FAILED_HARD, reason, text)
+        registry.close()
+        raise
 
     if search_only:
         registry.upsert(slug, str(repo_path), language, None, "indexing",
