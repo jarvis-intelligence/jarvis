@@ -182,13 +182,15 @@ class Registry:
         semantic_include: tuple[str, ...] = (),
         language_override: str | None = None,
         search_only: bool = False,
+        status_origin: str | None = None,
+        status_reason: str | None = None,
     ) -> RegisteredRepo:
         last_indexed = datetime.now(UTC)
         self._conn.execute(
             "INSERT INTO repos (slug, path, language, commit_sha, last_indexed, status, "
             "scheme_override, semantic_indexed_at, semantic_include, language_override, "
-            "search_only) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) "
+            "search_only, status_origin, status_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?) "
             "ON CONFLICT(slug) DO UPDATE SET "
             "path=excluded.path, language=excluded.language, commit_sha=excluded.commit_sha, "
             "last_indexed=excluded.last_indexed, status=excluded.status, "
@@ -196,16 +198,17 @@ class Registry:
             "semantic_include=excluded.semantic_include, "
             "language_override=excluded.language_override, "
             "search_only=excluded.search_only, "
-            # D-04: the INSERT column list never names these, so excluded.*
-            # is NULL on every success path -- listing them here is what
-            # clears a stale failure on the next successful index. The
+            # D-04: success paths leave status_origin/status_reason at their
+            # NULL defaults and status_stderr has no upsert parameter at all
+            # -- so excluded.* is NULL here, and listing all three columns is
+            # what clears a stale failure on the next successful index. The
             # documented inverse of tracked_files' deliberate exclusion.
             "status_origin=excluded.status_origin, "
             "status_reason=excluded.status_reason, "
             "status_stderr=excluded.status_stderr",
             (slug, path, language, commit_sha, last_indexed.isoformat(), status,
              scheme_override, _join_include(semantic_include), language_override,
-             int(search_only)),
+             int(search_only), status_origin, status_reason),
         )
         self._conn.commit()
         return RegisteredRepo(
@@ -213,6 +216,7 @@ class Registry:
             last_indexed=last_indexed, status=status, scheme_override=scheme_override,
             semantic_indexed_at=None, semantic_include=semantic_include,
             language_override=language_override, search_only=search_only,
+            status_origin=status_origin, status_reason=status_reason,
         )
 
     def mark_status(self, slug: str, status: str) -> None:
