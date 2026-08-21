@@ -200,18 +200,24 @@ def _prefers_xcodebuild(repo_path: Path) -> bool:
     return any(repo_path.glob("*.xcodeproj")) or any(repo_path.glob("*.xcworkspace"))
 
 
-def _swift_indexer_cmd(base_cmd: list[str], repo_path: Path, scheme: str | None) -> list[str]:
+def _swift_indexer_cmd(
+    base_cmd: list[str], repo_path: Path, scheme: str | None, cache_dir: Path
+) -> list[str]:
     """Extend `base_cmd` (`["scip-swift"]`) with `--build-tool xcodebuild`
     (and `--scheme`, if given) when `repo_path` has a checked-in Xcode
     project — see `_prefers_xcodebuild`. Non-Swift callers never reach
-    this function; Swift repos without a checked-in Xcode project get
-    `base_cmd` back unchanged, identical to today's behavior."""
+    this function.
+
+    `--cache-dir` rides every invocation on both build paths (D-05): it
+    keeps the incremental cache, build scratch, and derived data out of
+    the repo tree (and out of ~/Library/Developer/Xcode/DerivedData),
+    under a per-repo directory whose lifecycle jarvis owns."""
     if not _prefers_xcodebuild(repo_path):
-        return base_cmd
+        return [*base_cmd, "--cache-dir", str(cache_dir)]
     cmd = [*base_cmd, "--build-tool", "xcodebuild"]
     if scheme:
         cmd += ["--scheme", scheme]
-    return cmd
+    return cmd + ["--cache-dir", str(cache_dir)]
 
 
 def _java_indexer_env() -> dict[str, str]:
@@ -794,7 +800,12 @@ def index_repo(
         semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
 
         if language == "swift":
-            indexer_cmd = _swift_indexer_cmd(indexer_cmd, repo_path, scheme)
+            # Cache outside the repo tree keeps scip-swift's build
+            # products out of the working copy and out of
+            # ~/Library/Developer/Xcode/DerivedData.
+            indexer_cmd = _swift_indexer_cmd(
+                indexer_cmd, repo_path, scheme, config.swift_cache_dir(slug)
+            )
     except Exception as exc:
         # `resolved_language` is None until resolution completes -- the
         # honest record for a run that died before establishing one (D-06:

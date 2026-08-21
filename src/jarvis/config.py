@@ -30,6 +30,16 @@ def lancedb_dir(root: Path | None = None) -> Path:
     return data_dir(root) / "lancedb"
 
 
+def swift_cache_dir(slug: str, root: Path | None = None) -> Path:
+    """Per-repo scip-swift incremental-cache directory (D-05): keyed by
+    slug so IndexStores from different repos never interfere.
+
+    jarvis computes this path only — upstream scip-swift creates the
+    directory, and its manifest wholesale-invalidates the cache when the
+    binary or toolchain changes, so no jarvis-side versioning is needed."""
+    return data_dir(root) / "cache" / "scip-swift" / slug
+
+
 def shim_dir(root: Path | None = None) -> Path:
     """Directory holding shims for system tools whose default version is too
     old for an indexer to use.
