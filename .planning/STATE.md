@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 02
 current_phase_name: scip-swift Toolchain Update
 status: executing
-stopped_at: Completed 02-01-PLAN.md (scip-swift latest-resolution install + cache-dir plumbing)
-last_updated: "2026-08-21T18:32:29.202Z"
+stopped_at: Completed 02-02-PLAN.md (runtime guards & lifecycle)
+last_updated: "2026-08-21T18:42:04.626Z"
 last_activity: 2026-08-22
 last_activity_desc: Phase 02 execution started
-state_head: af650d23663d1ee763282ee23a53d503d0f1671e
+state_head: f135650715b18a4ed2f4787422a5336876d96d68
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-21)
 ## Current Position
 
 Phase: 02 (scip-swift Toolchain Update) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-08-22 — Phase 02 execution started
 
@@ -71,6 +71,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P02 | 9min | 3 tasks | 4 files |
 | Phase 01 P03 | 9min | 2 tasks | 2 files |
 | Phase 02 P01 | 13min | 2 tasks | 6 files |
+| Phase 02 P02 | 7min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -94,6 +95,10 @@ Recent decisions affecting current work:
 - [Phase 02]: Phase 02-01: scip-swift installs resolve latest via one anonymous releases/latest API call with inclusive >= 0.3.0 floor (dispatch fix landed in 0.3.0; a hypothetical 0.2.2 stays excluded) — no exact-tag pin, auto-roll
 - [Phase 02]: Phase 02-01: checksum is the GitHub API asset digest (immutable, server-computed); no .sha256 sidecar probing — sidecar route for zoekt/scip untouched (add-alongside)
 - [Phase 02]: Phase 02-01: --cache-dir rides every Swift invocation to config.swift_cache_dir(slug); jarvis computes the path only, upstream scip-swift creates the dir and its manifest invalidates on binary/toolchain change
+- [Phase 02]: Phase 02-02: runtime scip-swift floor fires as the first statement of index_repo's swift branch, inside phase-1's pre-pipeline failure wrap — a too-old binary persists failed_hard with the cause via the existing hook, zero new wiring (D-04)
+- [Phase 02]: Phase 02-02: check_scip_swift_version reuses parse_scip_version verbatim (v-optional regex parses the no-v scip-swift format); warn-by-omission on unparseable output, identical policy to check_scip_version
+- [Phase 02]: Phase 02-02: watch ignores are a pure component-membership set extension (.scip-cache, .build, DerivedData, .index-store, IndexStore, .swiftpm); the one-shot xcshareddata write is accepted not ignored — ignoring it would start suppressing legitimate .xcodeproj triggers (orchestrator resolution #2)
+- [Phase 02]: Phase 02-02: forget sweeps cache/scip-swift/<slug>/ with ignore_errors=True beside the lancedb sweep — path built solely from the slug so sibling caches provably survive (D-06)
 
 ### Pending Todos
 
@@ -113,6 +118,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-21T18:32:29.150Z
-Stopped at: Completed 02-01-PLAN.md (scip-swift latest-resolution install + cache-dir plumbing)
+Last session: 2026-08-21T18:42:04.571Z
+Stopped at: Completed 02-02-PLAN.md (runtime guards & lifecycle)
 Resume file: None
