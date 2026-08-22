@@ -3045,3 +3045,245 @@ def test_failed_degraded_publish_preserves_the_previous_current_pointer(
         assert entry.status_origin == ORIGIN_FAILED_HARD
     finally:
         registry.close()
+
+
+# --- Phase 3: precedence, persistence, self-heal (FALL-02/FALL-03) ----------
+
+def _mock_healthy_full_run(monkeypatch):
+    """Mocks for a fully successful main-pipeline run: every subprocess
+    succeeds, the convert step writes a navigable minimal index db, and the
+    graph/semantic stages no-op (the two-phase pattern of the ordering
+    test)."""
+    def _successful_run(cmd, *, cwd, step, env=None):
+        if step == "scip expt-convert":
+            _make_index_db(Path(cmd[3]), chunks=1, mentions=14)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _successful_run)
+    monkeypatch.setattr("jarvis.index_cli.populate_graph_for_repo", lambda *a, **k: None)
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+
+def _mock_failing_indexer(monkeypatch, message):
+    """Mocks for a post-build-start indexer failure: the language indexer
+    step raises, every other step (including the degrade publish's zoekt)
+    still succeeds — the house signature-fallback pattern."""
+    from jarvis.index_cli import IndexingError
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError(message)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+
+@pytest.mark.parametrize("cli", [True, False, None])
+@pytest.mark.parametrize("persisted", [True, False, None])
+@pytest.mark.parametrize("env", ["1", None])
+def test_fallback_precedence_matrix_cli_persisted_env(
+    tmp_path: Path, monkeypatch, cli, persisted, env
+):
+    """FALL-02 full precedence matrix: CLI wins whenever present; else the
+    persisted value when not NULL; else the env tier; else off."""
+    from jarvis.index_cli import _resolve_fallback
+    from jarvis.registry import Registry
+
+    if env is None:
+        monkeypatch.delenv("JARVIS_FALLBACK_SEARCH_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("JARVIS_FALLBACK_SEARCH_ONLY", env)
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        if persisted is not None:
+            registry.upsert("mine", "/repos/mine", "python", "abc", "indexed")
+            registry.set_fallback_enabled("mine", persisted)
+        expected = cli if cli is not None else (
+            persisted if persisted is not None else (env == "1")
+        )
+        assert _resolve_fallback(registry, "mine", cli) is expected
+    finally:
+        registry.close()
+
+
+def test_explicit_cli_fallback_flag_persists_after_a_healthy_run(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-02 persistence — explicit only: a healthy full run invoked
+    with fallback_search_only=True leaves fallback_enabled=True on the
+    row (the setter fires right after the transitional indexing upsert)."""
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _mock_healthy_full_run(monkeypatch)
+    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "indexed"
+        assert entry.fallback_enabled is True
+    finally:
+        registry.close()
+
+
+def test_no_cli_flag_leaves_fallback_enabled_null(tmp_path: Path, monkeypatch):
+    """Pitfall 1: only the explicit CLI value is ever persisted. Runs with
+    no CLI flag leave the row NULL whether the env tier is off or on — the
+    env value is consumed at run time only, so a later env-on still
+    governs a repo that merely ran once with env off."""
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    monkeypatch.delenv("JARVIS_FALLBACK_SEARCH_ONLY", raising=False)
+    _mock_healthy_full_run(monkeypatch)
+    slug = index_repo(repo_dir, root=data_root)
+    registry = Registry(data_root / "registry.db")
+    try:
+        assert registry.get(slug).fallback_enabled is None
+
+        monkeypatch.setenv("JARVIS_FALLBACK_SEARCH_ONLY", "1")
+        _mock_healthy_full_run(monkeypatch)
+        index_repo(repo_dir, slug=slug, root=data_root)
+        assert registry.get(slug).fallback_enabled is None
+    finally:
+        registry.close()
+
+
+def test_explicit_fallback_opt_out_governs_immediately_on_a_degraded_repo(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-02 opt-out is immediate: --no-fallback-search-only on an
+    already-degraded repo makes the next still-broken run a hard failure —
+    the degraded state never traps."""
+    from jarvis.index_cli import IndexingError
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _mock_failing_indexer(monkeypatch, "error: simulated post-build-start failure")
+    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
+    registry = Registry(data_root / "registry.db")
+    try:
+        assert registry.get(slug).status == DEGRADED_STATUS
+
+        _mock_failing_indexer(monkeypatch, "error: simulated post-build-start failure")
+        with pytest.raises(IndexingError):
+            index_repo(repo_dir, slug=slug, root=data_root, fallback_search_only=False)
+
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.fallback_enabled is False  # the opt-out is now durable
+    finally:
+        registry.close()
+
+
+def test_degraded_repo_self_heals_to_indexed_on_a_successful_rerun(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-03: degraded keeps search_only=False so the next run retries
+    the full build; success ends status='indexed' with the D-04
+    NULL-clearing of origin/reason/stderr — no stale failure facts."""
+    from jarvis.registry import DEGRADED_STATUS
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _mock_failing_indexer(monkeypatch, "error: simulated post-build-start failure")
+    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
+    registry = Registry(data_root / "registry.db")
+    try:
+        assert registry.get(slug).status == DEGRADED_STATUS
+
+        _mock_healthy_full_run(monkeypatch)
+        index_repo(repo_dir, slug=slug, root=data_root)  # no CLI flag
+
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "indexed"
+        assert entry.search_only is False
+        assert (entry.status_origin, entry.status_reason, entry.status_stderr) == (
+            None, None, None,
+        )
+    finally:
+        registry.close()
+
+
+def test_degraded_repo_degrades_again_on_a_fresh_failure(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-03: the retry is real — a still-failing second run degrades
+    again with a FRESH failure record (the new reason text proves the
+    build was retried, not a stale cached state served back)."""
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _mock_failing_indexer(monkeypatch, "error: first failure")
+    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
+    registry = Registry(data_root / "registry.db")
+    try:
+        first = registry.get(slug)
+        assert first is not None
+        assert first.status == DEGRADED_STATUS
+        assert first.status_reason == "error: first failure"
+
+        _mock_failing_indexer(monkeypatch, "error: second fresh failure")
+        index_repo(repo_dir, slug=slug, root=data_root)  # no CLI flag
+
+        second = registry.get(slug)
+        assert second is not None
+        assert second.status == DEGRADED_STATUS
+        assert second.status_origin == ORIGIN_FALLBACK
+        assert second.status_reason == "error: second fresh failure"
+    finally:
+        registry.close()
+
+
+def test_signature_match_preempts_the_degrade_branch_on_an_opted_in_repo(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-03 adjacency: a signature-matched indexer failure takes the
+    permanent search-only path inside the indexer-step handler, before the
+    generic degrade branch is ever reachable — an opted-in repo ends
+    search_only=True / origin 'signature', NOT degraded."""
+    from jarvis.registry import ORIGIN_SIGNATURE, SEARCH_ONLY_STATUS
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _mock_failing_indexer(
+        monkeypatch, "error: No SCIP shards found. scip-java cannot index this"
+    )
+    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == SEARCH_ONLY_STATUS
+        assert entry.search_only is True
+        assert entry.status_origin == ORIGIN_SIGNATURE
+    finally:
+        registry.close()
