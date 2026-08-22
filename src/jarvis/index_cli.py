@@ -913,6 +913,13 @@ def index_repo(
         registry.upsert(slug, str(repo_path), language, None, "indexing",
                         scheme_override=scheme, semantic_include=semantic_include,
                         language_override=language_override, search_only=True)
+        # Persist the explicit CLI flag the moment the row exists: the two
+        # branches diverge before their first upsert, so both need the
+        # write. Only the CLI value (never the resolved bool) is persisted
+        # — see _resolve_fallback. Pre-pipeline failures intentionally
+        # leave it unpersisted, matching --scheme/--language semantics.
+        if fallback_search_only is not None:
+            registry.set_fallback_enabled(slug, fallback_search_only)
         try:
             semantic_ok, tracked = _publish_search_only(repo_path, slug, root, semantic_include)
             registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
@@ -938,6 +945,10 @@ def index_repo(
 
     registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme,
                     semantic_include=semantic_include, language_override=language_override)
+    # Same explicit-only persistence as the search-only branch above — the
+    # branches diverge before their first upsert, so both sites are needed.
+    if fallback_search_only is not None:
+        registry.set_fallback_enabled(slug, fallback_search_only)
 
     try:
         with tempfile.TemporaryDirectory(prefix="jarvis-index-") as scratch:
