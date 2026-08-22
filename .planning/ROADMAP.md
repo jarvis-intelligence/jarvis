@@ -85,7 +85,7 @@ Plans:
   4. Pre-build failures (missing binary, version-check failure, bash-shim path) stay hard failures — non-zero exit, nothing published — even with fallback enabled
   5. `jarvis watch` on a persistently-failing degraded repo skips the full-build retry for an unchanged source sha (no treadmill), and a source change re-triggers the full build
 
-**Plans**: 1/3 plans executed
+**Plans**: 2/3 plans executed
 
 Plans:
 **Wave 1**
@@ -94,7 +94,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 03-02-PLAN.md — Reporting surfaces: capabilities.navigation.reason degraded branch (the one server.py gap), list ◐ + 6th-field reason, status/last_index_run/_error_payload pins (FALL-01 visibility)
+- [x] 03-02-PLAN.md — Reporting surfaces: capabilities.navigation.reason degraded branch (the one server.py gap), list ◐ + 6th-field reason, status/last_index_run/_error_payload pins (FALL-01 visibility)
 
 **Wave 3** *(blocked on Waves 1-2 completion)*
 
@@ -137,7 +137,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 |-------|----------------|--------|-----------|
 | 1. Registry Foundation & Degradation Reporting | 3/3 | Complete    | 2026-08-22 |
 | 2. scip-swift Toolchain Update | 3/3 | Complete    | 2026-08-22 |
-| 3. Opt-In Self-Healing Fallback | 1/3 | In Progress|  |
+| 3. Opt-In Self-Healing Fallback | 2/3 | In Progress|  |
 | 4. Swift Failure Signatures | 0/TBD | Not started | - |
 | 5. Semantic Install Onboarding | 0/TBD | Not started | - |
 

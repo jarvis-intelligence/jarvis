@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 3
 current_phase_name: Opt-In Self-Healing Fallback
 status: executing
-stopped_at: Completed 03-01-PLAN.md (fallback core pipeline)
-last_updated: "2026-08-22T17:32:02.007Z"
+stopped_at: Completed 03-02-PLAN.md (reporting surfaces)
+last_updated: "2026-08-22T17:38:24.296Z"
 last_activity: 2026-08-23
 last_activity_desc: Phase 3 execution started
-state_head: 0738513c6ce9c15ac08b7a2d63760c52d075706e
+state_head: b407cd65b06f3c809d96c2fb833a60974fcd74ea
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 8
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-22)
 ## Current Position
 
 Phase: 3 (Opt-In Self-Healing Fallback) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-08-23 — Phase 3 execution started
 
@@ -75,6 +75,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 | Phase 02 P02 | 7min | 3 tasks | 4 files |
 | Phase 02 P03 | 9min | 2 tasks | 4 files |
 | Phase 03 P01 | 23min | 3 tasks | 6 files |
+| Phase 03 P02 | 5min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -109,6 +110,8 @@ Recent decisions affecting current work:
 - [Phase 3]: [Phase 03]: 03-01: degraded publish goes through the existing _publish_search_only (one path, corrected zoekt-before-retire order) and writes a status=degraded/origin=fallback terminal row with reason + full stderr, search_only stays False so every rerun retries the full build
 - [Phase 3]: [Phase 03]: 03-01: only the explicit CLI fallback value is persisted (set_fallback_enabled after both transitional indexing upserts); the resolved bool is never written back — resolved-bool persistence would collapse NULL to 0 and lock a later env-on out (Pitfall 1)
 - [Phase 3]: [Phase 03]: 03-01: MissingBinaryError(IndexingError) at _run's FileNotFoundError site + bash-shim token re-check form the degrade gate's exclusion ladder; pre-pipeline gates stay hard failures structurally (FALL-04)
+- [Phase 3]: 03-02: server.py's only behavioral change is the _capability_fields degraded elif — navigation.reason = persisted status_reason; last_index_run/_error_payload already carried degraded/fallback verbatim (pinned, zero reshaping)
+- [Phase 3]: 03-02: degraded rows render ◐ in jarvis list with the failure cause as a 6th TSV field (failed-row reason contract); search-only rows keep exactly 5 fields
 
 ### Pending Todos
 
@@ -128,8 +131,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-22T17:31:56.276Z
-Stopped at: Completed 03-01-PLAN.md (fallback core pipeline)
+Last session: 2026-08-22T17:38:16.811Z
+Stopped at: Completed 03-02-PLAN.md (reporting surfaces)
 Resume file: None
 
 ### Planning Overrides
