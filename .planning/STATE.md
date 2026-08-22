@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 3
 current_phase_name: Opt-In Self-Healing Fallback
-status: planning
+status: executing
 stopped_at: Phase 2 complete, ready to plan Phase 3
-last_updated: "2026-08-22T16:04:17.304Z"
+last_updated: "2026-08-22T17:03:38.406Z"
 last_activity: 2026-08-22
 last_activity_desc: Phase 2 complete, transitioned to Phase 3
-state_head: 10bc758654631d1426042c7d494eb8718da1c4a1
+state_head: 91545ddb1df98fa002f5660d11c847cb1e5c9bbe
 progress:
   total_phases: 5
   completed_phases: 2
-  total_plans: 6
+  total_plans: 9
   completed_plans: 6
 milestone_name: Indexing Robustness & scip-swift Update
 ---
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-22)
 
 ## Current Position
 
-Phase: 3 — Opt-In Self-Healing Fallback
+Phase: 3 (Opt-In Self-Healing Fallback) — READY TO EXECUTE
 Plan: Not started
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-08-22 — Phase 2 complete, transitioned to Phase 3
 
 Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
@@ -127,3 +127,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 Last session: 2026-08-21T18:50:24.407Z
 Stopped at: Phase 2 complete, ready to plan Phase 3
 Resume file: None
+
+### Planning Overrides
+
+- [Phase 3]: decision-coverage-plan gate returned could-not-parse (smart-discuss CONTEXT.md has area-formatted decisions, no D-NN ids). Substantive coverage verified by gsd-plan-checker dedicated CONTEXT-translation check (VERIFICATION PASSED). Accepted as format gap, not a coverage gap.

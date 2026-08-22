@@ -14,7 +14,7 @@ Jarvis today fails loudly and uselessly: when a SCIP indexer dies mid-build (Swi
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Registry Foundation & Degradation Reporting** - Additive per-repo state plus cause/origin/recovery reporting in `jarvis status`, `getIndexStatus`, and nav-tool error payloads (completed 2026-08-22)
-- [ ] **Phase 2: scip-swift Toolchain Update** - Pin bump to a fixed release cut from main; setup.sh asset handling, out-of-repo cache dir, watch loop prevention
+- [x] **Phase 2: scip-swift Toolchain Update** - Pin bump to a fixed release cut from main; setup.sh asset handling, out-of-repo cache dir, watch loop prevention (completed 2026-08-22)
 - [ ] **Phase 3: Opt-In Self-Healing Fallback** - Post-build-start indexer failures degrade to search-only publish; tri-state opt-in (CLI > persisted > env > off); full build retried every reindex; watch anti-treadmill
 - [ ] **Phase 4: Swift Failure Signatures** - Verified scip-swift failure signatures captured from the pinned binary join the automatic `_SEARCH_ONLY_SIGNATURES` fallback
 - [ ] **Phase 5: Semantic Install Onboarding** - TTY-gated y/N install offer for the `semantic` extra with per-repo decline memory; non-TTY paths stay silent
@@ -85,7 +85,20 @@ Plans:
   4. Pre-build failures (missing binary, version-check failure, bash-shim path) stay hard failures — non-zero exit, nothing published — even with fallback enabled
   5. `jarvis watch` on a persistently-failing degraded repo skips the full-build retry for an unchanged source sha (no treadmill), and a source change re-triggers the full build
 
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 03-01-PLAN.md — Tracer: registry/config carriers (DEGRADED_STATUS, ORIGIN_FALLBACK, fallback_enabled column, set_fallback_enabled, upsert status_stderr, recovery_for), _resolve_fallback + env accessor, degrade gate in index_repo's main-pipeline except, zoekt-before-retire reorder, index-parser tri-state flag, precedence/persistence/self-heal pins (FALL-01..04)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 03-02-PLAN.md — Reporting surfaces: capabilities.navigation.reason degraded branch (the one server.py gap), list ◐ + 6th-field reason, status/last_index_run/_error_payload pins (FALL-01 visibility)
+
+**Wave 3** *(blocked on Waves 1-2 completion)*
+
+- [ ] 03-03-PLAN.md — Watch anti-treadmill: pure _watch_should_retry_full_build sha-skip, _cmd_watch consult + flag pass-through, watch-parser tri-state flag (FALL-05, FALL-02)
 
 **Notes:** end-to-end verification against Swift assumes Phase 2's pinned binary, but this phase hard-depends only on Phase 1 — an upstream release slip must not block the milestone's core. The degraded publish uses corrected ordering (search published before SCIP artifacts are retired) so a Zoekt failure can't strip an existing index.
 
@@ -123,8 +136,8 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Registry Foundation & Degradation Reporting | 3/3 | Complete    | 2026-08-22 |
-| 2. scip-swift Toolchain Update | 3/3 | In Progress|  |
-| 3. Opt-In Self-Healing Fallback | 0/TBD | Not started | - |
+| 2. scip-swift Toolchain Update | 3/3 | Complete    | 2026-08-22 |
+| 3. Opt-In Self-Healing Fallback | 0/3 | Planned | - |
 | 4. Swift Failure Signatures | 0/TBD | Not started | - |
 | 5. Semantic Install Onboarding | 0/TBD | Not started | - |
 
