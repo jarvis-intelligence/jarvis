@@ -13,7 +13,7 @@ Requirements for milestone v1.0. Each maps to roadmap phases.
 - [x] **FALL-02**: Fallback is opt-in — persisted per-repo tri-state CLI flag + global `JARVIS_FALLBACK_SEARCH_ONLY` env var; precedence CLI > persisted > env > off
 - [x] **FALL-03**: Degraded state self-heals — every reindex/watch retries the full build first, degrading again only on fresh failure
 - [x] **FALL-04**: Pre-build failures (missing binary, version check, bash-shim) stay hard failures even with fallback enabled
-- [ ] **FALL-05**: Watch doesn't treadmill a persistently-failing degraded repo (sha-keyed retry skip)
+- [x] **FALL-05**: Watch doesn't treadmill a persistently-failing degraded repo (sha-keyed retry skip)
 
 ### Status & Reporting
 
@@ -65,7 +65,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FALL-02 | Phase 3 | Complete |
 | FALL-03 | Phase 3 | Complete |
 | FALL-04 | Phase 3 | Complete |
-| FALL-05 | Phase 3 | Pending |
+| FALL-05 | Phase 3 | Complete |
 | STAT-01 | Phase 1 | Complete |
 | STAT-02 | Phase 1 | Complete |
 | STAT-03 | Phase 1 | Complete |

@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 3
 current_phase_name: Opt-In Self-Healing Fallback
-status: executing
-stopped_at: Completed 03-02-PLAN.md (reporting surfaces)
-last_updated: "2026-08-22T17:38:24.296Z"
+status: verifying
+stopped_at: Completed 03-03-PLAN.md (watch anti-treadmill) — Phase 3 complete
+last_updated: "2026-08-22T17:49:34.340Z"
 last_activity: 2026-08-23
 last_activity_desc: Phase 3 execution started
-state_head: b407cd65b06f3c809d96c2fb833a60974fcd74ea
+state_head: e7a2971b908cca4659d8e6ad7dd72def32dfa09a
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 9
-  completed_plans: 8
+  completed_plans: 9
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-22)
 
 Phase: 3 (Opt-In Self-Healing Fallback) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-23 — Phase 3 execution started
 
 Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
@@ -76,6 +76,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 | Phase 02 P03 | 9min | 2 tasks | 4 files |
 | Phase 03 P01 | 23min | 3 tasks | 6 files |
 | Phase 03 P02 | 5min | 2 tasks | 5 files |
+| Phase 03 P03 | 9min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,8 @@ Recent decisions affecting current work:
 - [Phase 3]: [Phase 03]: 03-01: MissingBinaryError(IndexingError) at _run's FileNotFoundError site + bash-shim token re-check form the degrade gate's exclusion ladder; pre-pipeline gates stay hard failures structurally (FALL-04)
 - [Phase 3]: 03-02: server.py's only behavioral change is the _capability_fields degraded elif — navigation.reason = persisted status_reason; last_index_run/_error_payload already carried degraded/fallback verbatim (pinned, zero reshaping)
 - [Phase 3]: 03-02: degraded rows render ◐ in jarvis list with the failure cause as a 6th TSV field (failed-row reason contract); search-only rows keep exactly 5 fields
+- [Phase 3]: 03-03: watch sha-keyed skip — pure predicate (skip only degraded + unchanged non-NULL sha) + fail-open read-only consult, consulted ONLY by _cmd_watch; index_repo never skips (FALL-03), and watch forwards the tri-state fallback flag like any reindex driver
+- [Phase 3]: 03-03: watch tests drive the real _reindex closure via fake watchdog sys.modules entries + scripted time.sleep — no watchdog extra needed (CI installs only semantic); KeyboardInterrupt (BaseException) breaks the loop since _reindex catches Exception only
 
 ### Pending Todos
 
@@ -131,8 +134,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-22T17:38:16.811Z
-Stopped at: Completed 03-02-PLAN.md (reporting surfaces)
+Last session: 2026-08-22T17:49:34.220Z
+Stopped at: Completed 03-03-PLAN.md (watch anti-treadmill) — Phase 3 complete
 Resume file: None
 
 ### Planning Overrides

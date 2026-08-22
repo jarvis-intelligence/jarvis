@@ -85,7 +85,7 @@ Plans:
   4. Pre-build failures (missing binary, version-check failure, bash-shim path) stay hard failures — non-zero exit, nothing published — even with fallback enabled
   5. `jarvis watch` on a persistently-failing degraded repo skips the full-build retry for an unchanged source sha (no treadmill), and a source change re-triggers the full build
 
-**Plans**: 2/3 plans executed
+**Plans**: 3/3 plans executed
 
 Plans:
 **Wave 1**
@@ -98,7 +98,7 @@ Plans:
 
 **Wave 3** *(blocked on Waves 1-2 completion)*
 
-- [ ] 03-03-PLAN.md — Watch anti-treadmill: pure _watch_should_retry_full_build sha-skip, _cmd_watch consult + flag pass-through, watch-parser tri-state flag (FALL-05, FALL-02)
+- [x] 03-03-PLAN.md — Watch anti-treadmill: pure _watch_should_retry_full_build sha-skip, _cmd_watch consult + flag pass-through, watch-parser tri-state flag (FALL-05, FALL-02)
 
 **Notes:** end-to-end verification against Swift assumes Phase 2's pinned binary, but this phase hard-depends only on Phase 1 — an upstream release slip must not block the milestone's core. The degraded publish uses corrected ordering (search published before SCIP artifacts are retired) so a Zoekt failure can't strip an existing index.
 
@@ -137,7 +137,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 |-------|----------------|--------|-----------|
 | 1. Registry Foundation & Degradation Reporting | 3/3 | Complete    | 2026-08-22 |
 | 2. scip-swift Toolchain Update | 3/3 | Complete    | 2026-08-22 |
-| 3. Opt-In Self-Healing Fallback | 2/3 | In Progress|  |
+| 3. Opt-In Self-Healing Fallback | 3/3 | In Progress|  |
 | 4. Swift Failure Signatures | 0/TBD | Not started | - |
 | 5. Semantic Install Onboarding | 0/TBD | Not started | - |
 
