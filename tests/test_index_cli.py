@@ -2779,3 +2779,269 @@ def test_duplicate_slug_rejection_writes_no_failure_row(tmp_path: Path, monkeypa
         assert registry.get("second") is None  # no phantom row for the rejected request
     finally:
         registry.close()
+
+
+# --- Phase 3: opt-in self-healing fallback (FALL-01/FALL-04) ---------------
+
+def _degrade_mock_run(failures: dict[str, Exception]):
+    """A `_run` stand-in keyed on step name: steps named in `failures`
+    raise; everything else succeeds (house pattern of the signature
+    fallback tests)."""
+    def _run(cmd, *, cwd, step, env=None):
+        for fail_step, exc in failures.items():
+            if step == fail_step:
+                raise exc
+        return _fake_completed_process(cmd)
+
+    return _run
+
+
+def test_degraded_publish_on_post_build_start_failure(tmp_path: Path, monkeypatch):
+    """FALL-01 (the tracer): with fallback resolved on, a post-build-start
+    indexer failure publishes search-only instead of leaving nothing --
+    exit-0 return, terminal row degraded/fallback with one-line reason and
+    full stderr, search_only False (self-heal keeps retrying), commit_sha
+    stamped with the attempt sha."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    full_text = "error: simulated post-build-start failure\nsome stderr detail\nmore detail"
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError(full_text)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
+
+    head_sha = subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == DEGRADED_STATUS
+        assert entry.status_origin == ORIGIN_FALLBACK
+        assert entry.status_reason == "error: simulated post-build-start failure"
+        assert entry.status_stderr == full_text
+        assert entry.search_only is False, "degraded must keep retrying the full build"
+        assert entry.commit_sha == head_sha
+    finally:
+        registry.close()
+
+
+def test_degraded_run_prints_exactly_one_warning_line(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """FALL-01 reporting contract: the degraded run is a success (returns
+    the slug, no raise) and says so once on stderr -- the reason rides the
+    single 'degraded to search-only' warning line."""
+    from jarvis.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError("error: simulated post-build-start failure")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
+    assert slug  # success path, no raise
+
+    err = capsys.readouterr().err
+    lines = [line for line in err.splitlines() if "degraded to search-only" in line]
+    assert len(lines) == 1
+    assert "error: simulated post-build-start failure" in lines[0]
+
+
+def test_missing_binary_failure_stays_hard_with_fallback_enabled(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-04: a missing binary is a setup.sh problem -- degrading on it
+    would launder 'run setup.sh' into a published index. Even with
+    fallback on, the run raises and the row reads failed/failed_hard."""
+    from jarvis.index_cli import IndexingError, MissingBinaryError, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr(
+        "jarvis.index_cli._run",
+        _degrade_mock_run({"scip-python index": MissingBinaryError(
+            "scip-python index failed: scip-python not found on PATH — run setup.sh"
+        )}),
+    )
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    with pytest.raises(IndexingError, match="not found on PATH"):
+        index_repo(repo_dir, root=data_root, fallback_search_only=True)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(config.repo_slug(repo_dir.name))
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.search_only is False
+    finally:
+        registry.close()
+
+
+def test_run_translates_file_not_found_into_missing_binary_error(tmp_path: Path):
+    """FALL-04 exclusion input: the real `_run` (not a mock) turns
+    FileNotFoundError into the MissingBinaryError subclass, not a plain
+    IndexingError -- the degrade gate keys on the type."""
+    from jarvis.index_cli import MissingBinaryError, _run
+
+    with pytest.raises(MissingBinaryError, match="not found on PATH") as excinfo:
+        _run(["definitely-not-a-real-binary-xyz"], cwd=tmp_path, step="step-x")
+    assert type(excinfo.value) is MissingBinaryError
+
+
+def test_bash_shim_failure_stays_hard_with_fallback_enabled(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-04: a bash-shim failure is environment misconfiguration (one
+    `brew install bash` fixes it) -- both tokens present in the failure
+    text keeps it a loud hard failure even with fallback on."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    shim_text = (
+        "error: line 8: ${LAUNCHER_ARGS[@]}: unbound variable\n"
+        "scip-java wrapper needs bash >= 4.4"
+    )
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr(
+        "jarvis.index_cli._run",
+        _degrade_mock_run({"scip-python index": IndexingError(shim_text)}),
+    )
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    with pytest.raises(IndexingError, match="unbound variable"):
+        index_repo(repo_dir, root=data_root, fallback_search_only=True)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(config.repo_slug(repo_dir.name))
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+    finally:
+        registry.close()
+
+
+def test_pre_pipeline_version_gate_stays_hard_with_fallback_enabled(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-04: pre-pipeline gates (version floors) raise inside the
+    pre-pipeline wrap and never reach the degrade branch -- fallback on
+    must not soften a too-old scip binary."""
+    from jarvis.index_cli import index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _boom():
+        raise RuntimeError("scip v0.7.0 is below the required floor v0.9.0")
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", _boom)
+
+    with pytest.raises(RuntimeError, match="below the required floor"):
+        index_repo(repo_dir, root=data_root, fallback_search_only=True)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(config.repo_slug(repo_dir.name))
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+    finally:
+        registry.close()
+
+
+def test_failed_degraded_publish_preserves_the_previous_current_pointer(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-01 ordering: a degraded publish whose zoekt step fails must
+    leave the previously-published current pointer intact and the row
+    failed/failed_hard -- search is published before SCIP artifacts are
+    retired, so the fallback promise failing never destroys a good index."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    # Phase 1: a fully mocked-successful run publishes a real current pointer.
+    def _successful_run(cmd, *, cwd, step, env=None):
+        if step == "scip expt-convert":
+            # cmd: [scip, expt-convert, --output, <db>, <scip path>]
+            _make_index_db(Path(cmd[3]), chunks=1, mentions=14)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _successful_run)
+    monkeypatch.setattr(
+        "jarvis.index_cli.populate_graph_for_repo", lambda *a, **k: None
+    )
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root)
+    pointer_file = config.index_dir(slug, data_root) / "current"
+    assert pointer_file.exists(), "phase 1 must publish a current pointer"
+
+    # Phase 2: the indexer step fails AND the fallback publish's zoekt step
+    # fails -- the old pointer must survive the failed degraded publish.
+    monkeypatch.setattr(
+        "jarvis.index_cli._run",
+        _degrade_mock_run({
+            "scip-python index": IndexingError("error: simulated indexer failure"),
+            "zoekt-git-index": IndexingError("zoekt-git-index failed:\nboom"),
+        }),
+    )
+
+    with pytest.raises(IndexingError, match="simulated indexer failure"):
+        index_repo(repo_dir, slug=slug, root=data_root, fallback_search_only=True)
+
+    assert pointer_file.exists(), "a failing zoekt publish must not retire the old index"
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+    finally:
+        registry.close()
