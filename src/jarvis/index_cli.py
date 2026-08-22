@@ -1113,21 +1113,6 @@ def index_repo(
             try:
                 semantic_ok, tracked = _publish_search_only(
                     repo_path, slug, root, semantic_include)
-                registry.upsert(slug, str(repo_path), language, sha, DEGRADED_STATUS,
-                                scheme_override=scheme, semantic_include=semantic_include,
-                                language_override=language_override,
-                                status_origin=ORIGIN_FALLBACK, status_reason=reason,
-                                status_stderr=text)
-                registry.mark_tracked_files(slug, tracked)
-                if semantic_ok:
-                    registry.mark_semantic_indexed(slug)
-                print(
-                    f"warning: {slug} degraded to search-only — {reason}. "
-                    "Navigation tools are unavailable; the next reindex retries "
-                    "the full build.",
-                    file=sys.stderr,
-                )
-                return slug
             except Exception:
                 # The degraded publish itself failed (e.g. a zoekt error):
                 # nothing was published, so the fallback promise is void --
@@ -1137,6 +1122,44 @@ def index_repo(
                     "published; recording the original failure.",
                     file=sys.stderr,
                 )
+            else:
+                try:
+                    registry.upsert(slug, str(repo_path), language, sha, DEGRADED_STATUS,
+                                    scheme_override=scheme, semantic_include=semantic_include,
+                                    language_override=language_override,
+                                    status_origin=ORIGIN_FALLBACK, status_reason=reason,
+                                    status_stderr=text)
+                    registry.mark_tracked_files(slug, tracked)
+                    if semantic_ok:
+                        registry.mark_semantic_indexed(slug)
+                except Exception as bkexc:
+                    # Search-only IS on disk by this point (zoekt shards
+                    # written, any retired SCIP index gone), so what failed
+                    # is the status write, not the publish: claiming "nothing
+                    # published" would be false, and exiting 0 would strand
+                    # the row at 'indexing' while the run looks fine. Report
+                    # what landed, record the bookkeeping failure -- the
+                    # run's proximate cause -- and fail loudly. The
+                    # search-only index survives either way.
+                    bk_text = str(bkexc)
+                    bk_reason = next((line for line in bk_text.splitlines() if line.strip()),
+                                     bkexc.__class__.__name__)
+                    print(
+                        f"warning: {slug} degraded to search-only — {reason} "
+                        "(search-only IS published), but recording the "
+                        f"degraded status failed — {bk_reason}.",
+                        file=sys.stderr,
+                    )
+                    registry.record_failure(slug, str(repo_path), language,
+                                            ORIGIN_FAILED_HARD, bk_reason, bk_text)
+                    raise IndexingError(str(bkexc)) from bkexc
+                print(
+                    f"warning: {slug} degraded to search-only — {reason}. "
+                    "Navigation tools are unavailable; the next reindex retries "
+                    "the full build.",
+                    file=sys.stderr,
+                )
+                return slug
         registry.record_failure(slug, str(repo_path), language, ORIGIN_FAILED_HARD,
                                 reason, text)
         raise IndexingError(str(exc)) from exc

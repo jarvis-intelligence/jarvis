@@ -3199,6 +3199,66 @@ def test_post_publish_registry_failure_stays_hard_not_degraded(
         registry.close()
 
 
+def test_degraded_row_write_failure_reports_what_landed(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """WR-01 regression: when the degrade publish SUCCEEDS but writing the
+    degraded row fails (locked db), the run must not claim "nothing
+    published" -- zoekt IS live and the old SCIP index IS retired. The
+    message says what landed and what failed; the row records the
+    bookkeeping failure (the run's proximate cause) as failed/failed_hard,
+    and the run raises instead of exiting 0 with the row stranded at
+    'indexing'."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError("error: simulated post-build-start failure")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    # The search-only publish succeeds; only the degraded row write hits the
+    # locked db (the same race as the CR-01 test, one step later).
+    real_upsert = Registry.upsert
+
+    def _locked_on_degraded_upsert(self, slug, path, language, commit_sha, status, **kw):
+        if status == DEGRADED_STATUS:
+            raise sqlite3.OperationalError("database is locked")
+        return real_upsert(self, slug, path, language, commit_sha, status, **kw)
+
+    monkeypatch.setattr(Registry, "upsert", _locked_on_degraded_upsert)
+
+    with pytest.raises(IndexingError, match="database is locked"):
+        index_repo(repo_dir, root=data_root, fallback_search_only=True)
+
+    err = capsys.readouterr().err
+    assert "nothing published" not in err, (
+        "search-only IS published at this point -- the claim would be false"
+    )
+    assert "degraded to search-only" in err
+    assert "error: simulated post-build-start failure" in err
+    assert "database is locked" in err
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(config.repo_slug(repo_dir.name))
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.status_reason == "database is locked"
+    finally:
+        registry.close()
+
+
 # --- Phase 3: precedence, persistence, self-heal (FALL-02/FALL-03) ----------
 
 def _mock_healthy_full_run(monkeypatch):
