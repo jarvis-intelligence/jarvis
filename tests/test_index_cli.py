@@ -2601,6 +2601,93 @@ def test_cmd_list_marks_repo_health_at_a_glance(tmp_path: Path, monkeypatch, cap
     assert healthy[3] == "abc123"
     assert len(healthy) == 5
 
+def test_cmd_list_renders_degraded_rows_with_glyph_and_reason(tmp_path: Path, monkeypatch, capsys):
+    """FALL-01: a degraded repo renders ◐ (search still answers) with the
+    failure cause as a 6th TSV field — the same reason-first contract as
+    failed rows, on a row that still self-heals on the next reindex."""
+    import argparse
+
+    from jarvis.index_cli import _cmd_list
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
+
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert("crashed", "/repos/crashed", "python", "abc123",
+                        DEGRADED_STATUS, status_origin=ORIGIN_FALLBACK,
+                        status_reason="scip-python crashed mid-build")
+    finally:
+        registry.close()
+
+    assert _cmd_list(argparse.Namespace()) == 0
+    rows = {line.split("\t")[0]: line.split("\t")
+            for line in capsys.readouterr().out.splitlines()}
+
+    degraded = rows["crashed"]
+    assert degraded[1] == "◐ degraded"
+    assert degraded[5] == "scip-python crashed mid-build"  # 6th field: the cause
+    assert len(degraded) == 6
+
+
+def test_cmd_status_explains_a_degraded_repo(tmp_path: Path, monkeypatch, capsys):
+    """Pin: `jarvis status` on a degraded row prints the fallback origin,
+    the persisted cause, and the self-heal recovery verb — origin-driven
+    since Phase 1; the degraded origin needs no status-command change."""
+    import argparse
+
+    from jarvis.index_cli import _cmd_status
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
+
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert("crashed", "/repos/crashed", "python", "abc123",
+                        DEGRADED_STATUS, status_origin=ORIGIN_FALLBACK,
+                        status_reason="scip-python crashed mid-build")
+    finally:
+        registry.close()
+
+    rc = _cmd_status(argparse.Namespace(slug="crashed"))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "origin: fallback" in out
+    assert "cause: scip-python crashed mid-build" in out
+    recovery = next(line for line in out.splitlines() if line.startswith("recovery:"))
+    assert "jarvis reindex" in recovery
+
+
+def test_cmd_list_keeps_search_only_rows_five_field_beside_degraded(tmp_path: Path, monkeypatch, capsys):
+    """The degraded branch adds a 6th field only for degraded rows — a
+    search-only row in the same listing keeps its 5-field shape (D-08)."""
+    import argparse
+
+    from jarvis.index_cli import _cmd_list
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, SEARCH_ONLY_STATUS, Registry
+
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert("crashed", "/repos/crashed", "python", "abc123",
+                        DEGRADED_STATUS, status_origin=ORIGIN_FALLBACK,
+                        status_reason="scip-python crashed mid-build")
+        registry.upsert("legacy", "/repos/legacy", "unknown", None,
+                        SEARCH_ONLY_STATUS, search_only=True)
+    finally:
+        registry.close()
+
+    assert _cmd_list(argparse.Namespace()) == 0
+    rows = {line.split("\t")[0]: line.split("\t")
+            for line in capsys.readouterr().out.splitlines()}
+
+    assert rows["crashed"][1] == "◐ degraded"
+    assert len(rows["crashed"]) == 6
+    assert rows["legacy"][1] == "◐ search-only"
+    assert len(rows["legacy"]) == 5  # no 6th-field regression
+
 
 def test_cmd_status_prints_stderr_tail_and_pointer(tmp_path: Path, monkeypatch, capsys):
     """D-02 display side: only the last ~20 lines are printed plus a
