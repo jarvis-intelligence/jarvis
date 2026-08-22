@@ -17,7 +17,7 @@ from jarvis import config
 from jarvis.graph import GraphStore, blast_radius
 from jarvis.index_reader import IndexNotFoundError
 from jarvis.query import FreshnessSnapshot, QueryService
-from jarvis.registry import SEARCH_ONLY_STATUS, RegisteredRepo, origin_of, recovery_for
+from jarvis.registry import DEGRADED_STATUS, SEARCH_ONLY_STATUS, RegisteredRepo, origin_of, recovery_for
 from jarvis.search import ZoektLifecycle, search_zoekt, zoekt_repo_documents
 from jarvis.symbols import AmbiguousSymbolError
 
@@ -183,6 +183,11 @@ def _capability_fields(repo: str, indexed: bool, freshness: FreshnessSnapshot | 
         else:
             if entry is not None and entry.search_only:
                 nav_reason = entry.status_reason or "indexed search-only — no SCIP index"
+            elif entry is not None and entry.status == DEGRADED_STATUS:
+                # FALL-01: name the actual failure cause so a degraded
+                # publish is visible at the MCP surface; recovery_for's
+                # fallback branch supplies the self-heal verb below.
+                nav_reason = entry.status_reason or "indexer failure — degraded to search-only"
             elif entry is None:
                 nav_reason = "no published index"
             else:
