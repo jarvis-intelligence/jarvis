@@ -9,10 +9,10 @@ Requirements for milestone v1.0. Each maps to roadmap phases.
 
 ### Fallback & Degradation
 
-- [ ] **FALL-01**: With fallback enabled, a post-build-start SCIP indexer failure publishes a search-only index (Zoekt + semantic queryable) instead of leaving the repo with nothing
-- [ ] **FALL-02**: Fallback is opt-in — persisted per-repo tri-state CLI flag + global `JARVIS_FALLBACK_SEARCH_ONLY` env var; precedence CLI > persisted > env > off
-- [ ] **FALL-03**: Degraded state self-heals — every reindex/watch retries the full build first, degrading again only on fresh failure
-- [ ] **FALL-04**: Pre-build failures (missing binary, version check, bash-shim) stay hard failures even with fallback enabled
+- [x] **FALL-01**: With fallback enabled, a post-build-start SCIP indexer failure publishes a search-only index (Zoekt + semantic queryable) instead of leaving the repo with nothing
+- [x] **FALL-02**: Fallback is opt-in — persisted per-repo tri-state CLI flag + global `JARVIS_FALLBACK_SEARCH_ONLY` env var; precedence CLI > persisted > env > off
+- [x] **FALL-03**: Degraded state self-heals — every reindex/watch retries the full build first, degrading again only on fresh failure
+- [x] **FALL-04**: Pre-build failures (missing binary, version check, bash-shim) stay hard failures even with fallback enabled
 - [ ] **FALL-05**: Watch doesn't treadmill a persistently-failing degraded repo (sha-keyed retry skip)
 
 ### Status & Reporting
@@ -61,10 +61,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FALL-01 | Phase 3 | Pending |
-| FALL-02 | Phase 3 | Pending |
-| FALL-03 | Phase 3 | Pending |
-| FALL-04 | Phase 3 | Pending |
+| FALL-01 | Phase 3 | Complete |
+| FALL-02 | Phase 3 | Complete |
+| FALL-03 | Phase 3 | Complete |
+| FALL-04 | Phase 3 | Complete |
 | FALL-05 | Phase 3 | Pending |
 | STAT-01 | Phase 1 | Complete |
 | STAT-02 | Phase 1 | Complete |

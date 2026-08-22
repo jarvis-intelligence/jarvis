@@ -85,12 +85,12 @@ Plans:
   4. Pre-build failures (missing binary, version-check failure, bash-shim path) stay hard failures — non-zero exit, nothing published — even with fallback enabled
   5. `jarvis watch` on a persistently-failing degraded repo skips the full-build retry for an unchanged source sha (no treadmill), and a source change re-triggers the full build
 
-**Plans**: 3 plans
+**Plans**: 1/3 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — Tracer: registry/config carriers (DEGRADED_STATUS, ORIGIN_FALLBACK, fallback_enabled column, set_fallback_enabled, upsert status_stderr, recovery_for), _resolve_fallback + env accessor, degrade gate in index_repo's main-pipeline except, zoekt-before-retire reorder, index-parser tri-state flag, precedence/persistence/self-heal pins (FALL-01..04)
+- [x] 03-01-PLAN.md — Tracer: registry/config carriers (DEGRADED_STATUS, ORIGIN_FALLBACK, fallback_enabled column, set_fallback_enabled, upsert status_stderr, recovery_for), _resolve_fallback + env accessor, degrade gate in index_repo's main-pipeline except, zoekt-before-retire reorder, index-parser tri-state flag, precedence/persistence/self-heal pins (FALL-01..04)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -137,7 +137,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 |-------|----------------|--------|-----------|
 | 1. Registry Foundation & Degradation Reporting | 3/3 | Complete    | 2026-08-22 |
 | 2. scip-swift Toolchain Update | 3/3 | Complete    | 2026-08-22 |
-| 3. Opt-In Self-Healing Fallback | 0/3 | Planned | - |
+| 3. Opt-In Self-Healing Fallback | 1/3 | In Progress|  |
 | 4. Swift Failure Signatures | 0/TBD | Not started | - |
 | 5. Semantic Install Onboarding | 0/TBD | Not started | - |
 
