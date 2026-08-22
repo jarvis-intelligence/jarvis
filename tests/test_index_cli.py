@@ -3374,3 +3374,54 @@ def test_signature_match_preempts_the_degrade_branch_on_an_opted_in_repo(
         assert entry.status_origin == ORIGIN_SIGNATURE
     finally:
         registry.close()
+
+
+# --- Phase 3: watch anti-treadmill (FALL-05) --------------------------------
+
+
+def _watch_entry(**overrides):
+    """A RegisteredRepo for the watch-skip predicate tests; keyword
+    overrides pick the status/sha under test (the `_entry` pattern from
+    tests/test_registry.py's recovery-mapping tests)."""
+    from datetime import UTC, datetime
+
+    from jarvis.registry import RegisteredRepo
+
+    fields = dict(
+        slug="mine", path="/repos/mine", language="python", commit_sha="abc123",
+        last_indexed=datetime.now(UTC), status="indexed",
+    )
+    fields.update(overrides)
+    return RegisteredRepo(**fields)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param(None, True, id="no-row"),
+        pytest.param({"status": "failed", "commit_sha": "abc123"}, True,
+                     id="failed-even-with-matching-sha"),
+        pytest.param({"status": "indexed", "commit_sha": "abc123"}, True,
+                     id="indexed"),
+        pytest.param({"status": "search-only", "commit_sha": "abc123"}, True,
+                     id="search-only"),
+        pytest.param({"status": "degraded", "commit_sha": None}, True,
+                     id="degraded-null-sha"),
+        pytest.param({"status": "degraded", "commit_sha": "def456"}, True,
+                     id="degraded-changed-sha"),
+        pytest.param({"status": "degraded", "commit_sha": "abc123"}, False,
+                     id="degraded-same-sha"),
+    ],
+)
+def test_watch_should_retry_full_build_matrix(overrides, expected):
+    """FALL-05 skip predicate: the ONLY row that declines the retry is a
+    degraded row whose persisted commit_sha equals the current sha — the
+    attempt that already failed. A missing row, a hard-failed row
+    (record_failure writes commit_sha=NULL, and NULL never equals a real
+    sha), an indexed/search-only row, or any sha change all retry —
+    FALL-03 self-heal stays the default and manual `jarvis index` never
+    skips."""
+    from jarvis.index_cli import _watch_should_retry_full_build
+
+    entry = None if overrides is None else _watch_entry(**overrides)
+    assert _watch_should_retry_full_build(entry, "abc123") is expected
