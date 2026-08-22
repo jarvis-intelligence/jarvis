@@ -165,6 +165,7 @@ jarvis index /path/to/your/repo --scheme MyScheme # Swift repo with an ambiguous
 jarvis index /path/to/your/repo --language python # force the language instead of detecting it from git-tracked files
 jarvis index /path/to/your/repo --semantic-include vendor/generated # force-include a path the generated-file filter would otherwise skip
 jarvis index /path/to/your/repo --search-only # skip SCIP indexing; publish only Zoekt + semantic search
+jarvis index /path/to/your/repo --fallback-search-only # opt in: if the indexer fails mid-build, degrade to search-only (status `degraded`) instead of failing; the next reindex retries the full build
 jarvis list
 jarvis status foo
 jarvis reindex foo
@@ -320,6 +321,10 @@ JARVIS_DATA_DIR=/custom/path jarvis index /path/to/repo
 
 **Environment variables:**
 - `JARVIS_DATA_DIR` — override default `~/.jarvis` for all indexes and registry
+- `JARVIS_FALLBACK_SEARCH_ONLY` — default the opt-in degrade-to-search-only fallback
+  on for repos indexed without an explicit `--fallback-search-only` /
+  `--no-fallback-search-only` flag. Accepts `1`/`true`/`yes`/`on`
+  (case-insensitive); any other value is treated as off with a one-line warning.
 - `JARVIS_EMBEDDING_QUERY_PREFIX` / `JARVIS_EMBEDDING_DOC_PREFIX` — override the
   query/document instruction prefix applied before embedding. Auto-detected for bge-m3,
   e5, and nomic-embed; set these if using a different model that needs one — `semanticSearch`

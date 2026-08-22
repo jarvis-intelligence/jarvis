@@ -1108,18 +1108,22 @@ def _cmd_list(args: argparse.Namespace) -> int:
     try:
         for repo in registry.list():
             # D-08: the glyph prefixes the status field so the 5-column
-            # TSV order stays parseable by scripts; only failed rows gain
-            # a 6th field carrying the reason one-liner. `partial` is a
+            # TSV order stays parseable by scripts; failed and degraded
+            # rows gain a 6th field carrying the reason one-liner —
+            # degraded joins the ◐ family (search still answers) with the
+            # failure cause riding that reason field. `partial` is a
             # success variant and stays in the ✓ family.
             if repo.status == "failed":
                 marker = "✗"
             elif repo.status == SEARCH_ONLY_STATUS:
                 marker = "◐"
+            elif repo.status == DEGRADED_STATUS:
+                marker = "◐"
             else:
                 marker = "✓"
             line = (f"{repo.slug}\t{marker} {repo.status}\t{repo.language}"
                     f"\t{repo.commit_sha or '-'}\t{repo.path}")
-            if repo.status == "failed":
+            if repo.status in ("failed", DEGRADED_STATUS):
                 line += f"\t{repo.status_reason or repo.status}"
             print(line)
     finally:
