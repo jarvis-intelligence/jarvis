@@ -33,6 +33,7 @@ from jarvis.registry import (
     ORIGIN_SIGNATURE,
     SEARCH_ONLY_STATUS,
     Registry,
+    RegisteredRepo,
     origin_of,
     recovery_for,
 )
@@ -354,6 +355,26 @@ def _git_head(repo_path: Path) -> str:
             f"{repo_path} has no commits yet (git rev-parse HEAD: {result.stderr.strip()})"
         )
     return result.stdout.strip()
+
+
+def _watch_should_retry_full_build(entry: RegisteredRepo | None, current_sha: str) -> bool:
+    """FALL-05 anti-treadmill: the watch driver skips the full-build retry
+    only when the repo is degraded AND the source sha is still the one the
+    last full-build attempt failed at — the degraded terminal write
+    persists that attempt sha in commit_sha. Everything else retries: a
+    missing row, a failed row (record_failure stores commit_sha=NULL, and
+    NULL never equals a real sha), an indexed/search-only row, or any sha
+    change. The skip is a WATCH-DRIVER policy only — index_repo itself
+    always retries (FALL-03: an explicit `jarvis index` never skips), so
+    the predicate must never move into it. Kept pure (no subprocess, no
+    Registry, no watchdog) per watch.py's own philosophy so the full
+    decision matrix is unit-testable without the observer machinery."""
+    return not (
+        entry is not None
+        and entry.status == DEGRADED_STATUS
+        and entry.commit_sha is not None
+        and entry.commit_sha == current_sha
+    )
 
 
 def _run(cmd: list[str], *, cwd: Path, step: str,
