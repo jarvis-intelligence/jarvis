@@ -966,7 +966,7 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
     captured: dict = {}
 
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None, search_only=None):
+                        language=None, search_only=None, fallback_search_only=None):
         captured["path"] = path
         captured["slug"] = slug
         captured["scheme"] = scheme
@@ -1171,7 +1171,8 @@ def test_semantic_include_flag_reaches_index_repo_as_a_tuple(tmp_path, monkeypat
     captured = {}
 
     def _fake_index_repo(repo_path, *, slug=None, root=None, scheme=None,
-                         semantic_include=None, language=None, search_only=None):
+                         semantic_include=None, language=None, search_only=None,
+                         fallback_search_only=None):
         captured["semantic_include"] = semantic_include
         return "myrepo"
 
@@ -1437,9 +1438,8 @@ def test_reindex_forwards_stored_language_override(tmp_path: Path, monkeypatch):
     registry.close()
 
     captured: dict = {}
-
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None, search_only=None):
+                        language=None, search_only=None, fallback_search_only=None):
         captured["language"] = language
         return slug
 

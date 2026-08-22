@@ -26,7 +26,9 @@ from typing import TYPE_CHECKING
 from jarvis import config
 from jarvis.graph import GraphStore, populate_graph_for_repo
 from jarvis.registry import (
+    DEGRADED_STATUS,
     ORIGIN_FAILED_HARD,
+    ORIGIN_FALLBACK,
     ORIGIN_MANUAL,
     ORIGIN_SIGNATURE,
     SEARCH_ONLY_STATUS,
@@ -158,6 +160,16 @@ class UnsupportedLanguageError(Exception):
 
 class IndexingError(Exception):
     """Raised when an indexing pipeline step (indexer/convert/zoekt) fails."""
+
+
+class MissingBinaryError(IndexingError):
+    """A pipeline step's executable was not on PATH.
+
+    Deliberately its own type beside IndexingError (FALL-04): a missing
+    binary is a setup.sh problem, and the opt-in fallback must keep it a
+    loud failure instead of laundering "run setup.sh" into a published
+    index. IS-A IndexingError, so every existing except-site keeps working.
+    """
 
 
 class NotAGitRepositoryError(Exception):
@@ -365,7 +377,7 @@ def _run(cmd: list[str], *, cwd: Path, step: str,
     try:
         result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=merged)
     except FileNotFoundError as exc:
-        raise IndexingError(
+        raise MissingBinaryError(
             f"{step} failed: {cmd[0]} not found on PATH — run setup.sh"
         ) from exc
     if result.returncode != 0:
@@ -600,6 +612,25 @@ def _resolve_search_only(registry: Registry, slug: str, search_only: bool | None
     return existing.search_only if existing is not None else False
 
 
+def _resolve_fallback(registry: Registry, slug: str, cli: bool | None) -> bool:
+    """Fallback resolution, precedence locked by FALL-02: CLI > persisted >
+    env > off. `cli=None` means the flag was not passed and the persisted
+    value (if ever set) decides; a NULL persisted value defers to the
+    JARVIS_FALLBACK_SEARCH_ONLY env tier, which reads off when unset.
+
+    Deliberate deviation from the `_resolve_scheme` idiom: the RESOLVED
+    bool is never written back. Persisting it would collapse NULL to 0 on
+    the first env-off run and permanently lock a later env-on out
+    (persisted outranks env — Pitfall 1). Only the explicit CLI value is
+    ever persisted, via `Registry.set_fallback_enabled`."""
+    if cli is not None:
+        return cli
+    existing = registry.get(slug)
+    if existing is not None and existing.fallback_enabled is not None:
+        return existing.fallback_enabled
+    return config.fallback_search_only_from_env()
+
+
 def _resolve_semantic_include(
     registry: Registry, slug: str, include: tuple[str, ...] | None
 ) -> tuple[str, ...]:
@@ -707,16 +738,19 @@ def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
     `read_pointer` raises IndexNotFoundError and every navigation tool fails
     safely — server.py turns that into an explanation.
 
-    First retires any previously published SCIP index for this repo (see
-    `_retire_scip_artifacts`) — this function is reachable not just from an
+    Publishes zoekt first and retires any previously published SCIP index
+    for this repo (see `_retire_scip_artifacts`) only AFTER the zoekt
+    publish provably succeeded — a zoekt failure must leave an existing
+    index untouched, so a failed run never destroys a good one. Retiring
+    at all matters because this function is reachable not just from an
     explicit `--search-only` but from the automatic signature-based
-    fallback, which can trigger on a repo that indexed fine before (e.g. a
-    Kotlin version bump hitting the ABI-mismatch signature on reindex).
+    fallback and the Phase 3 degraded publish, both of which can trigger
+    on a repo that indexed fine before (e.g. a Kotlin version bump hitting
+    the ABI-mismatch signature on reindex).
 
     Returns whether the semantic stage succeeded (matching
     `_run_semantic_stage`'s contract) alongside the git-tracked file count;
     the caller records both on the registry row."""
-    _retire_scip_artifacts(slug, root)
     _pin_zoekt_repo_name(repo_path, slug)
     zoekt_dir = config.data_dir(root) / ".zoekt"
     zoekt_dir.mkdir(parents=True, exist_ok=True)
@@ -725,6 +759,7 @@ def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
                   step="zoekt-git-index")
     _warn_on_coverage_shortfall(slug, tracked, result.stderr)
     _sweep_zoekt_tmp_orphans(slug, root)
+    _retire_scip_artifacts(slug, root)
     semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
     print(
         f"note: {slug} published search-only — searchCode and semanticSearch work, "
@@ -772,6 +807,7 @@ def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None,
     scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
     language: str | None = None, search_only: bool | None = None,
+    fallback_search_only: bool | None = None,
 ) -> str:
     """Runs the full pipeline for one repo; returns the slug it was
     published under. Registry status is `indexing` while running, `indexed`
@@ -821,6 +857,10 @@ def index_repo(
         # re-passes `--search-only`, so this must already reflect the
         # persisted value by the time detect_language() can raise.
         search_only = _resolve_search_only(registry, slug, search_only)
+        # Resolved here (not at the degrade site) so the flag is settled
+        # before any pipeline step can raise, and per-run env reads happen
+        # exactly once (config owns the env tier).
+        fallback_enabled = _resolve_fallback(registry, slug, fallback_search_only)
         language_override = _resolve_language(registry, slug, language)
         if language_override is not None:
             if language_override not in _INDEXER_BY_LANGUAGE:
@@ -989,6 +1029,43 @@ def index_repo(
         # verbatim and unbounded (D-02) -- truncation is display-only.
         reason = next((line for line in text.splitlines() if line.strip()),
                       exc.__class__.__name__)
+        # Degrade gate (FALL-01/FALL-04): post-build-start failures with the
+        # opt-in fallback resolved on publish search-only instead of leaving
+        # the repo with nothing. Missing binaries and bash-shim failures are
+        # excluded -- environment misconfiguration must stay a loud hard
+        # failure, never laundered into a published index. Pre-pipeline
+        # failures never reach this handler at all (they raise inside the
+        # wrap above).
+        if (fallback_enabled
+                and not isinstance(exc, MissingBinaryError)
+                and not _bash_shim_failure(text)):
+            try:
+                semantic_ok, tracked = _publish_search_only(
+                    repo_path, slug, root, semantic_include)
+                registry.upsert(slug, str(repo_path), language, sha, DEGRADED_STATUS,
+                                scheme_override=scheme, semantic_include=semantic_include,
+                                language_override=language_override,
+                                status_origin=ORIGIN_FALLBACK, status_reason=reason,
+                                status_stderr=text)
+                registry.mark_tracked_files(slug, tracked)
+                if semantic_ok:
+                    registry.mark_semantic_indexed(slug)
+                print(
+                    f"warning: {slug} degraded to search-only — {reason}. "
+                    "Navigation tools are unavailable; the next reindex retries "
+                    "the full build.",
+                    file=sys.stderr,
+                )
+                return slug
+            except Exception:
+                # The degraded publish itself failed (e.g. a zoekt error):
+                # nothing was published, so the fallback promise is void --
+                # fall through to the ordinary hard-failure record below.
+                print(
+                    f"warning: fallback publish failed for {slug} — nothing "
+                    "published; recording the original failure.",
+                    file=sys.stderr,
+                )
         registry.record_failure(slug, str(repo_path), language, ORIGIN_FAILED_HARD,
                                 reason, text)
         raise IndexingError(str(exc)) from exc
@@ -1006,6 +1083,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
             semantic_include=tuple(raw_include) if raw_include is not None else None,
             language=getattr(args, "language", None),
             search_only=getattr(args, "search_only", None),
+            fallback_search_only=getattr(args, "fallback_search_only", None),
         )
     except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1282,6 +1360,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="skip SCIP indexing and publish only Zoekt + semantic search "
              "(persisted and reused by reindex/watch)",
+    )
+    index_parser.add_argument(
+        "--fallback-search-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="on a post-build-start indexer failure, publish search-only and "
+             "retry the full build on the next reindex (persisted per-repo; "
+             "JARVIS_FALLBACK_SEARCH_ONLY sets the global default)",
     )
     index_parser.set_defaults(func=_cmd_index)
 
