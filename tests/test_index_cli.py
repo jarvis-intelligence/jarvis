@@ -9,6 +9,8 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -3425,3 +3427,219 @@ def test_watch_should_retry_full_build_matrix(overrides, expected):
 
     entry = None if overrides is None else _watch_entry(**overrides)
     assert _watch_should_retry_full_build(entry, "abc123") is expected
+
+
+def test_watch_parser_accepts_tri_state_fallback_flag():
+    from jarvis.index_cli import build_parser
+
+    on = build_parser().parse_args(["watch", "/repos/x", "--fallback-search-only"])
+    off = build_parser().parse_args(["watch", "/repos/x", "--no-fallback-search-only"])
+    absent = build_parser().parse_args(["watch", "/repos/x"])
+    assert on.fallback_search_only is True
+    assert off.fallback_search_only is False
+    assert absent.fallback_search_only is None
+
+
+def test_watch_skip_check_skips_only_while_sha_unchanged(tmp_path: Path):
+    """FALL-05 consult against a real tmp Registry + git repo: a degraded
+    row whose commit_sha equals the current HEAD declines the retry; a
+    source change (new sha) re-triggers the full build (ROADMAP criterion
+    5); a missing row fails open to retry."""
+    from jarvis.index_cli import _git_head, _watch_skip_check
+    from jarvis.registry import DEGRADED_STATUS
+
+    data_root = tmp_path / "data"
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "main.py").write_text("x = 1\n")
+    _init_git_repo(repo_dir)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert("mine", str(repo_dir), "python",
+                        _git_head(repo_dir), DEGRADED_STATUS)
+    finally:
+        registry.close()
+
+    # Unchanged sha on a degraded row: skip the full-build retry.
+    assert _watch_skip_check(repo_dir, "mine", root=data_root) is False
+
+    # A source change produces a new sha: the full build re-triggers.
+    (repo_dir / "feature.py").write_text("y = 2\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "source change"],
+                   cwd=repo_dir, check=True)
+    assert _watch_skip_check(repo_dir, "mine", root=data_root) is True
+
+    # No row at all: fail open to retry.
+    assert _watch_skip_check(repo_dir, "never-registered", root=data_root) is True
+
+
+def test_watch_skip_check_fails_open_when_the_consult_raises(tmp_path: Path):
+    """T-3-07: ANY consult failure (locked db, git hiccup) retries —
+    fail-open is the safe direction for self-heal; the worst outcome of a
+    broken consult is one extra build, never a suppressed retry."""
+    from jarvis.index_cli import _watch_skip_check
+
+    not_a_repo = tmp_path / "plain-dir"
+    not_a_repo.mkdir()
+    # _git_head raises NotAGitRepositoryError inside the consult; the
+    # wrapper must convert it to "retry" instead of propagating.
+    assert _watch_skip_check(not_a_repo, "anything", root=tmp_path / "data") is True
+
+
+_UNSET = object()
+
+
+class _FakeEvent:
+    is_directory = False
+    src_path = "/repos/x/main.py"
+
+
+class _FakeObserver:
+    """Minimal stand-in for watchdog's Observer: schedule() captures the
+    handler; start() delivers one fake source-file event (driving the
+    Debouncer); stop/join no-op."""
+
+    def __init__(self):
+        self.handler = None
+
+    def schedule(self, handler, path, recursive=True):
+        self.handler = handler
+
+    def start(self):
+        self.handler.on_any_event(_FakeEvent())
+
+    def stop(self):
+        pass
+
+    def join(self):
+        pass
+
+
+def _install_fake_watchdog(monkeypatch):
+    """Patch sys.modules so `_cmd_watch`'s deferred imports resolve to
+    fakes — the tests drive the real `_reindex` closure without the
+    `watch` extra (CI installs only `semantic`; the tests themselves never
+    import watchdog)."""
+    import types
+
+    events = types.ModuleType("watchdog.events")
+    events.FileSystemEventHandler = object
+    observers = types.ModuleType("watchdog.observers")
+    observers.Observer = _FakeObserver
+    watchdog_pkg = types.ModuleType("watchdog")
+    watchdog_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "watchdog", watchdog_pkg)
+    monkeypatch.setitem(sys.modules, "watchdog.events", events)
+    monkeypatch.setitem(sys.modules, "watchdog.observers", observers)
+
+
+def _drive_cmd_watch(cli, monkeypatch, args_kwargs, sleep_results):
+    """Run `_cmd_watch` to completion under the fake observer and a
+    scripted `time.sleep` (the loop's only clock use). `sleep_results` is
+    an iterator: each loop iteration first consumes one sleep result — a
+    `None` sleeps on, an exception instance is raised to break the loop
+    (KeyboardInterrupt is `_cmd_watch`'s own exit path)."""
+    import argparse
+    import types
+
+    _install_fake_watchdog(monkeypatch)
+    fake_time = types.ModuleType("time")
+    fake_time.sleep = lambda s: next(sleep_results)
+    fake_time.monotonic = time.monotonic
+    monkeypatch.setattr(cli, "time", fake_time)
+    return cli._cmd_watch(argparse.Namespace(**args_kwargs))
+
+
+def test_cmd_watch_reindex_forwards_fallback_flag_to_index_repo(
+    tmp_path: Path, monkeypatch
+):
+    """FALL-02 wiring: watch is just another reindex driver — `_reindex`
+    forwards the tri-state fallback_search_only to index_repo beside
+    scheme/language. The fake index_repo raises KeyboardInterrupt (a
+    BaseException `_reindex`'s broad `except Exception` must not swallow)
+    to break the watch loop after capturing; a non-git path makes the
+    skip consult fail open, reaching index_repo."""
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = tmp_path / "not-a-repo"
+    repo_dir.mkdir()
+
+    captured: dict = {}
+
+    def fake_index_repo(path, *, slug=None, root=None, scheme=None,
+                        semantic_include=None, language=None, search_only=None,
+                        fallback_search_only=_UNSET):
+        captured["fallback_search_only"] = (
+            "UNSET" if fallback_search_only is _UNSET else fallback_search_only
+        )
+        captured["slug"] = slug
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    import itertools
+
+    rc = _drive_cmd_watch(
+        cli, monkeypatch,
+        {"path": str(repo_dir), "slug": None, "scheme": "myscheme",
+         "debounce": 0.0, "language": "swift", "fallback_search_only": True},
+        # Loop exits on the first poll (fake index_repo raises
+        # KeyboardInterrupt); the bounded chain is only the no-hang guard
+        # if the wiring ever regressed into never invoking index_repo.
+        sleep_results=itertools.chain(itertools.repeat(None, 5), [KeyboardInterrupt()]),
+    )
+
+    assert rc == 0
+    assert captured["fallback_search_only"] is True
+    assert captured["slug"] == repo_dir.name
+
+
+def test_cmd_watch_skips_full_build_retry_on_degraded_row_at_same_sha(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """FALL-05 end-to-end through the watch driver: a degraded row whose
+    commit_sha equals HEAD makes `_reindex` print one stderr note and
+    return WITHOUT invoking index_repo — no treadmill on a
+    persistently-failing repo at an unchanged sha. The scripted sleep
+    breaks the loop on the second iteration (the skip path returns
+    normally, so sleep is the only exit left)."""
+    import jarvis.index_cli as cli
+    from jarvis.index_cli import _git_head
+    from jarvis.registry import DEGRADED_STATUS
+
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "main.py").write_text("x = 1\n")
+    _init_git_repo(repo_dir)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert(repo_dir.name, str(repo_dir), "python",
+                        _git_head(repo_dir), DEGRADED_STATUS)
+    finally:
+        registry.close()
+
+    invoked: list = []
+
+    def fake_index_repo(*args, **kwargs):
+        invoked.append(kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    rc = _drive_cmd_watch(
+        cli, monkeypatch,
+        {"path": str(repo_dir), "slug": None, "scheme": None,
+         "debounce": 0.0, "language": None, "fallback_search_only": None},
+        sleep_results=iter([None, KeyboardInterrupt()]),
+    )
+
+    assert rc == 0
+    assert invoked == [], "the skip path must not invoke index_repo"
+    assert "still degraded at the same commit" in capsys.readouterr().err
