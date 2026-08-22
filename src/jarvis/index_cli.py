@@ -377,6 +377,27 @@ def _watch_should_retry_full_build(entry: RegisteredRepo | None, current_sha: st
     )
 
 
+def _watch_skip_check(repo_path: Path, slug: str, root: Path | None = None) -> bool:
+    """FALL-05 consult for the watch driver: True means "retry the full
+    build now". Opens a short-lived Registry over the row, reads the
+    current HEAD sha, and applies `_watch_should_retry_full_build`.
+    Read-only by design (T-3-06): no status churn, no counters — only the
+    attempt sha the degraded terminal write already persisted is
+    consulted. ANY failure (a locked registry.db, a git hiccup) fails
+    OPEN to retry (T-3-07) — the safe direction for self-heal: the worst
+    outcome of a broken consult is one extra build, never a suppressed
+    one."""
+    try:
+        registry = Registry(config.data_dir(root) / "registry.db")
+        try:
+            entry = registry.get(slug)
+        finally:
+            registry.close()
+        return _watch_should_retry_full_build(entry, _git_head(repo_path))
+    except Exception:
+        return True
+
+
 def _run(cmd: list[str], *, cwd: Path, step: str,
          env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """`env`, when given, is merged OVER a copy of `os.environ` rather than
@@ -1324,7 +1345,21 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     def _reindex() -> None:
         print(f"[watch] change detected, reindexing {slug} ...")
         try:
-            index_repo(repo_path, slug=slug, scheme=args.scheme, language=args.language)
+            # FALL-05 anti-treadmill: a persistently-failing degraded repo
+            # is not rebuilt on every debounced save at an unchanged sha —
+            # only a source change (new sha) or an explicit `jarvis index`
+            # (which never consults this) re-triggers the full build.
+            if not _watch_skip_check(repo_path, slug):
+                print(
+                    f"[watch] {slug} still degraded at the same commit — "
+                    "skipping full-build retry",
+                    file=sys.stderr,
+                )
+                return
+            index_repo(
+                repo_path, slug=slug, scheme=args.scheme, language=args.language,
+                fallback_search_only=getattr(args, "fallback_search_only", None),
+            )
             print(f"[watch] {slug} reindexed")
         except Exception as exc:
             # Broad on purpose: index_repo() can raise before its own
@@ -1434,6 +1469,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(_INDEXER_BY_LANGUAGE),
         help="force the indexer language instead of detecting it from git-tracked files "
              "(persisted and reused by reindex/watch)",
+    )
+    watch_parser.add_argument(
+        "--fallback-search-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="on a post-build-start indexer failure, publish search-only and "
+             "retry the full build on the next reindex (persisted per-repo; "
+             "JARVIS_FALLBACK_SEARCH_ONLY sets the global default)",
     )
     watch_parser.set_defaults(func=_cmd_watch)
 

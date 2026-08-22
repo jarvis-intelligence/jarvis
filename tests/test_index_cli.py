@@ -3545,9 +3545,15 @@ def _drive_cmd_watch(cli, monkeypatch, args_kwargs, sleep_results):
     import types
 
     _install_fake_watchdog(monkeypatch)
+
+    def _sleep(seconds):
+        result = next(sleep_results)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
     fake_time = types.ModuleType("time")
-    fake_time.sleep = lambda s: next(sleep_results)
-    fake_time.monotonic = time.monotonic
+    fake_time.sleep = _sleep
     monkeypatch.setattr(cli, "time", fake_time)
     return cli._cmd_watch(argparse.Namespace(**args_kwargs))
 
