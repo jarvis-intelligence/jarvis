@@ -1,10 +1,10 @@
 ---
 phase: 03-opt-in-self-healing-fallback
-fixed_at: 2026-08-22T18:14:21Z
+fixed_at: 2026-08-22T18:41:48Z
 review_path: .planning/phases/03-opt-in-self-healing-fallback/03-REVIEW.md
-iteration: 1
-findings_in_scope: 2
-fixed: 2
+iteration: 2
+findings_in_scope: 4
+fixed: 4
 skipped: 0
 status: all_fixed
 ---
@@ -53,10 +53,51 @@ status: all_fixed
 
 ## Skipped Issues
 
-None in scope. Out of scope by `fix_scope: critical_warning`: IN-01 (`_SCHEMA` omits `fallback_enabled`), IN-02 (`_watch_skip_check` docstring wording), IN-03 (unused `import time` in tests), IN-04 (degraded-repos prose in `_error_payload`).
+None in scope across either iteration. Out of scope by `fix_scope: critical_warning`: IN-01 (`_SCHEMA` omits `fallback_enabled`), IN-02 (`_watch_skip_check` docstring wording), IN-03 (unused `import time` in tests), IN-04 (degraded-repos prose in `_error_payload`), IN-05 (bookkeeping row keeps only the proximate cause), IN-06 (README status enumeration omits `search-only`/`degraded`).
 
 ---
 
-_Fixed: 2026-08-22T18:14:21Z_
+## Iteration 2
+
+**Fixed at:** 2026-08-22T18:41:48Z (post-review commits `d76eb08`, `d70e084`)
+**Source review:** iteration-2 section of 03-REVIEW.md (0 critical / 2 warnings / 6 info)
+**Scope:** critical_warning only — the 6 Info findings (IN-01..IN-06) remain out of scope.
+
+**Summary:**
+- Findings in scope: 2 (WR-02, WR-03)
+- Fixed: 2 (each reproduce-then-fix with new regression tests)
+- Skipped: 0
+
+### WR-02: "fallback publish failed … nothing published" is false when `_publish_search_only` fails *after* its zoekt step
+
+**Files modified:** `src/jarvis/index_cli.py`, `tests/test_index_cli.py`
+**Commit:** `d76eb08`
+**Root cause:** `_publish_search_only` is not atomic — zoekt shards land first, `_retire_scip_artifacts` runs after, and a retire failure (a `GraphStore` write on the locked `registry.db` that triggered the degrade, or an `rmtree` EPERM) landed in the same `except Exception` as a zoekt-step failure, printing "nothing published" while zoekt IS live. Worse, `_retire_scip_artifacts` ran its irreversible `rmtree` *before* its failure-prone GraphStore writes, so the realistic locked-db failure destroyed the previous navigation index on a run that was about to fail anyway — breaking the module's own "a failed run never destroys a good one" invariant one level below where phase 3 fixed it.
+**Applied fix:** Two changes. (1) `_retire_scip_artifacts` now clears graph edges BEFORE the `rmtree`: the db writes are the failure-prone half and the rmtree the irreversible half, so a retire that fails partway leaves the already-modeled "failed run with a live pointer" state (stale edges are rebuilt by the next successful populate — rebuild-not-accumulate). (2) The retire step inside `_publish_search_only` is wrapped so its failure raises `SearchPublishedButIncomplete` (IS-A `IndexingError`, so the manual/signature callers' except-clauses are untouched); the degrade handler gained a dedicated `except` before the generic one that prints `"{slug} … did not complete — search shards ARE published, but retiring the previous SCIP index failed ({reason}); the previous navigation index is untouched. Recording the original failure."` and appends a `— degraded publish did not complete —` addendum to the row's `status_stderr` (the one-line `status_reason` stays the ORIGINAL indexer failure). It then falls through to the existing hard-failure record + raise — a failed degraded publish stays a hard failure per the locked constraint, never a further degrade, never exit 0. The generic `except Exception` keeps the "nothing published" wording, now true (reachable only at-or-before the zoekt step).
+**Test proving it:** `test_degraded_publish_retire_failure_reports_partial_landing` (tests/test_index_cli.py) — two-phase harness like the FALL-01 ordering test: phase 1 publishes a real pointer, phase 2 fails the indexer with fallback on, lets the degraded zoekt publish succeed, and locks `GraphStore` construction (keeping the REAL retire code — and its teardown ordering — under test). Reproduced pre-fix (stderr showed the false "nothing published" line; with the pre-fix retire order the pointer was also destroyed before the GraphStore raise), passes post-fix: raises `IndexingError` matching the ORIGINAL failure; stderr has the partial-landing wording and no "nothing published"; the pointer survives; the row is `failed`/`failed_hard` with `status_reason` = the original failure and `status_stderr` carrying the addendum (search shards published, retire failed with "database is locked", prior navigation untouched).
+**Constraint audit:** `test_failed_degraded_publish_preserves_the_previous_current_pointer` (zoekt-step failure → old wording + pointer survival), `test_degraded_row_write_failure_reports_what_landed`, `test_post_publish_registry_failure_stays_hard_not_degraded`, `test_degraded_publish_on_post_build_start_failure`, `test_degraded_run_prints_exactly_one_warning_line`, and the signature/search-only publish suites all pass unchanged — the degraded success contract and both hard-failure paths are untouched.
+
+### WR-03: `record_failure` inside the failure handlers can itself raise and escape as a raw `sqlite3.OperationalError` — traceback instead of the clean `error:` line
+
+**Files modified:** `src/jarvis/index_cli.py`, `tests/test_index_cli.py`
+**Commit:** `d70e084`
+**Root cause:** All four failure-recording sites (pre-pipeline wrap, search-only branch handler, WR-01 bookkeeping handler, outer pipeline handler) called `registry.record_failure(...)` bare before raising. When the database is the problem (the same locked `registry.db` that triggered the handler, disk-full), the write raised inside the `except`/`else` block and the new exception REPLACED the original — propagating out of `index_repo` as a raw `sqlite3.OperationalError` that `_cmd_index`/`_cmd_reindex`'s except tuple does not include: traceback at the CLI boundary, original failure lost, row stranded.
+**Applied fix:** New `_record_failure_best_effort(registry, slug, repo_path, language, reason, text)` helper — `record_failure` with the write demoted to one stderr warning naming BOTH the recording failure and the original failure (`"recording the failed run for {slug} also failed — {rec_reason}; the original failure ({reason}) is still raised and reported, but the registry row was not updated."`) when it raises. All four sites now call the helper and then raise their ORIGINAL error unchanged (bare re-raise in the pre-pipeline wrap preserving e.g. `UnsupportedLanguageError`/version-gate `RuntimeError`; `IndexingError(str(exc)) from exc` at the other three). The primary failure is never swallowed and the secondary never raised. The mirror in the pre-pipeline wrap is covered by the same helper; `_cmd_watch` was already safe (its `_reindex` catches broadly).
+**Test proving it:** `test_degraded_row_write_and_record_failure_both_locked` — end-to-end through `_cmd_index` (the review's repro surface) with `JARVIS_DATA_DIR` isolated: degraded-row upsert locked ("database is locked") AND `record_failure` failing with a distinct "disk I/O error". Reproduced pre-fix (the raw `sqlite3.OperationalError: disk I/O error` escaped `_cmd_index` uncaught), passes post-fix: rc 1; stderr ends with the clean `error: database is locked` line (the ORIGINAL bookkeeping failure, no "Traceback"); the WR-01 honest warning plus the new warning naming both failures; the row honestly left at `indexing` (nothing laundered past the failed record). `test_pre_pipeline_record_failure_failure_does_not_mask_the_original` pins the mirror: a version-gate `RuntimeError` plus a failing record write still propagates the `RuntimeError` (not the sqlite error, not an `IndexingError`) with the both-failures warning.
+**Constraint audit:** every pinned iteration-1 test plus the D-05 pre-pipeline/search-only failure-row tests pass unchanged (633 on the full gate); the failure-row contract itself is untouched — the helper is a no-op wrapper whenever the write succeeds, which is the overwhelmingly common case.
+**Deliberately not changed:** the review's File line also names the transitional `upsert` + `set_fallback_enabled` writes (index_cli.py, both branches) as exposed to the same raw-sqlite escape. Those are success-path writes, not failure bookkeeping — a failure there means nothing has landed to report and the row cannot be written either; guarding them would change success-path semantics and was not part of the review's fix suggestion (the handler-level guard was chosen over the alternative except-tuple widening). Left as-is; a future iteration can widen `_cmd_index`/`_cmd_reindex`'s tuple with `sqlite3.Error` if the traceback bothers anyone.
+
+## Iteration 2 Verification
+
+- Reproduce-then-fix: all three new regression tests were run against pre-fix code first (WR-02: false "nothing published" + destroyed pointer; WR-03 both: raw `sqlite3.OperationalError: disk I/O error` escaping/replacing the original), then against the fixed code (all pass).
+- Syntax: `ast.parse` clean on `src/jarvis/index_cli.py` after each fix; `tests/test_index_cli.py` exercised via pytest itself.
+- Focused: `tests/test_index_cli.py` unit 186 passed / 12 deselected (183 pre-existing + 3 new), including all pinned iteration-1 regression tests and the FALL-01..05 suites.
+- Full CI gate: `uv run pytest -m "not integration"` → **633 passed, 17 deselected** (630 baseline + 3 new).
+- Verification ran in the **main checkout** on `gsd/v1.0-milestone` (`workflow.use_worktrees=false` — no isolated worktree was created; numbers are reproducible directly from this tree).
+- All 8 locked phase-3 design constraints re-verified holding via the passing pinned tests (degraded exit 0 + single warning line; status/origin taxonomy; self-heal `search_only=0`; pre-pipeline hardness; sha-gated watch skip with fail-open; degraded-publish failure = hard failure with pointer survival — now also for retire-step failures; `recovery_for('fallback')` verb; zero MCP payload reshaping — server.py untouched).
+
+---
+
+_Fixed: 2026-08-22T18:41:48Z (iteration 2)_
 _Fixer: Claude (gsd-code-fixer)_
-_Iteration: 1_
+_Iteration: 2_
