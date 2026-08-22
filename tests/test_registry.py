@@ -572,3 +572,108 @@ def test_plain_upsert_leaves_failure_fields_null(tmp_path: Path):
         assert (returned.status_origin, returned.status_reason, returned.status_stderr) == (None, None, None)
     finally:
         registry.close()
+
+
+def test_fallback_enabled_column_migrates_onto_an_existing_database(tmp_path: Path):
+    """FALL-02: a registry created before this column existed gains it on
+    first open via `_ensure_column`; the legacy row reads NULL — never set,
+    defer to the env tier — so existing registries keep working (SC5)."""
+    db = tmp_path / "registry.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE repos (slug TEXT PRIMARY KEY, path TEXT NOT NULL, "
+        "language TEXT NOT NULL, commit_sha TEXT, last_indexed TEXT NOT NULL, "
+        "status TEXT NOT NULL, scheme_override TEXT, semantic_indexed_at TEXT, "
+        "semantic_include TEXT, language_override TEXT, "
+        "search_only INTEGER NOT NULL DEFAULT 0, tracked_files INTEGER, "
+        "status_origin TEXT, status_reason TEXT, status_stderr TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO repos VALUES ('old', '/p', 'python', 'abc', "
+        "'2026-01-01T00:00:00+00:00', 'indexed', NULL, NULL, NULL, NULL, "
+        "0, 42, NULL, NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    registry = Registry(db)
+    try:
+        entry = registry.get("old")
+        assert entry is not None
+        assert entry.status == "indexed"
+        assert entry.fallback_enabled is None  # NULL = never set, defer to env
+    finally:
+        registry.close()
+
+    probe = sqlite3.connect(str(db))
+    try:
+        cols = {row[1] for row in probe.execute("PRAGMA table_info(repos)")}
+        assert "fallback_enabled" in cols
+    finally:
+        probe.close()
+
+
+def test_fallback_enabled_tri_state_roundtrip(tmp_path: Path):
+    """FALL-02 tri-state: NULL default, explicit True/False via the
+    dedicated setter, and — critically — a plain upsert (the terminal-write
+    shape, no fallback argument) must leave the stored value untouched
+    (upsert's ON CONFLICT list never names the column)."""
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("mine", "/repos/mine", "python", "abc", "indexing")
+        assert registry.get("mine").fallback_enabled is None
+        registry.set_fallback_enabled("mine", True)
+        assert registry.get("mine").fallback_enabled is True
+        registry.set_fallback_enabled("mine", False)
+        assert registry.get("mine").fallback_enabled is False
+        registry.set_fallback_enabled("mine", True)
+        # The terminal-write shape: no fallback argument rides the upsert.
+        registry.upsert("mine", "/repos/mine", "python", "def", "indexed")
+        assert registry.get("mine").fallback_enabled is True
+    finally:
+        registry.close()
+
+
+def test_recovery_for_fallback_origin_names_the_self_heal():
+    """FALL-01/Area 3: locked wording — names the fix, the reindex verb,
+    and the self-heal (full build retries automatically), so a degraded
+    row tells the user recovery is one command away."""
+    from jarvis.registry import ORIGIN_FALLBACK, recovery_for
+
+    assert recovery_for(_entry(status="degraded", status_origin=ORIGIN_FALLBACK)) == (
+        "fix the indexer failure, then `jarvis reindex mine` (full build retries automatically)"
+    )
+
+
+def test_upsert_round_trips_status_stderr_and_plain_upsert_clears_it(tmp_path: Path):
+    """FALL-01 carrier + D-04: the degraded terminal write persists the
+    complete multi-line failure text verbatim; the next plain successful
+    upsert NULL-clears origin/reason/stderr together on the previously
+    degraded row (self-heal leaves no stale failure facts)."""
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
+
+    text = "scip-python index failed (scip-python index):\nline one\nline two"
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        returned = registry.upsert(
+            "mine", "/repos/mine", "python", "abc123", DEGRADED_STATUS,
+            status_origin=ORIGIN_FALLBACK,
+            status_reason="scip-python index failed (scip-python index)",
+            status_stderr=text,
+        )
+        assert returned.status_stderr == text
+        entry = registry.get("mine")
+        assert entry is not None
+        assert entry.status == DEGRADED_STATUS
+        assert entry.status_stderr == text
+        assert "\n" in entry.status_stderr  # multi-line text survives whole
+
+        registry.upsert("mine", "/repos/mine", "python", "def456", "indexed")
+        healed = registry.get("mine")
+        assert healed is not None
+        assert healed.status == "indexed"
+        assert (healed.status_origin, healed.status_reason, healed.status_stderr) == (
+            None, None, None,
+        )
+    finally:
+        registry.close()
