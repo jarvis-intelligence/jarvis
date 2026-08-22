@@ -13,7 +13,7 @@ Jarvis today fails loudly and uselessly: when a SCIP indexer dies mid-build (Swi
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Registry Foundation & Degradation Reporting** - Additive per-repo state plus cause/origin/recovery reporting in `jarvis status`, `getIndexStatus`, and nav-tool error payloads
+- [x] **Phase 1: Registry Foundation & Degradation Reporting** - Additive per-repo state plus cause/origin/recovery reporting in `jarvis status`, `getIndexStatus`, and nav-tool error payloads (completed 2026-08-22)
 - [ ] **Phase 2: scip-swift Toolchain Update** - Pin bump to a fixed release cut from main; setup.sh asset handling, out-of-repo cache dir, watch loop prevention
 - [ ] **Phase 3: Opt-In Self-Healing Fallback** - Post-build-start indexer failures degrade to search-only publish; tri-state opt-in (CLI > persisted > env > off); full build retried every reindex; watch anti-treadmill
 - [ ] **Phase 4: Swift Failure Signatures** - Verified scip-swift failure signatures captured from the pinned binary join the automatic `_SEARCH_ONLY_SIGNATURES` fallback
@@ -122,7 +122,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Registry Foundation & Degradation Reporting | 3/3 | In Progress|  |
+| 1. Registry Foundation & Degradation Reporting | 3/3 | Complete    | 2026-08-22 |
 | 2. scip-swift Toolchain Update | 3/3 | In Progress|  |
 | 3. Opt-In Self-Healing Fallback | 0/TBD | Not started | - |
 | 4. Swift Failure Signatures | 0/TBD | Not started | - |
