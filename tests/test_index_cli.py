@@ -3136,6 +3136,69 @@ def test_failed_degraded_publish_preserves_the_previous_current_pointer(
         registry.close()
 
 
+def test_post_publish_registry_failure_stays_hard_not_degraded(
+    tmp_path: Path, monkeypatch
+):
+    """CR-01 regression: the degrade gate must not fire once the pointer has
+    flipped. A registry write failing AFTER `_publish_atomically` (locked
+    registry.db from a concurrent watch reindex, disk-full) is a bookkeeping
+    failure against a fully-published index -- pre-fix, the gate retired that
+    index, republished zoekt-only, and wrote degraded/fallback citing the
+    sqlite error as the indexer failure. Post-fix the run stays a hard
+    failure (failed/failed_hard with the real cause) and the live pointer
+    survives untouched."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _successful_run(cmd, *, cwd, step, env=None):
+        if step == "scip expt-convert":
+            _make_index_db(Path(cmd[3]), chunks=1, mentions=14)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _successful_run)
+    monkeypatch.setattr(
+        "jarvis.index_cli.populate_graph_for_repo", lambda *a, **k: None
+    )
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    # The locked-db race the fix exists for: every upsert succeeds except the
+    # terminal status="indexed" write -- i.e. the failure lands strictly
+    # AFTER the publish flipped the pointer.
+    real_upsert = Registry.upsert
+
+    def _locked_on_terminal_upsert(self, slug, path, language, commit_sha, status, **kw):
+        if status == "indexed":
+            raise sqlite3.OperationalError("database is locked")
+        return real_upsert(self, slug, path, language, commit_sha, status, **kw)
+
+    monkeypatch.setattr(Registry, "upsert", _locked_on_terminal_upsert)
+
+    with pytest.raises(IndexingError, match="database is locked"):
+        index_repo(repo_dir, root=data_root, fallback_search_only=True)
+
+    slug = config.repo_slug(repo_dir.name)
+    pointer_file = config.index_dir(slug, data_root) / "current"
+    assert pointer_file.exists(), (
+        "a bookkeeping failure must not retire the just-published index"
+    )
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.status_reason == "database is locked"
+        assert entry.search_only is False
+    finally:
+        registry.close()
+
+
 # --- Phase 3: precedence, persistence, self-heal (FALL-02/FALL-03) ----------
 
 def _mock_healthy_full_run(monkeypatch):

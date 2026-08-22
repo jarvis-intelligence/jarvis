@@ -992,6 +992,13 @@ def index_repo(
     if fallback_search_only is not None:
         registry.set_fallback_enabled(slug, fallback_search_only)
 
+    # Flips to True the moment `_publish_atomically` makes the new index
+    # live. Everything after that point in the try below is registry
+    # bookkeeping, not indexing, and the degrade gate reads this flag to
+    # refuse those failures -- the index is already published, so degrading
+    # would destroy it.
+    published = False
+
     try:
         with tempfile.TemporaryDirectory(prefix="jarvis-index-") as scratch:
             scip_path = Path(scratch) / "index.scip"
@@ -1061,6 +1068,10 @@ def index_repo(
                 json.dumps({"commit_sha": sha, "published_at": datetime.now(UTC).isoformat()}), encoding="utf-8"
             )
             _publish_atomically(target_dir, versioned_name, sha)
+            # The pointer is live from here on; the remaining statements in
+            # this try are registry bookkeeping, not indexing. `published`
+            # keeps the degrade gate out of any failure they raise.
+            published = True
 
         final_status = "indexed" if has_nav else PARTIAL_STATUS
         registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme,
@@ -1088,8 +1099,15 @@ def index_repo(
         # excluded -- environment misconfiguration must stay a loud hard
         # failure, never laundered into a published index. Pre-pipeline
         # failures never reach this handler at all (they raise inside the
-        # wrap above).
-        if (fallback_enabled
+        # wrap above). Runs whose pointer already flipped (`published`) are
+        # excluded too: everything after `_publish_atomically` is registry
+        # bookkeeping, and a failure there (locked registry.db from a
+        # concurrent watch reindex, disk-full) must fall through to the
+        # hard-failure record below -- the index IS live, so degrading would
+        # rmtree a just-published good index and persist the sqlite error as
+        # the indexer failure.
+        if (not published
+                and fallback_enabled
                 and not isinstance(exc, MissingBinaryError)
                 and not _bash_shim_failure(text)):
             try:
