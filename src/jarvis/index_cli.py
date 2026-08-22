@@ -873,6 +873,31 @@ def _reject_duplicate_slug_for_path(registry: Registry, slug: str, repo_path: Pa
             )
 
 
+def _record_failure_best_effort(
+    registry: Registry, slug: str, repo_path: Path, language: str,
+    reason: str, text: str,
+) -> None:
+    """`Registry.record_failure` demoted to a stderr warning when the write
+    itself raises (locked registry.db, disk-full -- often the very condition
+    that triggered the handler). The failure row is bookkeeping ABOUT a
+    failure: losing it must never replace or swallow the error the handler
+    is about to raise, so every caller still raises its original error
+    right after this, converted or not (WR-03)."""
+    try:
+        registry.record_failure(slug, str(repo_path), language,
+                                ORIGIN_FAILED_HARD, reason, text)
+    except Exception as recexc:
+        rec_reason = next(
+            (line for line in str(recexc).splitlines() if line.strip()),
+            recexc.__class__.__name__)
+        print(
+            f"warning: recording the failed run for {slug} also failed — "
+            f"{rec_reason}; the original failure ({reason}) is still raised "
+            "and reported, but the registry row was not updated.",
+            file=sys.stderr,
+        )
+
+
 def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None,
     scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
@@ -972,10 +997,10 @@ def index_repo(
         text = str(exc)
         reason = next((line for line in text.splitlines() if line.strip()),
                       exc.__class__.__name__)
-        registry.record_failure(
-            slug, str(repo_path),
+        _record_failure_best_effort(
+            registry, slug, repo_path,
             resolved_language if resolved_language is not None else UNKNOWN_LANGUAGE,
-            ORIGIN_FAILED_HARD, reason, text)
+            reason, text)
         registry.close()
         raise
 
@@ -1006,8 +1031,8 @@ def index_repo(
             text = str(exc)
             reason = next((line for line in text.splitlines() if line.strip()),
                           exc.__class__.__name__)
-            registry.record_failure(slug, str(repo_path), language, ORIGIN_FAILED_HARD,
-                                    reason, text)
+            _record_failure_best_effort(registry, slug, repo_path, language,
+                                        reason, text)
             raise IndexingError(str(exc)) from exc
         finally:
             registry.close()
@@ -1205,8 +1230,8 @@ def index_repo(
                         f"degraded status failed — {bk_reason}.",
                         file=sys.stderr,
                     )
-                    registry.record_failure(slug, str(repo_path), language,
-                                            ORIGIN_FAILED_HARD, bk_reason, bk_text)
+                    _record_failure_best_effort(registry, slug, repo_path,
+                                                language, bk_reason, bk_text)
                     raise IndexingError(str(bkexc)) from bkexc
                 print(
                     f"warning: {slug} degraded to search-only — {reason}. "
@@ -1215,8 +1240,8 @@ def index_repo(
                     file=sys.stderr,
                 )
                 return slug
-        registry.record_failure(slug, str(repo_path), language, ORIGIN_FAILED_HARD,
-                                reason, text)
+        _record_failure_best_effort(registry, slug, repo_path, language,
+                                    reason, text)
         raise IndexingError(str(exc)) from exc
     finally:
         registry.close()

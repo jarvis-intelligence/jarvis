@@ -3344,6 +3344,116 @@ def test_degraded_publish_retire_failure_reports_partial_landing(
         registry.close()
 
 
+def test_degraded_row_write_and_record_failure_both_locked(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """WR-03 regression: when the degraded-row write fails AND recording
+    that failure also fails (the same locked registry.db), the recording
+    failure must not mask the original -- one extra stderr warning names
+    both failures, the CLI still prints its clean one-line `error:` and
+    exits 1 (no traceback), and the raised error is the original
+    bookkeeping failure, never the raw sqlite3.OperationalError."""
+    import argparse
+
+    import jarvis.index_cli as cli
+    from jarvis.index_cli import IndexingError
+    from jarvis.registry import DEGRADED_STATUS
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError("error: simulated post-build-start failure")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    # The degraded-row write hits the lock; recording that failure hits a
+    # second, distinct sqlite error (disk I/O) so the test can tell the
+    # original failure from the recording failure apart.
+    real_upsert = Registry.upsert
+
+    def _locked_on_degraded_upsert(self, slug, path, language, commit_sha, status, **kw):
+        if status == DEGRADED_STATUS:
+            raise sqlite3.OperationalError("database is locked")
+        return real_upsert(self, slug, path, language, commit_sha, status, **kw)
+
+    monkeypatch.setattr(Registry, "upsert", _locked_on_degraded_upsert)
+
+    def _disk_full_record_failure(self, *a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(Registry, "record_failure", _disk_full_record_failure)
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(repo_dir), slug=None, scheme=None, semantic_include=None,
+        language=None, search_only=None, fallback_search_only=True,
+    ))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    # The honest WR-01 warning about the degraded-row write...
+    assert "degraded to search-only" in err
+    assert "database is locked" in err
+    # ...plus the WR-03 warning naming BOTH the recording failure and the
+    # original failure it must not mask.
+    assert "recording the failed run" in err
+    assert "disk I/O error" in err
+    # The clean one-line error carries the ORIGINAL failure (not the
+    # secondary recording failure), and no traceback replaces it.
+    assert err.splitlines()[-1] == "error: database is locked"
+    assert "Traceback" not in err
+
+    # The row was honestly left where the last successful write put it
+    # ('indexing') -- nothing was laundered past the failed record.
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(config.repo_slug(repo_dir.name))
+        assert entry is not None
+        assert entry.status == "indexing"
+    finally:
+        registry.close()
+
+
+def test_pre_pipeline_record_failure_failure_does_not_mask_the_original(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """WR-03 mirror in the pre-pipeline wrap: when the failure row's own
+    write raises there too, the ORIGINAL gate error (a RuntimeError here,
+    not an IndexingError and not the sqlite error) is still the one that
+    propagates, with one warning naming both failures."""
+    from jarvis.index_cli import index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _boom():
+        raise RuntimeError("scip v0.7.0 is below the required floor v0.9.0")
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", _boom)
+
+    def _disk_full_record_failure(self, *a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(Registry, "record_failure", _disk_full_record_failure)
+
+    with pytest.raises(RuntimeError, match="below the required floor"):
+        index_repo(repo_dir, root=data_root, fallback_search_only=True)
+
+    err = capsys.readouterr().err
+    assert "recording the failed run" in err
+    assert "disk I/O error" in err
+    assert "below the required floor" in err
+
+
 # --- Phase 3: precedence, persistence, self-heal (FALL-02/FALL-03) ----------
 
 def _mock_healthy_full_run(monkeypatch):
