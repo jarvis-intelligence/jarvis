@@ -32,7 +32,8 @@ working, and the system explains why and how to recover.
 
 ### Validated
 
-- ✓ SCIP navigation tools (goToDefinition, findReferences, callHierarchy, typeHierarchy, documentSymbols) — existing
+- ✓ Degradation/failed reporting in `jarvis status` / `getIndexStatus` (persisted cause, origin, recovery) — Phase 1
+- ✓ 9 judgment-tier prohibitions from Phase 1 confirmed by human review — Phase 1 UAT
 - ✓ Zoekt lexical search (`searchCode`) with lazy webserver lifecycle — existing
 - ✓ Package dependency graph + `blastRadius` (2-hop BFS) — existing
 - ✓ Semantic search (LanceDB + sentence-transformers, RRF fusion) behind optional `semantic` extra — existing
@@ -50,7 +51,6 @@ working, and the system explains why and how to recover.
 - [ ] Generic fallback is self-healing: next reindex/watch retries the full build, falls back again only if it still fails
 - [ ] Fallback opt-in via CLI flag (persisted per-repo, like `--scheme`/`--language`) and env var (global default)
 - [ ] Known scip-swift failure signatures added to the automatic (non-opt-in) `_SEARCH_ONLY_SIGNATURES` fallback
-- [ ] `jarvis status` / `getIndexStatus` clearly report why a repo is degraded or failed and how to recover
 - [ ] Interactive `jarvis index` (TTY) with semantic extra missing: y/N prompt, auto-install on yes, decline remembered per-repo
 - [ ] Non-TTY contexts (watch, MCP-triggered reindex) keep today's silent skip + stderr hint for semantic
 
@@ -101,7 +101,8 @@ denied); verify at plan time via `gh release list --repo jarvis-intelligence/sci
 | Generic fallback self-heals (retry full build each reindex) | Transient failures recover automatically; avoids the permanent `search_only=1` trap | — Pending |
 | Both CLI flag (per-repo, persisted) and env var (global) | Per-repo control for individual repos; env var covers MCP-triggered and fleet-wide use | — Pending |
 | scip-swift signatures join the automatic fallback list | Same pattern as Kotlin/AGP: known-unfixable failures shouldn't require opt-in | — Pending |
-| Semantic install offer: TTY-only prompt, auto-install, remember decline per-repo | Discoverable without nagging; non-TTY paths stay non-blocking | — Pending |
+| Failure cause persists as origin + one-line reason + untruncated stderr in 3 additive registry columns; recovery derived at read time | Additive migration keeps legacy registries working; no persisted recovery commands to go stale | ✓ Shipped — Phase 1 |
+| WR-01 interrupted-retry edge (Ctrl-C wipes prior failure record) accepted as known edge; WR-03 unified "stale" wording kept | Human product decisions at Phase 1 UAT; Phase 3 FALL-03 mitigates the stranded row | ✓ Decided — Phase 1 UAT |
 
 ## Evolution
 
@@ -121,5 +122,5 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-21 after milestone v1.0 start*
+*Last updated: 2026-08-22 after Phase 1*
 

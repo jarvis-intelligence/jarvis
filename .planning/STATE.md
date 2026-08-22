@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 02
 current_phase_name: scip-swift Toolchain Update
-status: verifying
-stopped_at: Completed 02-03-PLAN.md (CI smoke fixture & workflow — phase 02 fully executed, ready for verification)
-last_updated: "2026-08-21T18:50:24.465Z"
+status: planning
+stopped_at: Phase 1 complete, ready to plan Phase 02
+last_updated: "2026-08-22T15:37:04.587Z"
 last_activity: 2026-08-22
-last_activity_desc: Phase 02 execution started
-state_head: b342fea043ec70ab40b16cf71303253db410f30a
+last_activity_desc: Phase 1 complete, transitioned to Phase 02
+state_head: 16566383a68db5b6fcfe261fdb56260ae191cc3d
 progress:
   total_phases: 5
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 6
   completed_plans: 6
 milestone_name: Indexing Robustness & scip-swift Update
@@ -21,19 +21,19 @@ milestone_name: Indexing Robustness & scip-swift Update
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-21)
+See: .planning/PROJECT.md (updated 2026-08-22)
 
 **Core value:** An indexing failure never leaves a repo with nothing — search keeps working, and the system explains why and how to recover.
 **Current focus:** Phase 02 — scip-swift Toolchain Update
 
 ## Current Position
 
-Phase: 02 (scip-swift Toolchain Update) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
-Last activity: 2026-08-22 — Phase 02 execution started
+Phase: 02 — scip-swift Toolchain Update
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-08-22 — Phase 1 complete, transitioned to Phase 02
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
 ### Milestone Phase List
 
@@ -47,7 +47,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 0
+- Total plans completed: 3
 - Average duration: —
 - Total execution time: —
 
@@ -55,7 +55,7 @@ Progress: [░░░░░░░░░░] 0%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 1 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -102,6 +102,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Phase 02-02: forget sweeps cache/scip-swift/<slug>/ with ignore_errors=True beside the lancedb sweep — path built solely from the slug so sibling caches provably survive (D-06)
 - [Phase 02]: [Phase 02]: Phase 02-03: mini_xcode_repo fixture is byte-copied from upstream XcodeTestProject@v0.3.0 with inner names preserved (pbxproj references them; identity is the directory) — proven locally via real jarvis index (swift/indexed, xcodebuild dispatch) as verification only, no committed integration test (D-09/D-10)
 - [Phase 02]: [Phase 02]: Phase 02-03: smoke step gates RUNNER_OS inside the run block (Linux leg runs the step and proves the skip); fixture copy is a standalone git-init'd repo under RUNNER_TEMP because detection reads git ls-files; cache-dir contract asserted via no in-tree .scip-cache/.build + cache root under JARVIS_DATA_DIR
+- [Phase 01 UAT]: All 9 judgment-tier prohibition verdicts confirmed (UPHELD) by human review — no prohibition reopened
+- [Phase 01 UAT]: WR-01 (Ctrl-C during retry wipes prior failure record, row can strand at 'indexing') accepted as known edge — Phase 3 FALL-03 mitigates; WR-03 unified "stale — indexed at <commit>" wording kept plan-literal
 
 ### Pending Todos
 
@@ -122,5 +124,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-08-21T18:50:24.407Z
-Stopped at: Completed 02-03-PLAN.md (CI smoke fixture & workflow — phase 02 fully executed, ready for verification)
+Stopped at: Phase 1 complete, ready to plan Phase 02
 Resume file: None
