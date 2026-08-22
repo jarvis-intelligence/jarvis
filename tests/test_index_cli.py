@@ -1333,6 +1333,10 @@ def test_language_override_to_swift_still_gets_xcodebuild(tmp_path: Path, monkey
     _init_git_repo(tmp_path)
 
     monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+    # Hermetic on machines without scip-swift on PATH: the phase-02 runtime
+    # floor is the first statement of the swift branch and would raise
+    # "scip-swift not found on PATH" before the indexer command is built.
+    monkeypatch.setattr(cli, "check_scip_swift_version", lambda: None)
 
     captured: dict = {}
 
