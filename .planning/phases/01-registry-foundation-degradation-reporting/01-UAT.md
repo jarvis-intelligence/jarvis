@@ -1,26 +1,22 @@
 ---
-status: testing
+status: complete
 phase: 01-Registry Foundation & Degradation Reporting
 source: [01-VERIFICATION.md]
 started: 2026-08-21T17:40:00Z
-updated: 2026-08-21T17:40:00Z
+updated: 2026-08-22T00:00:00Z
 ---
 
 ## Current Test
 
-number: 1
-name: Sign off 9 judgment-tier prohibition verdicts
-expected: |
-  All 9 descriptor-less prohibitions in the phase plans were upheld by LLM judgment with
-  code+test evidence recorded per item in 01-VERIFICATION.md (unverified-prohibition tier —
-  human review recommended, never silently passed). Human confirms the verdicts.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
 ### 1. Sign off 9 judgment-tier prohibition verdicts
 expected: All 9 prohibition verdicts (UPHELD) confirmed by human review of 01-VERIFICATION.md
-result: [pending]
+result: pass
+source: human
+note: "User confirmed all 9 UPHELD verdicts (2026-08-22, autonomous UAT session)"
 
 ### 2. WR-01: accept vs fix interrupted-run wiping prior failure record
 expected: |
@@ -30,7 +26,9 @@ expected: |
   destroyed and the row can strand at outcome='indexing' with no recovery guidance
   (index_cli.py:813/839 + 798/825/925). Options: accept as-is, or fix (catch BaseException in
   the three record_failure handlers / defer failure-field clearing to terminal upserts).
-result: [pending]
+result: pass
+source: human
+note: "Accepted as known edge (user decision, 2026-08-22). Phase 3 FALL-03 self-heal retries mitigate the stranded row; wiped prior cause documented in REVIEW.md WR-01."
 
 ### 3. WR-03: keep vs split 'stale' wording without staleness evidence
 expected: |
@@ -39,14 +37,16 @@ expected: |
   False by construction (no repo_path) or HEAD == published commit (server.py:173-179).
   Options: keep plan-literal wording, or split reason so 'stale' only appears with
   freshness evidence.
-result: [pending]
+result: pass
+source: human
+note: "Kept plan-literal unified wording (user decision, 2026-08-22)."
 
 ## Summary
 
 total: 3
-passed: 0
+passed: 3
 issues: 0
-pending: 3
+pending: 0
 skipped: 0
 blocked: 0
 
