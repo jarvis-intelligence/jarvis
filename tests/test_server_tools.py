@@ -498,6 +498,93 @@ def test_get_index_status_navigation_unavailable_for_search_only_explains_and_re
     assert nav["reason"] == "indexed search-only — no SCIP index"
     assert nav["recovery"] == "jarvis forget gorepo && jarvis index /p"
 
+def test_get_index_status_navigation_unavailable_for_degraded_reports_cause_and_recovery(tmp_path: Path, monkeypatch):
+    """FALL-01 (visibility): on a degraded repo, navigation is unavailable
+    AND the reason names the actual failure cause from the persisted
+    status_reason — not a generic wording — with the fallback self-heal
+    verb as recovery."""
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", DEGRADED_STATUS,
+                        status_origin=ORIGIN_FALLBACK,
+                        status_reason="indexer crashed")
+    finally:
+        registry.close()
+
+    nav = server.get_index_status(repo="gorepo")["capabilities"]["navigation"]
+
+    assert nav["available"] is False
+    assert nav["reason"] == "indexer crashed"
+    assert "jarvis reindex" in nav["recovery"]
+
+
+def test_get_index_status_degraded_reason_defaults_when_status_reason_missing(tmp_path: Path, monkeypatch):
+    """A degraded row with no persisted reason still explains itself with
+    the default degraded wording instead of a None reason."""
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", DEGRADED_STATUS,
+                        status_origin=ORIGIN_FALLBACK)
+    finally:
+        registry.close()
+
+    nav = server.get_index_status(repo="gorepo")["capabilities"]["navigation"]
+
+    assert nav["available"] is False
+    assert nav["reason"] == "indexer failure — degraded to search-only"
+
+
+def test_get_index_status_reports_last_index_run_for_a_degraded_repo(tmp_path: Path, monkeypatch):
+    """Pin (D-13/D-15 verbatim contract): the registry status string flows
+    through last_index_run.outcome unchanged and the fallback origin
+    carries its recovery verb — zero payload reshaping."""
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", DEGRADED_STATUS,
+                        status_origin=ORIGIN_FALLBACK,
+                        status_reason="indexer crashed")
+    finally:
+        registry.close()
+
+    last_run = server.get_index_status(repo="gorepo")["last_index_run"]
+
+    assert last_run["outcome"] == "degraded"
+    assert last_run["origin"] == "fallback"
+    assert last_run["reason"] == "indexer crashed"
+    assert "jarvis reindex" in last_run["recovery"]
+
+
+def test_error_payload_carries_state_cause_recovery_for_a_degraded_repo(tmp_path: Path, monkeypatch):
+    """Pin (D-14): the origin-key block already covers degraded rows —
+    state='fallback', cause=the persisted reason, recovery present,
+    alongside the unchanged `error` key. No _error_payload change needed."""
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("gorepo", "/p", "unknown", "abc", DEGRADED_STATUS,
+                        status_origin=ORIGIN_FALLBACK,
+                        status_reason="indexer crashed")
+    finally:
+        registry.close()
+
+    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
+
+    assert "error" in payload
+    assert payload["state"] == "fallback"
+    assert payload["cause"] == "indexer crashed"
+    assert "recovery" in payload
+
 
 def test_get_index_status_failed_run_with_live_pointer_reports_stale_navigation(tmp_path: Path, monkeypatch):
     """D-07/D-15: atomic publish leaves the last index live when the newest
