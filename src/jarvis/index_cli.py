@@ -173,6 +173,15 @@ class MissingBinaryError(IndexingError):
     """
 
 
+class SearchPublishedButIncomplete(IndexingError):
+    """`_publish_search_only` wrote its zoekt shards and then failed a later
+    step (SCIP retirement) -- a PARTIAL publish, not "nothing published".
+    The degrade handler catches it separately so its message states what
+    actually landed (WR-02); every other caller treats it as the
+    IndexingError it IS-A, so their except-clauses keep working unchanged.
+    """
+
+
 class NotAGitRepositoryError(Exception):
     """Raised when a repo path is not a git working tree.
 
@@ -761,16 +770,25 @@ def _retire_scip_artifacts(slug: str, root: Path | None) -> None:
     name). Zoekt shards and the semantic LanceDB table are deliberately left
     alone — this same publish republishes both further down, `_cmd_forget`'s
     full deletion of those does not apply here."""
-    index_dir = config.index_dir(slug, root)
-    if index_dir.exists():
-        shutil.rmtree(index_dir)
-
+    # Graph teardown BEFORE the rmtree (WR-02): the GraphStore writes are
+    # the failure-prone half — a locked registry.db, the same race that
+    # triggers this publish, raises right here — and the rmtree is the
+    # irreversible half. Clearing edges first keeps a retire that fails
+    # partway in the "failed run with a live pointer" state the system
+    # already models and reports, instead of destroying the previous
+    # navigation index on a run that is about to fail anyway; stale edges
+    # are rebuilt by the next successful run's rebuild-not-accumulate
+    # populate.
     graph_store = GraphStore(config.data_dir(root) / "registry.db")
     try:
         for package in graph_store.list_packages(repo=slug):
             graph_store.clear_outgoing_edges(package.id)
     finally:
         graph_store.close()
+
+    index_dir = config.index_dir(slug, root)
+    if index_dir.exists():
+        shutil.rmtree(index_dir)
 
 
 def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
@@ -788,7 +806,10 @@ def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
     explicit `--search-only` but from the automatic signature-based
     fallback and the Phase 3 degraded publish, both of which can trigger
     on a repo that indexed fine before (e.g. a Kotlin version bump hitting
-    the ABI-mismatch signature on reindex).
+    the ABI-mismatch signature on reindex). A failure in that retire step
+    raises `SearchPublishedButIncomplete`, so callers can tell a partial
+    publish (search live, the previous navigation index untouched) from a
+    zoekt-step failure that published nothing.
 
     Returns whether the semantic stage succeeded (matching
     `_run_semantic_stage`'s contract) alongside the git-tracked file count;
@@ -801,7 +822,14 @@ def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
                   step="zoekt-git-index")
     _warn_on_coverage_shortfall(slug, tracked, result.stderr)
     _sweep_zoekt_tmp_orphans(slug, root)
-    _retire_scip_artifacts(slug, root)
+    # The zoekt shards are live from here on, so a retire failure is a
+    # PARTIAL publish (search on disk, previous SCIP index untouched), not
+    # "nothing published" — the marker lets the degrade handler say which
+    # one happened (WR-02).
+    try:
+        _retire_scip_artifacts(slug, root)
+    except Exception as exc:
+        raise SearchPublishedButIncomplete(str(exc)) from exc
     semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
     print(
         f"note: {slug} published search-only — searchCode and semanticSearch work, "
@@ -1113,8 +1141,35 @@ def index_repo(
             try:
                 semantic_ok, tracked = _publish_search_only(
                     repo_path, slug, root, semantic_include)
+            except SearchPublishedButIncomplete as pexc:
+                # Zoekt shards ARE live; what failed is retiring the prior
+                # SCIP artifacts (ordered last inside _retire_scip_artifacts,
+                # so the previous navigation index still stands). "Nothing
+                # published" would be false. State what landed on stderr AND
+                # in the row's status_stderr, then fall through to the
+                # hard-failure record: a failed degraded publish stays a
+                # hard failure (locked constraint) -- never a further
+                # degrade, never an exit 0.
+                retire_text = str(pexc)
+                retire_reason = next(
+                    (line for line in retire_text.splitlines() if line.strip()),
+                    pexc.__class__.__name__)
+                print(
+                    f"warning: fallback publish did not complete for {slug} — "
+                    f"search shards ARE published, but retiring the previous "
+                    f"SCIP index failed ({retire_reason}); the previous "
+                    "navigation index is untouched. Recording the original "
+                    "failure.",
+                    file=sys.stderr,
+                )
+                text = (
+                    f"{text}\n— degraded publish did not complete —\n"
+                    "search shards ARE published; retiring the previous SCIP "
+                    f"index failed:\n{retire_text}\n"
+                    "the previous navigation index is untouched"
+                )
             except Exception:
-                # The degraded publish itself failed (e.g. a zoekt error):
+                # The degraded publish failed at-or-before its zoekt step:
                 # nothing was published, so the fallback promise is void --
                 # fall through to the ordinary hard-failure record below.
                 print(

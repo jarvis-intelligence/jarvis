@@ -3259,6 +3259,91 @@ def test_degraded_row_write_failure_reports_what_landed(
         registry.close()
 
 
+def test_degraded_publish_retire_failure_reports_partial_landing(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """WR-02 regression: a degraded publish whose zoekt step SUCCEEDS but
+    whose SCIP-retire step fails is a partial landing -- zoekt shards are
+    live and the previous navigation index still stands -- so "nothing
+    published" would be false. The warning and the row's status_stderr must
+    state what landed, the one-line reason stays the ORIGINAL indexer
+    failure, and the run stays a hard failure raising the original error
+    (the locked degraded-publish-failure constraint)."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    # Phase 1: a fully mocked-successful run publishes a real current pointer.
+    def _successful_run(cmd, *, cwd, step, env=None):
+        if step == "scip expt-convert":
+            _make_index_db(Path(cmd[3]), chunks=1, mentions=14)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _successful_run)
+    monkeypatch.setattr(
+        "jarvis.index_cli.populate_graph_for_repo", lambda *a, **k: None
+    )
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root)
+    pointer_file = config.index_dir(slug, data_root) / "current"
+    assert pointer_file.exists(), "phase 1 must publish a current pointer"
+
+    # Phase 2: the indexer fails (degrade branch runs), the degraded publish's
+    # zoekt step succeeds, and the retire step dies on the realistic
+    # locked-registry.db race -- retire opens a GraphStore (a write) on the
+    # same registry.db the degrade exists to survive. Locking GraphStore
+    # construction keeps the REAL retire code under test, including its
+    # teardown ordering.
+    monkeypatch.setattr(
+        "jarvis.index_cli._run",
+        _degrade_mock_run(
+            {"scip-python index": IndexingError("error: simulated post-build-start failure")}
+        ),
+    )
+
+    def _locked_graph_store(db_path):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("jarvis.index_cli.GraphStore", _locked_graph_store)
+
+    with pytest.raises(IndexingError, match="simulated post-build-start failure"):
+        index_repo(repo_dir, slug=slug, root=data_root, fallback_search_only=True)
+
+    err = capsys.readouterr().err
+    assert "nothing published" not in err, (
+        "the zoekt shards ARE live at this point -- the claim would be false"
+    )
+    assert "did not complete" in err
+    assert "search shards ARE published" in err
+    assert "retiring the previous SCIP index failed" in err
+    assert "database is locked" in err
+    assert "navigation index is untouched" in err
+
+    # The previous navigation index must survive a retire that failed before
+    # its (deliberately last) rmtree.
+    assert pointer_file.exists(), "a failed retire must not destroy the old index"
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.status_reason == "error: simulated post-build-start failure"
+        stderr_field = entry.status_stderr or ""
+        assert "degraded publish did not complete" in stderr_field
+        assert "search shards ARE published" in stderr_field
+        assert "database is locked" in stderr_field
+    finally:
+        registry.close()
+
+
 # --- Phase 3: precedence, persistence, self-heal (FALL-02/FALL-03) ----------
 
 def _mock_healthy_full_run(monkeypatch):
