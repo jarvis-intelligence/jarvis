@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 02
-current_phase_name: scip-swift Toolchain Update
+current_phase: 3
+current_phase_name: Opt-In Self-Healing Fallback
 status: planning
-stopped_at: Phase 1 complete, ready to plan Phase 02
-last_updated: "2026-08-22T15:37:04.587Z"
+stopped_at: Phase 2 complete, ready to plan Phase 3
+last_updated: "2026-08-22T16:04:17.304Z"
 last_activity: 2026-08-22
-last_activity_desc: Phase 1 complete, transitioned to Phase 02
-state_head: 16566383a68db5b6fcfe261fdb56260ae191cc3d
+last_activity_desc: Phase 2 complete, transitioned to Phase 3
+state_head: 10bc758654631d1426042c7d494eb8718da1c4a1
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 6
   completed_plans: 6
 milestone_name: Indexing Robustness & scip-swift Update
@@ -24,14 +24,14 @@ milestone_name: Indexing Robustness & scip-swift Update
 See: .planning/PROJECT.md (updated 2026-08-22)
 
 **Core value:** An indexing failure never leaves a repo with nothing — search keeps working, and the system explains why and how to recover.
-**Current focus:** Phase 02 — scip-swift Toolchain Update
+**Current focus:** Phase 3 — Opt-In Self-Healing Fallback
 
 ## Current Position
 
-Phase: 02 — scip-swift Toolchain Update
+Phase: 3 — Opt-In Self-Healing Fallback
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-08-22 — Phase 1 complete, transitioned to Phase 02
+Last activity: 2026-08-22 — Phase 2 complete, transitioned to Phase 3
 
 Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
@@ -47,7 +47,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
 **Velocity:**
 
-- Total plans completed: 3
+- Total plans completed: 6
 - Average duration: —
 - Total execution time: —
 
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 3 | - | - |
+| 2 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -111,7 +112,7 @@ None yet.
 
 ### Blockers/Concerns
 
-- [Phase 2]: Upstream-gated — requires a scip-swift release cut from main (v0.2.0/v0.2.1 are broken). Plan-time contingency: hold Phase 2 and proceed to Phase 3, or stay on v0.1.2 and defer Phase 4 signatures
+- [Phase 2 → resolved 2026-08-22]: upstream gate cleared — scip-swift v0.3.0 (dispatch fix) released; installed live locally + on CI (PR #39 setup-smoke, digest-verified). Residual: anonymous api.github.com 403 rate-limit flake on shared runner IPs (one rerun; hardening candidate for milestone audit: honor GH_TOKEN in CI or retry on 403)
 
 ## Deferred Items
 
@@ -124,5 +125,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-08-21T18:50:24.407Z
-Stopped at: Phase 1 complete, ready to plan Phase 02
+Stopped at: Phase 2 complete, ready to plan Phase 3
 Resume file: None
