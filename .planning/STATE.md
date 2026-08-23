@@ -2,16 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 5
-current_phase_name: Semantic Install Onboarding
-status: verifying
-stopped_at: Completed 05-01-PLAN.md — Phase 5 execution complete (SEMA-01/SEMA-02 code-complete, 18 new tests, full suite 656 green)
-last_updated: "2026-08-23T05:28:34.257Z"
+status: completed
+stopped_at: Phase 5 complete — all phases complete
+last_updated: "2026-08-23T05:59:49.806Z"
 last_activity: 2026-08-23
-last_activity_desc: Phase 5 execution started
-state_head: 147487e9c10bd3fcc347eda7a03955eae36d994e
+last_activity_desc: Phase 5 complete
+state_head: 9f91581e358f55079bcf515c1b2a72ff8317b6a2
 progress:
   total_phases: 5
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 11
   completed_plans: 11
 milestone_name: Indexing Robustness & scip-swift Update
@@ -24,16 +23,16 @@ milestone_name: Indexing Robustness & scip-swift Update
 See: .planning/PROJECT.md (updated 2026-08-23)
 
 **Core value:** An indexing failure never leaves a repo with nothing — search keeps working, and the system explains why and how to recover.
-**Current focus:** Phase 5 — Semantic Install Onboarding
+**Current focus:** Milestone v1.0 complete — lifecycle pending
 
 ## Current Position
 
-Phase: 5 (Semantic Install Onboarding) — EXECUTING
-Plan: 1 of 1
-Status: Phase complete — ready for verification
-Last activity: 2026-08-23 — Phase 5 execution started
+Phase: 5
+Plan: Not started
+Status: All phases complete
+Last activity: 2026-08-23 — Phase 5 complete
 
-Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
+Progress: [░░░░░░░░░░░░░░░░░░] 12/12 plans
 
 ### Milestone Phase List
 
@@ -47,7 +46,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
 **Velocity:**
 
-- Total plans completed: 10
+- Total plans completed: 11
 - Average duration: —
 - Total execution time: —
 
@@ -59,6 +58,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 | 2 | 3 | - | - |
 | 3 | 3 | - | - |
 | 4 | 1 | - | - |
+| 5 | 1 | - | - |
 
 **Recent Trend:**
 
@@ -129,6 +129,8 @@ Recent decisions affecting current work:
 - [Phase 5]: [Phase 05]: 05-01: decline memory is a plain bool column (NULL reads False) written only by set_semantic_declined — no tri-state, unlike fallback_enabled there is no precedence chain
 - [Phase 5]: [Phase 05]: 05-01: the offer lives post-publish in _cmd_index only — offer_semantic argparse default on the index subparser is the structural SEMA-02 gate (watch/reindex/MCP can never reach the prompt); consent installs jarvis-mcp[semantic] unpinned via fixed-argv uv (timeout 600s) and enables semantic in the same invocation; install failure never remembered as decline
 
+- [Phase 05 UAT]: Live y-consent leg executed at a real pty — prompt post-publish, real network install of jarvis-mcp[semantic], same-invocation semantic enablement (semantic_indexed_at same-second), decline bit never written
+- [Phase 05]: Code review 1 fix pass (WR-01 undecodable-stdin decline, WR-02 spawn/decode failures warn+continue); final 0 critical / 0 warning / 2 info; 657 unit tests green; offer keyed to jarvis index via argparse (watch-is-also-a-TTY insight)
 ### Pending Todos
 
 None yet.
@@ -148,7 +150,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-08-23T05:28:33.842Z
-Stopped at: Completed 05-01-PLAN.md — Phase 5 execution complete (SEMA-01/SEMA-02 code-complete, 18 new tests, full suite 656 green)
+Stopped at: Phase 5 complete — all phases complete
 Resume file: None
 
 ### Planning Overrides

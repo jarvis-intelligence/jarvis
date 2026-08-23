@@ -37,6 +37,7 @@ working, and the system explains why and how to recover.
 - ✓ scip-swift pin updated off v0.1.2 (auto-roll latest ≥ 0.3.0, digest-verified install, runtime floor) with `_swift_indexer_cmd` compatibility verified live + on CI — Phase 2
 - ✓ Generic opt-in fallback: post-build-start failure degrades to a queryable search-only publish; tri-state CLI flag + env var, precedence CLI > persisted > env > off — Phase 3
 - ✓ Known scip-swift failure signatures (no build system, no IndexStore) degrade automatically — no opt-in, Kotlin/AGP parity; tokens captured verbatim from scip-swift 0.3.0, pinned by unit tests; unmatched failures stay hard — Phase 4
+- ✓ TTY `jarvis index` offers the semantic extra (y/N, post-publish, install on consent with same-invocation enablement, per-repo decline memory); watch/MCP/reindex never prompt — Phase 5
 - ✓ Zoekt lexical search (`searchCode`) with lazy webserver lifecycle — existing
 - ✓ Package dependency graph + `blastRadius` (2-hop BFS) — existing
 - ✓ Semantic search (LanceDB + sentence-transformers, RRF fusion) behind optional `semantic` extra — existing
@@ -49,8 +50,6 @@ working, and the system explains why and how to recover.
 
 ### Active
 
-- [ ] Interactive `jarvis index` (TTY) with semantic extra missing: y/N prompt, auto-install on yes, decline remembered per-repo
-- [ ] Non-TTY contexts (watch, MCP-triggered reindex) keep today's silent skip + stderr hint for semantic
 
 ### Out of Scope
 
@@ -102,6 +101,7 @@ denied); verify at plan time via `gh release list --repo jarvis-intelligence/sci
 | Failure cause persists as origin + one-line reason + untruncated stderr in 3 additive registry columns; recovery derived at read time | Additive migration keeps legacy registries working; no persisted recovery commands to go stale | ✓ Shipped — Phase 1 |
 | scip-swift install auto-rolls to latest release with ≥ 0.3.0 floor (no exact-tag pin); checksum = GitHub API asset digest | Upstream v0.2.0/v0.2.1 were broken; 0.3.0 carries the dispatch fix; auto-roll keeps the pin off stale broken tags; digest is immutable and server-computed | ✓ Shipped — Phase 2 |
 | Swift signatures use path-free verbatim tokens from the pinned binary; auto-roll wording drift fails hard by design | Only stable, path-free strings are signature-worthy; generic wrappers hide transient failures that must stay loud | ✓ Shipped — Phase 4 |
+| Semantic offer keyed to the `jarvis index` command (argparse flag, not isatty — watch is also a TTY); post-publish placement; decline stored additively, never reset by upserts | The offer must never delay/risk the index or block automation paths; only explicit user consent spends the terminal's attention | ✓ Shipped — Phase 5 |
 | Degrade gate keys on a `published` flag; degrade-branch bookkeeping failures are honest (partial-landing reported, primary error never masked by a record_failure failure) | Two review iterations hardened the failure-of-failure paths: a locked db after a good publish must never retire the index; a record_failure crash must never replace the original error | ✓ Shipped — Phase 3 review fixes |
 
 This document evolves at phase transitions and milestone boundaries.
@@ -120,4 +120,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-23 after Phase 4*
+*Last updated: 2026-08-23 after Phase 5 (milestone v1.0 complete)*
