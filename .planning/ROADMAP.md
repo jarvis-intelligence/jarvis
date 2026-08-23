@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Registry Foundation & Degradation Reporting** - Additive per-repo state plus cause/origin/recovery reporting in `jarvis status`, `getIndexStatus`, and nav-tool error payloads (completed 2026-08-22)
 - [x] **Phase 2: scip-swift Toolchain Update** - Pin bump to a fixed release cut from main; setup.sh asset handling, out-of-repo cache dir, watch loop prevention (completed 2026-08-22)
 - [x] **Phase 3: Opt-In Self-Healing Fallback** - Post-build-start indexer failures degrade to search-only publish; tri-state opt-in (CLI > persisted > env > off); full build retried every reindex; watch anti-treadmill (completed 2026-08-23)
-- [ ] **Phase 4: Swift Failure Signatures** - Verified scip-swift failure signatures captured from the pinned binary join the automatic `_SEARCH_ONLY_SIGNATURES` fallback
+- [x] **Phase 4: Swift Failure Signatures** - Verified scip-swift failure signatures captured from the pinned binary join the automatic `_SEARCH_ONLY_SIGNATURES` fallback (completed 2026-08-23)
 - [ ] **Phase 5: Semantic Install Onboarding** - TTY-gated y/N install offer for the `semantic` extra with per-repo decline memory; non-TTY paths stay silent
 
 ## Phase Details
@@ -131,7 +131,13 @@ Plans:
   2. Answering no is remembered per-repo — later indexes of that repo are not prompted again, while other repos still get the offer
   3. Non-TTY paths (`jarvis watch`, MCP-triggered reindex) never prompt or block on stdin — semantic stays silently skipped with the existing stderr hint
 
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+
+**Wave 1**
+
+- [ ] 05-01-PLAN.md — Tracer: semantic_declined registry memory + TTY y/N offer in _cmd_index (per-repo decline memory); consented uv install + same-invocation semantic enablement; non-TTY/watch/reindex silence pins (SEMA-01, SEMA-02)
 
 ## Progress
 
@@ -143,8 +149,8 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 | 1. Registry Foundation & Degradation Reporting | 3/3 | Complete    | 2026-08-22 |
 | 2. scip-swift Toolchain Update | 3/3 | Complete    | 2026-08-22 |
 | 3. Opt-In Self-Healing Fallback | 3/3 | Complete    | 2026-08-23 |
-| 4. Swift Failure Signatures | 1/1 | In Progress|  |
-| 5. Semantic Install Onboarding | 0/TBD | Not started | - |
+| 4. Swift Failure Signatures | 1/1 | Complete    | 2026-08-23 |
+| 5. Semantic Install Onboarding | 0/1 | Not started | - |
 
 ---
 *Roadmap created: 2026-08-21 — milestone v1.0, 5 phases, 14/14 requirements mapped (granularity: standard)*

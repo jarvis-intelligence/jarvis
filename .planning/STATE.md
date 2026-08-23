@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 5
 current_phase_name: Semantic Install Onboarding
-status: planning
+status: executing
 stopped_at: Phase 4 complete, ready to plan Phase 5
-last_updated: "2026-08-23T04:22:46.902Z"
+last_updated: "2026-08-23T05:07:01.069Z"
 last_activity: 2026-08-23
 last_activity_desc: Phase 4 complete, transitioned to Phase 5
-state_head: 08a2a4e1e364555a1fd18e37e05f382d564dbe5e
+state_head: dde0a692a3b1b52370da66a1d52a8990cc1c00b6
 progress:
   total_phases: 5
   completed_phases: 4
-  total_plans: 10
+  total_plans: 11
   completed_plans: 10
 milestone_name: Indexing Robustness & scip-swift Update
 ---
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-23)
 
 ## Current Position
 
-Phase: 5 — Semantic Install Onboarding
+Phase: 5 (Semantic Install Onboarding) — READY TO EXECUTE
 Plan: Not started
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-08-23 — Phase 4 complete, transitioned to Phase 5
 
 Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
@@ -125,6 +125,7 @@ Recent decisions affecting current work:
 - [Phase 4]: [Phase 04]: 04-01: tokens are path-free (both error lines interpolate repo/cache paths) and drift fails hard — re-capture on any scip-swift version bump, documented in the constant's provenance comment
 
 - [Phase 04 UAT]: Reason-prose drift risk ACCEPTED by user (verifier confirmed both Swift reasons cause-only today; IN-01 optional pin declined) — recorded for milestone audit
+
 ### Pending Todos
 
 None yet.
@@ -149,5 +150,6 @@ Resume file: None
 
 ### Planning Overrides
 
+- [Phase 5]: decision-coverage-plan gate — same smart-discuss area-format gap (checker verified all locked decisions); substantive coverage confirmed
 - [Phase 4]: decision-coverage-plan gate — same smart-discuss area-format gap as Phase 3; checker dimension 7 verified all 6 locked decisions honored
 - [Phase 3]: decision-coverage-plan gate returned could-not-parse (smart-discuss CONTEXT.md has area-formatted decisions, no D-NN ids). Substantive coverage verified by gsd-plan-checker dedicated CONTEXT-translation check (VERIFICATION PASSED). Accepted as format gap, not a coverage gap.
