@@ -2087,6 +2087,93 @@ def test_swift_no_index_store_signature_degrades_search_only(
         registry.close()
 
 
+def test_swift_generic_build_failure_wrapper_never_matches():
+    """SC3: the generic scip-swift build-failure wrappers must never match —
+    every fixable Swift failure (repo bugs, environment, host-compile
+    issues) keeps failing hard rather than being laundered into a silent
+    search-only degrade. Keep-hard exhibits captured 2026-08-23 from
+    scip-swift 0.3.0 (04-RESEARCH.md keep-hard table)."""
+    from jarvis.index_cli import _search_only_reason
+
+    wrapper_spm = "Error: 'swift build' failed with exit code 1:\n"
+    for class_line in (
+        "error: manifest parse error",
+        "package 'demo' is using Swift tools version 999.0.0 "
+        "but the installed version is 6.2.4",
+        "The package does not contain a buildable target.",
+        "no such module 'UIKit'",
+    ):
+        assert _search_only_reason(wrapper_spm + class_line) is None
+
+    wrapper_xcodebuild = "Error: 'xcodebuild' failed with exit code 65:\n"
+    assert _search_only_reason(wrapper_xcodebuild + "** BUILD FAILED **") is None
+
+
+def test_empty_or_stdout_only_failure_carriers_never_match():
+    """Empty-carrier probe: carriers with no class-specific stderr content
+    must never match. Reconstructs the exact shape `_run` raises (step+argv
+    header line, then stdout, then stderr) — the header embeds per-run cache
+    and scratch paths, so this also pins that no token ever derives from it."""
+    from jarvis.index_cli import _search_only_reason
+
+    def _carrier(stdout: str = "", stderr: str = "") -> str:
+        return (
+            "scip-swift index failed (scip-swift --cache-dir "
+            "/tmp/run-cache/scip-swift/slug --output /tmp/jarvis-index-ab12/index.scip):\n"
+            f"{stdout}\n{stderr}"
+        )
+
+    # Header-only: empty stdout and stderr.
+    assert _search_only_reason(_carrier()) is None
+    # Whitespace-only stderr.
+    assert _search_only_reason(_carrier(stderr="  \n\n")) is None
+    # Stdout-only content on a non-zero exit.
+    assert _search_only_reason(_carrier(stdout="Wrote 0 document(s) to /tmp/out")) is None
+
+
+def test_search_only_reason_first_listed_match_wins():
+    """Ordering probe: `_search_only_reason` scans `_SEARCH_ONLY_SIGNATURES`
+    in list order, so when a carrier matches multiple entries the first
+    listed wins. The two Swift entries are mutually exclusive in practice
+    (a repo cannot both lack a build system and complete a build); this
+    composite pins the ordering semantics itself, plus Kotlin precedence
+    over Swift."""
+    from jarvis.index_cli import _SEARCH_ONLY_SIGNATURES, _search_only_reason
+
+    no_build_system_reason = next(
+        reason for tokens, reason in _SEARCH_ONLY_SIGNATURES
+        if tokens == (
+            "Could not detect a build system",
+            "no Package.swift and no .xcodeproj/.xcworkspace found",
+        )
+    )
+    kotlin_reason = next(
+        reason for tokens, reason in _SEARCH_ONLY_SIGNATURES
+        if tokens == ("AbstractMethodError", "org.jetbrains.kotlin.fir")
+    )
+
+    # Both captured Swift error strings in one carrier: the no-build-system
+    # entry precedes the IndexStore entry in the list, so it wins.
+    swift_both = (
+        "Error: Could not detect a build system at /tmp/repo: "
+        "no Package.swift and no .xcodeproj/.xcworkspace found. "
+        "Pass --build-tool swiftpm or --build-tool xcodebuild explicitly.\n"
+        "Error: Build succeeded but no IndexStore was produced at "
+        "/tmp/cache/derived-data/Index.noindex/DataStore."
+    )
+    assert _search_only_reason(swift_both) == no_build_system_reason
+
+    # Kotlin text concatenated with a Swift string: the Kotlin entries
+    # precede the Swift ones, so the Kotlin reason wins.
+    kotlin_plus_swift = (
+        "e: java.lang.AbstractMethodError: "
+        "org.jetbrains.kotlin.fir.analysis.checkers.expression.FirSafeCallChecker.check()\n"
+        "Error: Could not detect a build system at /tmp/repo: "
+        "no Package.swift and no .xcodeproj/.xcworkspace found."
+    )
+    assert _search_only_reason(kotlin_plus_swift) == kotlin_reason
+
+
 def test_failed_search_only_publish_records_a_full_failure_row(tmp_path: Path, monkeypatch):
     """A search-only run whose OWN publish fails must record a full failed
     row (origin 'failed_hard' + cause), not a bare status flip -- the row
