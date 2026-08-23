@@ -1947,6 +1947,76 @@ def test_signature_fallback_stamps_signature_origin_and_matched_reason(
         registry.close()
 
 
+def test_swift_no_build_system_signature_degrades_search_only(
+    tmp_path: Path, monkeypatch
+):
+    """SWFT-04: a scip-swift failure carrying the captured no-build-system
+    stderr degrades to search-only automatically (no opt-in, Kotlin/AGP
+    parity) with origin 'signature' and the matched reason verbatim."""
+    # Provenance: captured 2026-08-23 from scip-swift 0.3.0
+    # (sha256 b0de7201…85a5, Xcode 26.3 / Swift 6.2.4) against a git repo
+    # with tracked .swift sources and no Package.swift and no
+    # .xcodeproj/.xcworkspace; carrier verified end-to-end through a real
+    # `jarvis index` run (04-RESEARCH.md, out/jarvis-nobuildsystem.txt).
+    from jarvis.index_cli import (
+        SEARCH_ONLY_STATUS,
+        _SEARCH_ONLY_SIGNATURES,
+        IndexingError,
+        index_repo,
+    )
+    from jarvis.registry import ORIGIN_SIGNATURE
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(SWIFT_FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    # Exact captured stderr; only the repo path is rewritten to this test's
+    # tmp repo (the original interpolated the capture workspace's path).
+    carrier = (
+        f"Error: Could not detect a build system at {repo_dir}: "
+        "no Package.swift and no .xcodeproj/.xcworkspace found. "
+        "Pass --build-tool swiftpm or --build-tool xcodebuild explicitly."
+    )
+
+    def _fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            raise IndexingError(carrier)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    # Hermetic on machines without scip-swift on PATH (CI ubuntu legs): the
+    # swift branch probes the binary pre-pipeline and would raise
+    # "scip-swift not found on PATH" before the mocked indexer step.
+    monkeypatch.setattr("jarvis.index_cli.check_scip_swift_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
+
+    slug = index_repo(repo_dir, root=data_root)
+
+    # Tripwire: looked up by the exact token tuple AFTER index_repo, so a
+    # missing/drifted entry fails the test at the registry assertion (or as
+    # StopIteration here) rather than masking the failure mode under test.
+    swift_reason = next(
+        reason for tokens, reason in _SEARCH_ONLY_SIGNATURES
+        if tokens == (
+            "Could not detect a build system",
+            "no Package.swift and no .xcodeproj/.xcworkspace found",
+        )
+    )
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == SEARCH_ONLY_STATUS
+        assert entry.search_only is True
+        assert entry.status_origin == ORIGIN_SIGNATURE
+        assert entry.status_reason == swift_reason  # verbatim, not a paraphrase
+    finally:
+        registry.close()
+
+
 def test_failed_search_only_publish_records_a_full_failure_row(tmp_path: Path, monkeypatch):
     """A search-only run whose OWN publish fails must record a full failed
     row (origin 'failed_hard' + cause), not a bare status flip -- the row
