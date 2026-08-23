@@ -1343,9 +1343,14 @@ def _cmd_index(args: argparse.Namespace) -> int:
         if entry is None or not entry.semantic_declined:
             try:
                 answer = input("Install semantic search support for this repo? [y/N] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
+            except (EOFError, KeyboardInterrupt, UnicodeDecodeError):
                 # Locked: EOF/Ctrl-C at the prompt is a decline —
                 # remembered, no traceback, index already complete.
+                # Undecodable bytes belong here too: input() decodes
+                # stdin strict, so pasted binary garbage (bracketed-paste
+                # of invalid bytes, non-UTF-8 terminal locales) raises
+                # before any answer exists — the parse table's "garbage
+                # declines" rule, same remembered-decline outcome.
                 answer = ""
             if answer in ("y", "yes"):
                 if _install_semantic_extra():

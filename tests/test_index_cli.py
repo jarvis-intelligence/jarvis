@@ -4517,8 +4517,10 @@ def test_cmd_index_offer_install_failure_warns_and_does_not_remember_decline(
 def test_cmd_index_offer_eof_or_keyboard_interrupt_at_prompt_declines_remembered(
     tmp_path: Path, monkeypatch, capsys
 ):
-    """SEMA-01/SC2: EOF (piped-off stdin) and Ctrl-C at the prompt are
-    declines — remembered, exit 0, no traceback, and no install ever
+    """SEMA-01/SC2: abnormal prompt input — EOF (piped-off stdin), Ctrl-C,
+    and undecodable bytes (input() decodes stdin strict, so pasted binary
+    garbage raises UnicodeDecodeError before any answer exists) — is a
+    decline: remembered, exit 0, no traceback, and no install ever
     attempted."""
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
     _mock_healthy_full_run(monkeypatch)
@@ -4529,7 +4531,11 @@ def test_cmd_index_offer_eof_or_keyboard_interrupt_at_prompt_declines_remembered
 
     monkeypatch.setattr("jarvis.index_cli._install_semantic_extra", _boom)
 
-    for i, error in enumerate([EOFError(), KeyboardInterrupt()]):
+    for i, error in enumerate([
+        EOFError(),
+        KeyboardInterrupt(),
+        UnicodeDecodeError("utf-8", b"\x80\x81", 0, 1, "invalid start byte"),
+    ]):
         slug = f"interrupted-{i}"
         rc, prompts = _offer_run(monkeypatch, tmp_path, slug, error=error)
         assert rc == 0
