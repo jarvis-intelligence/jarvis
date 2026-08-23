@@ -35,7 +35,8 @@ working, and the system explains why and how to recover.
 - ✓ Degradation/failed reporting in `jarvis status` / `getIndexStatus` (persisted cause, origin, recovery) — Phase 1
 - ✓ 9 judgment-tier prohibitions from Phase 1 confirmed by human review — Phase 1 UAT
 - ✓ scip-swift pin updated off v0.1.2 (auto-roll latest ≥ 0.3.0, digest-verified install, runtime floor) with `_swift_indexer_cmd` compatibility verified live + on CI — Phase 2
-- ✓ scip-swift cache isolated under `~/.jarvis/cache/scip-swift/<slug>/` (`--cache-dir` both build-tool paths); `jarvis forget` sweeps it; watch never self-triggers on Swift artifacts — Phase 2
+- ✓ Generic opt-in fallback: post-build-start failure degrades to a queryable search-only publish; tri-state CLI flag + env var, precedence CLI > persisted > env > off — Phase 3
+- ✓ Degraded state self-heals (full build retried every reindex; watch skips retry only at unchanged sha on a degraded row); pre-build failures stay hard — Phase 3
 - ✓ Zoekt lexical search (`searchCode`) with lazy webserver lifecycle — existing
 - ✓ Package dependency graph + `blastRadius` (2-hop BFS) — existing
 - ✓ Semantic search (LanceDB + sentence-transformers, RRF fusion) behind optional `semantic` extra — existing
@@ -48,8 +49,6 @@ working, and the system explains why and how to recover.
 
 ### Active
 
-- [ ] Generic fallback is self-healing: next reindex/watch retries the full build, falls back again only if it still fails
-- [ ] Fallback opt-in via CLI flag (persisted per-repo, like `--scheme`/`--language`) and env var (global default)
 - [ ] Known scip-swift failure signatures added to the automatic (non-opt-in) `_SEARCH_ONLY_SIGNATURES` fallback
 - [ ] Interactive `jarvis index` (TTY) with semantic extra missing: y/N prompt, auto-install on yes, decline remembered per-repo
 - [ ] Non-TTY contexts (watch, MCP-triggered reindex) keep today's silent skip + stderr hint for semantic
@@ -103,8 +102,7 @@ denied); verify at plan time via `gh release list --repo jarvis-intelligence/sci
 | scip-swift signatures join the automatic fallback list | Same pattern as Kotlin/AGP: known-unfixable failures shouldn't require opt-in | — Pending |
 | Failure cause persists as origin + one-line reason + untruncated stderr in 3 additive registry columns; recovery derived at read time | Additive migration keeps legacy registries working; no persisted recovery commands to go stale | ✓ Shipped — Phase 1 |
 | scip-swift install auto-rolls to latest release with ≥ 0.3.0 floor (no exact-tag pin); checksum = GitHub API asset digest | Upstream v0.2.0/v0.2.1 were broken; 0.3.0 carries the dispatch fix; auto-roll keeps the pin off stale broken tags; digest is immutable and server-computed | ✓ Shipped — Phase 2 |
-
-## Evolution
+| Degrade gate keys on a `published` flag; degrade-branch bookkeeping failures are honest (partial-landing reported, primary error never masked by a record_failure failure) | Two review iterations hardened the failure-of-failure paths: a locked db after a good publish must never retire the index; a record_failure crash must never replace the original error | ✓ Shipped — Phase 3 review fixes |
 
 This document evolves at phase transitions and milestone boundaries.
 
@@ -122,5 +120,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-22 after Phase 2*
-
+*Last updated: 2026-08-23 after Phase 3*

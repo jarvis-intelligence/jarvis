@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 3
-current_phase_name: Opt-In Self-Healing Fallback
-status: verifying
-stopped_at: Completed 03-03-PLAN.md (watch anti-treadmill) — Phase 3 complete
-last_updated: "2026-08-22T17:49:34.340Z"
+current_phase: 4
+current_phase_name: Swift Failure Signatures
+status: planning
+stopped_at: Phase 3 complete, ready to plan Phase 4
+last_updated: "2026-08-23T00:40:10.060Z"
 last_activity: 2026-08-23
-last_activity_desc: Phase 3 execution started
-state_head: e7a2971b908cca4659d8e6ad7dd72def32dfa09a
+last_activity_desc: Phase 3 complete, transitioned to Phase 4
+state_head: a16ec1cadc96630546816c7cba906f1dc22b3bc3
 progress:
   total_phases: 5
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 9
   completed_plans: 9
 milestone_name: Indexing Robustness & scip-swift Update
@@ -21,17 +21,17 @@ milestone_name: Indexing Robustness & scip-swift Update
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-22)
+See: .planning/PROJECT.md (updated 2026-08-23)
 
 **Core value:** An indexing failure never leaves a repo with nothing — search keeps working, and the system explains why and how to recover.
-**Current focus:** Phase 3 — Opt-In Self-Healing Fallback
+**Current focus:** Phase 4 — Swift Failure Signatures
 
 ## Current Position
 
-Phase: 3 (Opt-In Self-Healing Fallback) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
-Last activity: 2026-08-23 — Phase 3 execution started
+Phase: 4 — Swift Failure Signatures
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-08-23 — Phase 3 complete, transitioned to Phase 4
 
 Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
@@ -47,7 +47,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
 **Velocity:**
 
-- Total plans completed: 6
+- Total plans completed: 9
 - Average duration: —
 - Total execution time: —
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 |-------|-------|-------|----------|
 | 1 | 3 | - | - |
 | 2 | 3 | - | - |
+| 3 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -116,6 +117,8 @@ Recent decisions affecting current work:
 - [Phase 3]: 03-03: watch sha-keyed skip — pure predicate (skip only degraded + unchanged non-NULL sha) + fail-open read-only consult, consulted ONLY by _cmd_watch; index_repo never skips (FALL-03), and watch forwards the tri-state fallback flag like any reindex driver
 - [Phase 3]: 03-03: watch tests drive the real _reindex closure via fake watchdog sys.modules entries + scripted time.sleep — no watchdog extra needed (CI installs only semantic); KeyboardInterrupt (BaseException) breaks the loop since _reindex catches Exception only
 
+- [Phase 03 UAT]: All 18 judgment-tier prohibition verdicts confirmed (UPHELD) by human review; 3 live-execution UATs passed (degrade smoke e2e with real zoekt answering, watch-vs-manual race, real-Observer skip-note + sha-change retrigger)
+- [Phase 03]: Code review --auto converged in 2 fix passes — 4 fixes (CR-01 published-flag gate, WR-01 honest bookkeeping failure, WR-02 partial-landing marker + retire reorder, WR-03 best-effort record_failure); final 0 critical / 0 warning / 9 info; 633 unit tests green
 ### Pending Todos
 
 None yet.
@@ -135,7 +138,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-08-22T17:49:34.220Z
-Stopped at: Completed 03-03-PLAN.md (watch anti-treadmill) — Phase 3 complete
+Stopped at: Phase 3 complete, ready to plan Phase 4
 Resume file: None
 
 ### Planning Overrides
