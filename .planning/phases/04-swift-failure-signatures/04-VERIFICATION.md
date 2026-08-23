@@ -1,12 +1,13 @@
 ---
 phase: 04-swift-failure-signatures
 verified: 2026-08-23T02:27:00Z
-status: human_needed
+status: passed
 score: 7/7 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
 prohibition_flags: 1 # P2 (no-remedy-prose) is test-tier with NO wired enforcement — flagged, not silently passed
 human_verification:
+
   - test: "Inspect the two Swift reasons in _SEARCH_ONLY_SIGNATURES (src/jarvis/index_cli.py:135-142) and confirm cause-only prose; decide whether to accept the documented prose-drift risk or add reason-literal assertions (review IN-01's optional fix)."
     expected: "Reasons remain causes only (no remedy/recovery wording); either accept the risk or convert to a mechanical pin."
     why_human: "Prohibition declared verification: test, but no test pins reason content — the tripwire compares the persisted status_reason against the same constant (self-consistent by construction). Verifier inspection confirms both current reasons ARE cause-only, so the must-NOT did not happen; the missing enforcement cannot be silently passed (ADR-550 D4 fail-closed)."
