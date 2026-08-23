@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 4
-current_phase_name: Swift Failure Signatures
-status: verifying
-stopped_at: Completed 04-01-PLAN.md (Phase 4 complete)
-last_updated: "2026-08-23T02:06:44.017Z"
+current_phase: 5
+current_phase_name: Semantic Install Onboarding
+status: planning
+stopped_at: Phase 4 complete, ready to plan Phase 5
+last_updated: "2026-08-23T04:22:46.902Z"
 last_activity: 2026-08-23
-last_activity_desc: Phase 4 execution started
-state_head: 79f8af51121c49c187a4b3443275ab5a45880a83
+last_activity_desc: Phase 4 complete, transitioned to Phase 5
+state_head: 08a2a4e1e364555a1fd18e37e05f382d564dbe5e
 progress:
   total_phases: 5
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 10
   completed_plans: 10
 milestone_name: Indexing Robustness & scip-swift Update
@@ -24,14 +24,14 @@ milestone_name: Indexing Robustness & scip-swift Update
 See: .planning/PROJECT.md (updated 2026-08-23)
 
 **Core value:** An indexing failure never leaves a repo with nothing — search keeps working, and the system explains why and how to recover.
-**Current focus:** Phase 4 — Swift Failure Signatures
+**Current focus:** Phase 5 — Semantic Install Onboarding
 
 ## Current Position
 
-Phase: 4 (Swift Failure Signatures) — VERIFYING
-Plan: 1 of 1 (complete)
-Status: Phase complete — ready for verification
-Last activity: 2026-08-23 — 04-01 executed (SUMMARY written)
+Phase: 5 — Semantic Install Onboarding
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-08-23 — Phase 4 complete, transitioned to Phase 5
 
 Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
@@ -47,7 +47,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
 **Velocity:**
 
-- Total plans completed: 9
+- Total plans completed: 10
 - Average duration: —
 - Total execution time: —
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 | 1 | 3 | - | - |
 | 2 | 3 | - | - |
 | 3 | 3 | - | - |
+| 4 | 1 | - | - |
 
 **Recent Trend:**
 
@@ -123,6 +124,7 @@ Recent decisions affecting current work:
 - [Phase 4]: [Phase 04]: 04-01: Swift entry 2 is single-token (Build succeeded but no IndexStore was produced) per the AGP precedent — headline unique across all nine capture shapes; second token would couple to rewordable prose
 - [Phase 4]: [Phase 04]: 04-01: tokens are path-free (both error lines interpolate repo/cache paths) and drift fails hard — re-capture on any scip-swift version bump, documented in the constant's provenance comment
 
+- [Phase 04 UAT]: Reason-prose drift risk ACCEPTED by user (verifier confirmed both Swift reasons cause-only today; IN-01 optional pin declined) — recorded for milestone audit
 ### Pending Todos
 
 None yet.
@@ -142,7 +144,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-08-23T02:06:26.164Z
-Stopped at: Completed 04-01-PLAN.md (Phase 4 complete)
+Stopped at: Phase 4 complete, ready to plan Phase 5
 Resume file: None
 
 ### Planning Overrides
