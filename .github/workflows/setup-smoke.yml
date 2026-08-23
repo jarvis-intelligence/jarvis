@@ -9,9 +9,9 @@ name: setup-smoke
 on:
   push:
     branches: [main]
-    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml"]
+    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml", "tests/fixtures/mini_xcode_repo/**", "src/jarvis/**"]
   pull_request:
-    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml"]
+    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml", "tests/fixtures/mini_xcode_repo/**", "src/jarvis/**"]
   workflow_dispatch:
 
 jobs:
@@ -55,9 +55,10 @@ jobs:
           "${bin}/zoekt-git-index" -h >help.txt 2>&1 || true
           grep -q "zoekt-git-index" help.txt
 
-      # The only guard on SCIP_SWIFT_REPO/SCIP_SWIFT_VERSION actually resolving.
-      # Without it a repo rename or a lost release tag 404s silently, and the
-      # first report arrives from a user whose Swift index never builds.
+      # The only guard that install_scip_swift's latest-resolution + floor +
+      # digest path actually resolves against the real GitHub API. Without it
+      # a repo rename, a lost release tag, or an API change 404s silently, and
+      # the first report arrives from a user whose Swift index never builds.
       # Runs on both platforms: macOS runners are arm64 and download for real,
       # Linux exercises the not-available skip branch (which must still exit 0).
       - name: Install scip-swift via setup.sh
@@ -89,3 +90,45 @@ jobs:
           fi
           uv sync
           uv run pytest tests/test_setup_sh.py -v
+
+      # The authoritative proof that _swift_indexer_cmd's xcodebuild dispatch
+      # works through a real install (the v0.2.x regression this milestone
+      # exists to escape). Only macOS runners have Xcode; the Linux leg still
+      # executes this step and takes the skip branch, mirroring the install
+      # guard above.
+      - name: Index the Swift fixture through jarvis (macOS only)
+        run: |
+          set -eu
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # Standalone repo on purpose: language detection reads `git ls-files`
+            # and zoekt indexes git — indexing the in-checkout fixture dir would
+            # read the jarvis repo's own git metadata instead.
+            rm -rf "${RUNNER_TEMP}/mini_xcode_repo"
+            cp -R tests/fixtures/mini_xcode_repo "${RUNNER_TEMP}/mini_xcode_repo"
+            git -C "${RUNNER_TEMP}/mini_xcode_repo" init -q
+            git -C "${RUNNER_TEMP}/mini_xcode_repo" add -A
+            git -C "${RUNNER_TEMP}/mini_xcode_repo" -c user.email=ci@jarvis.local -c user.name=ci commit -qm fixture
+
+            # ci-bin first so the digest-verified scip-swift (and zoekt/scip)
+            # win over anything preinstalled on the runner; the data dir stays
+            # under RUNNER_TEMP so the runner's ~/.jarvis is never touched.
+            export PATH="${RUNNER_TEMP}/ci-bin:$PATH"
+            export JARVIS_DATA_DIR="${RUNNER_TEMP}/jarvis-data"
+
+            # Visible in logs on purpose: a future v0.4.0 still passes the
+            # floor but changes what this smoke should expect elsewhere.
+            scip-swift --version
+
+            uv run jarvis index "${RUNNER_TEMP}/mini_xcode_repo" --slug mini-xcode-repo
+
+            # Tree cleanliness (the cache-dir contract): everything scip-swift
+            # writes must live under JARVIS_DATA_DIR, never in the indexed
+            # tree. The one-shot xcshareddata/swiftpm/configuration write is
+            # accepted and deliberately not asserted against.
+            test ! -e "${RUNNER_TEMP}/mini_xcode_repo/.scip-cache"
+            test ! -e "${RUNNER_TEMP}/mini_xcode_repo/.build"
+            test -d "${JARVIS_DATA_DIR}/cache/scip-swift/mini-xcode-repo"
+            echo "fixture indexed; tree clean; cache under JARVIS_DATA_DIR"
+          else
+            echo "not macOS — skipping the Swift index smoke (install already proved the skip branch)"
+          fi

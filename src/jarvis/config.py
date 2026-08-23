@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 from jarvis.index_reader import IndexConnectionCache
@@ -28,6 +29,16 @@ IGNORED_DIRS = {".git", "node_modules", ".venv", "__pycache__", "dist", "build",
 def lancedb_dir(root: Path | None = None) -> Path:
     """Directory holding one LanceDB table per repo (semantic search vectors)."""
     return data_dir(root) / "lancedb"
+
+
+def swift_cache_dir(slug: str, root: Path | None = None) -> Path:
+    """Per-repo scip-swift incremental-cache directory (D-05): keyed by
+    slug so IndexStores from different repos never interfere.
+
+    jarvis computes this path only — upstream scip-swift creates the
+    directory, and its manifest wholesale-invalidates the cache when the
+    binary or toolchain changes, so no jarvis-side versioning is needed."""
+    return data_dir(root) / "cache" / "scip-swift" / slug
 
 
 def shim_dir(root: Path | None = None) -> Path:
@@ -54,6 +65,34 @@ def data_dir(override: Path | None = None) -> Path:
         return override
     raw = os.environ.get("JARVIS_DATA_DIR")
     return Path(raw).expanduser() if raw else DEFAULT_DATA_DIR
+
+
+# Global default for the opt-in self-healing fallback (FALL-02). Strict on
+# purpose: a typo'd value must not silently enable or ambiguously disable a
+# behavior that turns failures into publishes — warn loudly and read off.
+_FALLBACK_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def fallback_search_only_from_env() -> bool:
+    """JARVIS_FALLBACK_SEARCH_ONLY global fallback default (CONTEXT Area 2).
+
+    Accepts exactly 1/true/yes/on case-insensitively; unset reads as off.
+    Any other value ALSO reads as off but prints one warning line to stderr
+    naming the bad value and the accepted set — loud misconfiguration beats
+    silent. Env reads live here, not at call sites, per the JARVIS_DATA_DIR
+    house pattern.
+    """
+    raw = os.environ.get("JARVIS_FALLBACK_SEARCH_ONLY")
+    if raw is None:
+        return False
+    if raw.strip().lower() in _FALLBACK_TRUTHY:
+        return True
+    print(
+        f"warning: JARVIS_FALLBACK_SEARCH_ONLY={raw!r} is not one of "
+        "1/true/yes/on — treating as off",
+        file=sys.stderr,
+    )
+    return False
 
 
 def repo_slug(name: str) -> str:

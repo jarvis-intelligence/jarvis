@@ -96,3 +96,39 @@ def test_should_ignore_path_skips_vendor_and_git_dirs():
     assert should_ignore_path("/repo/.venv/lib/foo.py") is True
     assert should_ignore_path("/repo/__pycache__/foo.pyc") is True
     assert should_ignore_path("/repo/src/main.py") is False
+
+
+def test_swift_artifacts_are_ignored_wherever_they_appear():
+    """D-07/D-08: the six Swift build-artifact directory names are matched
+    as path components at any depth, so the watcher never reindexes in
+    response to files the indexer or build system itself drops in-tree."""
+    from jarvis.watch import should_ignore_path
+
+    for name in (".scip-cache", ".build", "DerivedData", ".index-store", "IndexStore", ".swiftpm"):
+        assert should_ignore_path(f"/repo/{name}/payload") is True, f"root-level {name}"
+        assert should_ignore_path(f"/repo/nested/deeper/{name}/payload") is True, f"nested {name}"
+
+
+def test_real_swift_layouts_are_ignored():
+    from jarvis.watch import should_ignore_path
+
+    assert should_ignore_path("/repo/.build/x86_64-apple-macosx/debug/App.build") is True
+    assert should_ignore_path("/repo/DerivedData/App-dhffkg/Build/Products/App.swiftmodule") is True
+    assert should_ignore_path("/repo/.scip-cache/index-db/store.db") is True
+
+
+def test_swift_ignores_never_suppress_legitimate_triggers():
+    """Over-broad ignoring is the failure mode this guards (T-02-07):
+    Swift sources and .xcodeproj/project.pbxproj edits must always trigger
+    a reindex -- no wholesale .xcodeproj ignoring (orchestrator resolution
+    #2: the one-shot xcshareddata write is accepted, not ignored)."""
+    from jarvis.watch import should_ignore_path
+
+    assert should_ignore_path("/repo/Sources/App/main.swift") is False
+    assert should_ignore_path("/repo/App.xcodeproj/project.pbxproj") is False
+    # Pre-existing set unchanged, and component-membership means a name
+    # that merely contains a marker as a substring stays live.
+    assert should_ignore_path("/repo/build/out.js") is True
+    assert should_ignore_path("/repo/dist/app.js") is True
+    assert should_ignore_path("/repo/Builders/main.swift") is False
+    assert should_ignore_path("/repo/build_tools.swift") is False

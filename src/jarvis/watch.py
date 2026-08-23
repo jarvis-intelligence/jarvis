@@ -15,7 +15,22 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-_IGNORED_PATH_PARTS = {".git", "node_modules", ".venv", "__pycache__", "dist", "build"}
+# Swift build artifacts (D-07/D-08): the scip-swift cache lives under the
+# jarvis data dir since 02-01, but xcodebuild and SwiftPM can still drop
+# build products inside the working tree, and a watcher that reindexes in
+# response to files the build itself wrote is a treadmill. Matched as
+# components wherever they appear, for every language. Note `.build` is
+# distinct from the existing `build` entry (SwiftPM prefixes the dot).
+#
+# Deliberately NOT ignored: the one-time xcshareddata/swiftpm/configuration
+# write xcodebuild makes on first index -- it is never rewritten afterward,
+# so it costs one debounced reindex once, and ignoring it would start down
+# the path of ignoring .xcodeproj internals where project.pbxproj edits
+# (legitimate triggers) live (orchestrator resolution #2).
+_IGNORED_PATH_PARTS = {
+    ".git", "node_modules", ".venv", "__pycache__", "dist", "build",
+    ".scip-cache", ".build", "DerivedData", ".index-store", "IndexStore", ".swiftpm",
+}
 
 
 def should_ignore_path(path: str) -> bool:

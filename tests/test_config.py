@@ -36,6 +36,18 @@ def test_lancedb_dir_under_data_dir(tmp_path):
     assert config.lancedb_dir(tmp_path) == tmp_path / "lancedb"
 
 
+def test_swift_cache_dir_under_data_dir(monkeypatch, tmp_path):
+    """Per-repo keyed (D-05): deterministic isolation so IndexStores from
+    different repos never interfere with each other."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    assert config.swift_cache_dir("my-repo") == tmp_path / "cache" / "scip-swift" / "my-repo"
+
+
+def test_swift_cache_dir_honors_explicit_root(tmp_path):
+    """The root override wins over the env var, exactly like lancedb_dir."""
+    assert config.swift_cache_dir("my-repo", tmp_path) == tmp_path / "cache" / "scip-swift" / "my-repo"
+
+
 def test_ignored_dirs_shared_with_index_cli():
     from jarvis import index_cli
     assert index_cli._IGNORED_DIRS is config.IGNORED_DIRS
@@ -73,3 +85,33 @@ def test_data_dir_ignores_the_old_codeintel_env_var(monkeypatch):
     monkeypatch.delenv("JARVIS_DATA_DIR", raising=False)
     monkeypatch.setenv("CODEINTEL_DATA_DIR", "/tmp/should-be-ignored")
     assert config.data_dir() == config.DEFAULT_DATA_DIR
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", "On"])
+def test_fallback_env_var_accepts_the_strict_truthy_set(monkeypatch, value):
+    """FALL-02: exactly 1/true/yes/on, case-insensitive, turn the global
+    fallback default on (CONTEXT Area 2)."""
+    monkeypatch.setenv("JARVIS_FALLBACK_SEARCH_ONLY", value)
+    assert config.fallback_search_only_from_env() is True
+
+
+def test_fallback_env_var_unset_reads_off(monkeypatch):
+    monkeypatch.delenv("JARVIS_FALLBACK_SEARCH_ONLY", raising=False)
+    assert config.fallback_search_only_from_env() is False
+
+
+@pytest.mark.parametrize("value", ["maybe", "2", ""])
+def test_fallback_env_var_garbage_reads_off_with_exactly_one_warning(
+    monkeypatch, capsys, value
+):
+    """Loud misconfiguration beats silent: any value outside the strict
+    set reads as off AND prints exactly one stderr line naming the bad
+    value and the accepted set (T-3-02)."""
+    monkeypatch.setenv("JARVIS_FALLBACK_SEARCH_ONLY", value)
+    assert config.fallback_search_only_from_env() is False
+    err = capsys.readouterr().err
+    lines = [line for line in err.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "JARVIS_FALLBACK_SEARCH_ONLY" in lines[0]
+    assert repr(value) in lines[0]
+    assert "1/true/yes/on" in lines[0]
