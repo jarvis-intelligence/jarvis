@@ -4598,3 +4598,253 @@ def test_install_semantic_extra_argv_and_failure_paths(monkeypatch):
 
     monkeypatch.setattr("jarvis.index_cli.subprocess.run", _timeout)
     assert _install_semantic_extra() is False
+
+
+def test_cmd_index_non_tty_never_prompts_or_blocks(
+    tmp_path: Path, monkeypatch
+):
+    """SEMA-02: a piped/cron `jarvis index` (either stream redirected)
+    never prompts or blocks on stdin, never installs, and never writes
+    the decline bit — never answered, so a later TTY run still offers."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    _mock_healthy_full_run(monkeypatch)
+    monkeypatch.setattr("jarvis.index_cli._semantic_extra_missing", lambda: True)
+    monkeypatch.setattr("jarvis.index_cli._at_interactive_tty", lambda: False)
+    _script_input(
+        monkeypatch, error=AssertionError("a non-TTY run must never prompt")
+    )
+    monkeypatch.setattr(
+        "jarvis.index_cli._install_semantic_extra",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("a non-TTY run must never install")
+        ),
+    )
+
+    rc, _ = _offer_run(monkeypatch, tmp_path, "piped-repo")
+
+    assert rc == 0
+    registry = Registry(tmp_path / "data" / "registry.db")
+    try:
+        entry = registry.get("piped-repo")
+        assert entry is not None
+        assert entry.semantic_declined is False
+    finally:
+        registry.close()
+
+
+def test_at_interactive_tty_requires_both_streams_tty(monkeypatch):
+    """SEMA-02 both-stream gate: pip's convention — either stream
+    redirected means automation. Pins the stdin-TTY-but-stdout-piped edge
+    from the phase coverage report (a prompt there would hang a pipe)."""
+    import sys
+
+    from jarvis.index_cli import _at_interactive_tty
+
+    class _Stream:
+        def __init__(self, tty: bool):
+            self._tty = tty
+
+        def isatty(self) -> bool:
+            return self._tty
+
+    for stdin_tty, stdout_tty, expected in [
+        (True, True, True),
+        (True, False, False),  # stdin is a TTY but stdout is piped
+        (False, True, False),
+        (False, False, False),
+    ]:
+        monkeypatch.setattr(sys, "stdin", _Stream(stdin_tty))
+        monkeypatch.setattr(sys, "stdout", _Stream(stdout_tty))
+        assert _at_interactive_tty() is expected
+
+
+def test_offer_semantic_defaults_true_only_on_index_subparser(tmp_path: Path):
+    """SEMA-02 structural gate at the parser level: only the `index`
+    subparser carries offer_semantic; reindex/watch/list (and their
+    synthetic Namespaces) read False via getattr's default."""
+    from jarvis.index_cli import build_parser
+
+    parser = build_parser()
+
+    assert parser.parse_args(["index", str(tmp_path)]).offer_semantic is True
+    for argv in [["reindex", "some-slug"], ["watch", str(tmp_path)], ["list"]]:
+        assert getattr(parser.parse_args(argv), "offer_semantic", False) is False, argv
+
+
+def test_cmd_reindex_never_offers_semantic_install(
+    tmp_path: Path, monkeypatch
+):
+    """SEMA-02 / planner decision 1: `jarvis reindex` delegates to
+    `_cmd_index` through a synthetic Namespace that omits offer_semantic
+    — so even with every other gate forced open (extra missing, both
+    streams TTY) on a never-declined repo, reindex never prompts."""
+    import argparse
+
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    _mock_healthy_full_run(monkeypatch)
+    monkeypatch.setattr("jarvis.index_cli._semantic_extra_missing", lambda: True)
+
+    # Seed a completed, never-declined row non-interactively.
+    monkeypatch.setattr("jarvis.index_cli._at_interactive_tty", lambda: False)
+    slug = "reindex-repo"
+    rc, _ = _offer_run(monkeypatch, tmp_path, slug)
+    assert rc == 0
+
+    # Now every gate is open except the structural one, and prompting at
+    # all is the failure.
+    monkeypatch.setattr("jarvis.index_cli._at_interactive_tty", lambda: True)
+    _script_input(monkeypatch, error=AssertionError("reindex must never prompt"))
+    rc = cli._cmd_reindex(argparse.Namespace(slug=slug))
+
+    assert rc == 0
+    registry = Registry(tmp_path / "data" / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.semantic_declined is False
+    finally:
+        registry.close()
+
+
+def test_cmd_watch_reindex_never_prompts_even_at_a_tty(
+    tmp_path: Path, monkeypatch
+):
+    """SEMA-02 watch leg: watch IS a foreground TTY (05-RESEARCH Pitfall
+    1), so the isatty gate alone could never protect it — the structural
+    proof is that `_reindex` calls index_repo directly and can never
+    reach `_cmd_index`'s offer. Extra missing, TTY forced True, input
+    poisoned: still rc 0, no prompt, no raise. (The MCP leg is the same
+    structural property — server.py imports no index path at all.)"""
+    import argparse
+    import itertools
+
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = tmp_path / "not-a-repo"
+    repo_dir.mkdir()
+    monkeypatch.setattr("jarvis.index_cli._semantic_extra_missing", lambda: True)
+    monkeypatch.setattr("jarvis.index_cli._at_interactive_tty", lambda: True)
+    _script_input(monkeypatch, error=AssertionError("watch must never prompt"))
+
+    def fake_index_repo(path, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    rc = _drive_cmd_watch(
+        cli, monkeypatch,
+        {"path": str(repo_dir), "slug": None, "scheme": None,
+         "debounce": 0.0, "language": None, "fallback_search_only": None},
+        sleep_results=itertools.chain(itertools.repeat(None, 5), [KeyboardInterrupt()]),
+    )
+    assert rc == 0
+
+
+def test_semantic_extra_missing_detects_missing_top_level_modules(monkeypatch):
+    """SEMA-01 detection set: exactly the two modules the semantic stage
+    imports lazily — either missing means the extra is missing.
+    tree_sitter_language_pack is deliberately NEVER queried (chunker.py
+    falls back to fixed-window chunking; its absence never disables
+    semantic)."""
+    from jarvis.index_cli import _semantic_extra_missing
+
+    available = {
+        "lancedb": object(),
+        "sentence_transformers": object(),
+        "tree_sitter_language_pack": object(),
+    }
+    seen: list[str] = []
+
+    def _find_spec(name):
+        seen.append(name)
+        return available.get(name)
+
+    monkeypatch.setattr("jarvis.index_cli.importlib.util.find_spec", _find_spec)
+
+    assert _semantic_extra_missing() is False  # both present
+    seen.clear()
+    available["lancedb"] = None
+    assert _semantic_extra_missing() is True  # lancedb gone
+    available["lancedb"] = object()
+    available["sentence_transformers"] = None
+    assert _semantic_extra_missing() is True  # sentence_transformers gone
+    available["sentence_transformers"] = object()
+    available["tree_sitter_language_pack"] = None
+    assert _semantic_extra_missing() is False  # tree-sitter is not a requirement
+    assert "tree_sitter_language_pack" not in seen
+
+
+def test_cmd_index_no_prompt_when_extra_already_installed(
+    tmp_path: Path, monkeypatch
+):
+    """Locked Area 3: extra installed → no prompt ever, and the decline
+    bit is never written (the find_spec gate precedes the decline gate,
+    so a stale declined bit is moot once the extra exists)."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    _mock_healthy_full_run(monkeypatch)
+    monkeypatch.setattr("jarvis.index_cli._semantic_extra_missing", lambda: False)
+    monkeypatch.setattr("jarvis.index_cli._at_interactive_tty", lambda: True)
+    _script_input(
+        monkeypatch, error=AssertionError("must not prompt when the extra exists")
+    )
+
+    rc, _ = _offer_run(monkeypatch, tmp_path, "installed-repo")
+
+    assert rc == 0
+    registry = Registry(tmp_path / "data" / "registry.db")
+    try:
+        entry = registry.get("installed-repo")
+        assert entry is not None
+        assert entry.semantic_declined is False  # the bit is never written
+    finally:
+        registry.close()
+
+
+def test_cmd_index_semantic_include_runs_on_declined_repo_without_clearing_bit(
+    tmp_path: Path, monkeypatch
+):
+    """Locked Area 3: an explicit --semantic-include is direct user
+    intent — the semantic stage runs with those prefixes on a declined
+    repo, never blocked, and the decline bit stays set."""
+    import argparse
+
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    _mock_healthy_full_run(monkeypatch)
+    _force_offer_seams(monkeypatch)
+    slug = "include-repo"
+
+    # Pre-decline the repo (one offer run, Enter = No).
+    rc, _ = _offer_run(monkeypatch, tmp_path, slug, answer="")
+    assert rc == 0
+
+    # Now the extra is present (no offer) and the user passes an explicit
+    # include: the pipeline stage must run with those prefixes.
+    monkeypatch.setattr("jarvis.index_cli._semantic_extra_missing", lambda: False)
+    stage_calls: list = []
+
+    def _stage(repo_path, slug, root, include_prefixes=()):
+        stage_calls.append((repo_path, slug, root, include_prefixes))
+        return True
+
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", _stage)
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(tmp_path / slug), slug=slug, scheme=None,
+        semantic_include=["src/"], language=None, search_only=None,
+        fallback_search_only=None, offer_semantic=True,
+    ))
+
+    assert rc == 0
+    assert [c[3] for c in stage_calls] == [("src/",)]
+    registry = Registry(tmp_path / "data" / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.semantic_declined is True  # never cleared
+        assert entry.semantic_include == ("src/",)
+    finally:
+        registry.close()
