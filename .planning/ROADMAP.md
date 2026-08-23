@@ -113,12 +113,12 @@ Plans:
   2. Every added signature is captured from the pinned scip-swift binary's real stderr against a known-failing repo, and pinned by a unit test embedding that exact output
   3. A Swift failure matching no signature still fails hard — unverified failures are never silently degraded
 
-**Plans**: 1 plan
+**Plans**: 1/1 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 04-01-PLAN.md — Two scip-swift 0.3.0 signature entries (captured verbatim from real stderr) + five pinning/negative tests; unmatched failures keep failing hard (SWFT-04)
+- [x] 04-01-PLAN.md — Two scip-swift 0.3.0 signature entries (captured verbatim from real stderr) + five pinning/negative tests; unmatched failures keep failing hard (SWFT-04)
 
 ### Phase 5: Semantic Install Onboarding
 
@@ -143,7 +143,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 | 1. Registry Foundation & Degradation Reporting | 3/3 | Complete    | 2026-08-22 |
 | 2. scip-swift Toolchain Update | 3/3 | Complete    | 2026-08-22 |
 | 3. Opt-In Self-Healing Fallback | 3/3 | Complete    | 2026-08-23 |
-| 4. Swift Failure Signatures | 0/1 | Not started | - |
+| 4. Swift Failure Signatures | 1/1 | In Progress|  |
 | 5. Semantic Install Onboarding | 0/TBD | Not started | - |
 
 ---

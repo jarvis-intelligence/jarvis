@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 4
 current_phase_name: Swift Failure Signatures
-status: executing
-stopped_at: Phase 3 complete, ready to plan Phase 4
-last_updated: "2026-08-23T01:55:26.665Z"
+status: verifying
+stopped_at: Completed 04-01-PLAN.md (Phase 4 complete)
+last_updated: "2026-08-23T02:06:44.017Z"
 last_activity: 2026-08-23
-last_activity_desc: Phase 3 complete, transitioned to Phase 4
-state_head: d9bdc85dea08f5ac8dd8731234aeb8e35042e274
+last_activity_desc: Phase 4 execution started
+state_head: 79f8af51121c49c187a4b3443275ab5a45880a83
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 10
-  completed_plans: 9
+  completed_plans: 10
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-08-23)
 
 ## Current Position
 
-Phase: 4 (Swift Failure Signatures) — READY TO EXECUTE
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-08-23 — Phase 3 complete, transitioned to Phase 4
+Phase: 4 (Swift Failure Signatures) — VERIFYING
+Plan: 1 of 1 (complete)
+Status: Phase complete — ready for verification
+Last activity: 2026-08-23 — 04-01 executed (SUMMARY written)
 
 Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
@@ -78,6 +78,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 | Phase 03 P01 | 23min | 3 tasks | 6 files |
 | Phase 03 P02 | 5min | 2 tasks | 5 files |
 | Phase 03 P03 | 9min | 2 tasks | 2 files |
+| Phase 04 P01 | 9min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -119,6 +120,8 @@ Recent decisions affecting current work:
 
 - [Phase 03 UAT]: All 18 judgment-tier prohibition verdicts confirmed (UPHELD) by human review; 3 live-execution UATs passed (degrade smoke e2e with real zoekt answering, watch-vs-manual race, real-Observer skip-note + sha-change retrigger)
 - [Phase 03]: Code review --auto converged in 2 fix passes — 4 fixes (CR-01 published-flag gate, WR-01 honest bookkeeping failure, WR-02 partial-landing marker + retire reorder, WR-03 best-effort record_failure); final 0 critical / 0 warning / 9 info; 633 unit tests green
+- [Phase 4]: [Phase 04]: 04-01: Swift entry 2 is single-token (Build succeeded but no IndexStore was produced) per the AGP precedent — headline unique across all nine capture shapes; second token would couple to rewordable prose
+- [Phase 4]: [Phase 04]: 04-01: tokens are path-free (both error lines interpolate repo/cache paths) and drift fails hard — re-capture on any scip-swift version bump, documented in the constant's provenance comment
 
 ### Pending Todos
 
@@ -138,8 +141,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-22T17:49:34.220Z
-Stopped at: Phase 3 complete, ready to plan Phase 4
+Last session: 2026-08-23T02:06:26.164Z
+Stopped at: Completed 04-01-PLAN.md (Phase 4 complete)
 Resume file: None
 
 ### Planning Overrides
