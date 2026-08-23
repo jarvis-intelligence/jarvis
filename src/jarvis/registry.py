@@ -110,13 +110,16 @@ class RegisteredRepo:
     # never set, defer to the env tier; set only by `set_fallback_enabled`
     # with the explicit CLI value (FALL-02, Pitfall 1).
     fallback_enabled: bool | None = None
+    # Semantic-install decline memory (Phase 5): 1 = user declined the
+    # offer; NULL = never asked. No tri-state — NULL reads False.
+    semantic_declined: bool = False
 
 
 def _row_to_repo(row: tuple) -> RegisteredRepo:
     (slug, path, language, commit_sha, last_indexed, status,
      scheme_override, semantic_indexed_at, semantic_include, language_override,
      search_only, tracked_files, status_origin, status_reason, status_stderr,
-     fallback_enabled) = row
+     fallback_enabled, semantic_declined) = row
     return RegisteredRepo(
         slug=slug,
         path=path,
@@ -134,6 +137,7 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
         status_reason=status_reason,
         status_stderr=status_stderr,
         fallback_enabled=bool(fallback_enabled) if fallback_enabled is not None else None,
+        semantic_declined=bool(semantic_declined) if semantic_declined is not None else False,
     )
 
 
@@ -191,6 +195,11 @@ class Registry:
         # tier; written only via set_fallback_enabled with the explicit
         # CLI value, never by upsert (Pitfall 1).
         _ensure_column(self._conn, "fallback_enabled", "INTEGER")
+        # SEMA-01 decline memory. NULL = never answered (offer again);
+        # written only via set_semantic_declined — never by upsert, whose
+        # transitional `indexing` writes would NULL-reset it (the
+        # tracked_files trap).
+        _ensure_column(self._conn, "semantic_declined", "INTEGER")
 
     def upsert(
         self,
@@ -299,7 +308,7 @@ class Registry:
         row = self._conn.execute(
             "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, "
             "semantic_indexed_at, semantic_include, language_override, search_only, tracked_files, "
-            "status_origin, status_reason, status_stderr, fallback_enabled "
+            "status_origin, status_reason, status_stderr, fallback_enabled, semantic_declined "
             "FROM repos WHERE slug = ?",
             (slug,),
         ).fetchone()
@@ -309,7 +318,7 @@ class Registry:
         rows = self._conn.execute(
             "SELECT slug, path, language, commit_sha, last_indexed, status, scheme_override, "
             "semantic_indexed_at, semantic_include, language_override, search_only, tracked_files, "
-            "status_origin, status_reason, status_stderr, fallback_enabled "
+            "status_origin, status_reason, status_stderr, fallback_enabled, semantic_declined "
             "FROM repos ORDER BY slug"
         ).fetchall()
         return [_row_to_repo(row) for row in rows]
@@ -341,6 +350,22 @@ class Registry:
         """
         self._conn.execute(
             "UPDATE repos SET fallback_enabled = ? WHERE slug = ?",
+            (int(value), slug),
+        )
+        self._conn.commit()
+
+    def set_semantic_declined(self, slug: str, value: bool) -> None:
+        """Persist the SEMA-01 per-repo decline memory (the y/N offer's
+        "no" answer, or EOF/Ctrl-C at the prompt).
+
+        Deliberately not an upsert column, exactly like tracked_files and
+        fallback_enabled: `upsert`'s ON CONFLICT list would NULL-reset the
+        memory on every transitional `indexing` write. Only 1 is ever
+        written; clearing is row death via `jarvis forget` (once the
+        extra exists anywhere the gate order makes the bit moot).
+        """
+        self._conn.execute(
+            "UPDATE repos SET semantic_declined = ? WHERE slug = ?",
             (int(value), slug),
         )
         self._conn.commit()

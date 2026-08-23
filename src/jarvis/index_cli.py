@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import json
 import os
 import re
@@ -733,6 +734,47 @@ def _print_semantic_report(report: "SemanticIndexReport") -> None:
             file=sys.stderr,
         )
 
+def _semantic_extra_missing() -> bool:
+    """Isolated for tests to monkeypatch."""
+    # The same top-level modules the semantic stage itself imports
+    # lazily: semantic.py's `import lancedb` and embeddings.py's
+    # `from sentence_transformers import SentenceTransformer`.
+    # tree_sitter_language_pack is deliberately excluded — chunker.py
+    # falls back to fixed-window chunking on any failure, so it is not
+    # a hard requirement for semantic search.
+    return (
+        importlib.util.find_spec("lancedb") is None
+        or importlib.util.find_spec("sentence_transformers") is None
+    )
+
+
+def _at_interactive_tty() -> bool:
+    """Isolated for tests to monkeypatch."""
+    # pip's convention: either stream redirected means automation, and
+    # automation must never block on stdin — the non-TTY defense behind
+    # the structural offer_semantic gate (SEMA-02).
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _install_semantic_extra() -> bool:
+    """Isolated for tests to monkeypatch."""
+    # The locked install command as a fixed argv list — never a shell
+    # string, never built from the prompt answer. Deliberately not _run:
+    # an install failure must warn and continue, not raise. torch-scale
+    # downloads can take minutes, so a stalled network is bounded at
+    # 600s (the index is already published; only the offer waits).
+    uv = shutil.which("uv")
+    if uv is None:
+        return False
+    try:
+        result = subprocess.run(
+            [uv, "pip", "install", "--python", sys.executable, "jarvis-mcp[semantic]"],
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
+
 
 def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
                         include_prefixes: tuple[str, ...] = ()) -> bool:
@@ -1280,6 +1322,56 @@ def _cmd_index(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"indexed {slug}")
+    # SEMA-01/SEMA-02: the semantic-extra install offer. Post-publish by
+    # design — the index is already live before anything interactive can
+    # delay or risk it (a consented install re-runs the stage below and
+    # stamps the row in the same invocation). Four gates, cheapest and
+    # most structural first: (1) offer_semantic — set only by the index
+    # subparser, so reindex/watch/MCP can never reach this; (2) the
+    # extra must actually be missing; (3) both streams must be TTYs;
+    # (4) this repo must not have declined before.
+    if (
+        getattr(args, "offer_semantic", False)
+        and _semantic_extra_missing()
+        and _at_interactive_tty()
+    ):
+        registry = Registry(config.data_dir() / "registry.db")
+        try:
+            entry = registry.get(slug)
+        finally:
+            registry.close()
+        if entry is None or not entry.semantic_declined:
+            try:
+                answer = input("Install semantic search support for this repo? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                # Locked: EOF/Ctrl-C at the prompt is a decline —
+                # remembered, no traceback, index already complete.
+                answer = ""
+            if answer in ("y", "yes"):
+                if _install_semantic_extra():
+                    importlib.invalidate_caches()
+                    include = tuple(entry.semantic_include) if entry is not None else ()
+                    if _run_semantic_stage(Path(args.path), slug, None, include):
+                        registry = Registry(config.data_dir() / "registry.db")
+                        try:
+                            registry.mark_semantic_indexed(slug)
+                        finally:
+                            registry.close()
+                else:
+                    print(
+                        "warning: semantic extra install failed — index completed "
+                        f"without semantic; tried: uv pip install --python {sys.executable} "
+                        '"jarvis-mcp[semantic]"',
+                        file=sys.stderr,
+                    )
+                    # Failure is not a refusal (locked): no decline bit,
+                    # so the next TTY index offers again.
+            else:
+                registry = Registry(config.data_dir() / "registry.db")
+                try:
+                    registry.set_semantic_declined(slug, True)
+                finally:
+                    registry.close()
     return 0
 
 
@@ -1579,6 +1671,10 @@ def build_parser() -> argparse.ArgumentParser:
              "JARVIS_FALLBACK_SEARCH_ONLY sets the global default)",
     )
     index_parser.set_defaults(func=_cmd_index)
+    # SEMA-02 structural gate: only `jarvis index` offers — reindex's
+    # synthetic Namespace, watch's index_repo call, and MCP paths all
+    # read False via getattr's default.
+    index_parser.set_defaults(offer_semantic=True)
 
     list_parser = subparsers.add_parser("list", help="list indexed repos")
     list_parser.set_defaults(func=_cmd_list)
