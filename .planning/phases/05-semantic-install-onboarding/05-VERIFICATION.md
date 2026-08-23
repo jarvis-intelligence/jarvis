@@ -1,11 +1,12 @@
 ---
 phase: 05-semantic-install-onboarding
 verified: 2026-08-23T05:55:13Z
-status: human_needed
+status: passed
 score: 13/13 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
 human_verification:
+
   - test: "Live y-consent leg of the D5 smoke (the only D5 leg not exercised in this verification): at a real terminal, in a base-install venv (`uv venv /tmp/p5-venv && uv pip install --python /tmp/p5-venv/bin/python -e .`), run `JARVIS_DATA_DIR=/tmp/p5-live/data /tmp/p5-venv/bin/jarvis index <small repo>` and answer `y` at the prompt"
     expected: "uv pip install --python <venv python> jarvis-mcp[semantic] runs for real (network download — torch-scale, may take minutes), and the SAME invocation completes with semantic search enabled (semantic stage runs, `jarvis status <slug>` shows a semantic timestamp, no second command)"
     why_human: "Real network install of the PyPI distribution plus a first-run sentence-transformers model download — deliberately not triggered by an automated verifier; CI cannot exercise the missing-extra branch honestly (CI installs --extra semantic, 05-RESEARCH Pitfall 5). Recipe: 05-VALIDATION.md Manual-Only Verifications. Note: every other D5 leg WAS exercised live in this verification (see Behavioral Spot-Checks) — prompt at a real PTY with the extra genuinely absent, Enter=decline remembered, declined re-run silent, piped run silent with the skip hint)."
