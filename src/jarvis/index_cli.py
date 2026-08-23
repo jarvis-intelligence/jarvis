@@ -769,9 +769,15 @@ def _install_semantic_extra() -> bool:
     try:
         result = subprocess.run(
             [uv, "pip", "install", "--python", sys.executable, "jarvis-mcp[semantic]"],
-            capture_output=True, text=True, timeout=600,
+            capture_output=True, text=True, errors="replace", timeout=600,
         )
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError):
+        # Every way the spawn or its decode can fail lands here, not just
+        # the timeout: an OSError when the resolved uv cannot exec (broken
+        # interpreter after `which` said yes, TOCTOU unlink, EACCES), or a
+        # decode failure if uv/pip ever emit non-UTF-8 bytes that even
+        # errors="replace" lets through. The index is already published —
+        # the caller's contract is one stderr warning and rc 0.
         return False
     return result.returncode == 0
 

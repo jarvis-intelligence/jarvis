@@ -4554,8 +4554,11 @@ def test_cmd_index_offer_eof_or_keyboard_interrupt_at_prompt_declines_remembered
 def test_install_semantic_extra_argv_and_failure_paths(monkeypatch):
     """The locked uv command as a fixed argv: [resolved uv, "pip",
     "install", "--python", sys.executable, "jarvis-mcp[semantic]"] — list
-    form (no shell), spec unpinned. uv absent → False with no subprocess
-    at all; a non-zero exit → False; a TimeoutExpired → False."""
+    form (no shell), spec unpinned, decoded with errors="replace" so a
+    legacy-locale uv can't crash the decode. uv absent → False with no
+    subprocess at all; a non-zero exit → False; a TimeoutExpired → False.
+    Spawn OSErrors and decode failures are pinned by the WR-02 test
+    below."""
     import sys as _sys
 
     from jarvis.index_cli import _install_semantic_extra
@@ -4577,7 +4580,7 @@ def test_install_semantic_extra_argv_and_failure_paths(monkeypatch):
     assert runs == [(
         ["/fake/bin/uv", "pip", "install", "--python", _sys.executable,
          "jarvis-mcp[semantic]"],
-        {"capture_output": True, "text": True, "timeout": 600},
+        {"capture_output": True, "text": True, "errors": "replace", "timeout": 600},
     )]
 
     # Non-zero exit → False.
@@ -4604,6 +4607,28 @@ def test_install_semantic_extra_argv_and_failure_paths(monkeypatch):
 
     monkeypatch.setattr("jarvis.index_cli.subprocess.run", _timeout)
     assert _install_semantic_extra() is False
+
+
+def test_install_semantic_extra_swallows_spawn_and_decode_failures(monkeypatch):
+    """WR-02: every spawn/decode failure inside the install helper lands
+    in the same warn-and-continue False path as a timeout — an OSError
+    from subprocess.run (uv unexecutable after `which` said yes, a TOCTOU
+    unlink, EACCES) or a UnicodeDecodeError from decoding uv's captured
+    output must never escape to traceback the just-published index."""
+    from jarvis.index_cli import _install_semantic_extra
+
+    monkeypatch.setattr("jarvis.index_cli.shutil.which", lambda name: "/fake/bin/uv")
+
+    for exc in (
+        FileNotFoundError(2, "No such file or directory"),
+        PermissionError(13, "Permission denied"),
+        UnicodeDecodeError("utf-8", b"\x80", 0, 1, "invalid start byte"),
+    ):
+        def _raise(cmd, **kwargs):
+            raise exc
+
+        monkeypatch.setattr("jarvis.index_cli.subprocess.run", _raise)
+        assert _install_semantic_extra() is False, repr(exc)
 
 
 def test_cmd_index_non_tty_never_prompts_or_blocks(
