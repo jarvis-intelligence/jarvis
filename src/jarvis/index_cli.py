@@ -120,6 +120,18 @@ _SEARCH_ONLY_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
         "scip-java's Gradle plugin keys off standard source sets that AGP replaces with "
         "variants (upstream scip-java#177)",
     ),
+    # --- scip-swift 0.3.0 (captured 2026-08-23) -------------------------------
+    # Captured from the pinned scip-swift 0.3.0 against known-failing repo
+    # shapes. The tokens are deliberately path-free: both scip-swift error
+    # lines interpolate the repo/cache paths, which would pin a signature to
+    # one machine. On a scip-swift version bump these must be re-captured —
+    # wording drift fails hard (unmatched → hard failure) and must never
+    # silently degrade.
+    (
+        ("Could not detect a build system", "no Package.swift and no .xcodeproj/.xcworkspace found"),
+        "the repo has Swift sources but neither a Package.swift nor an Xcode project, so "
+        "scip-swift has no build system to run",
+    ),
 )
 
 
