@@ -131,13 +131,13 @@ Plans:
   2. Answering no is remembered per-repo — later indexes of that repo are not prompted again, while other repos still get the offer
   3. Non-TTY paths (`jarvis watch`, MCP-triggered reindex) never prompt or block on stdin — semantic stays silently skipped with the existing stderr hint
 
-**Plans**: 1 plan
+**Plans**: 1/1 plans executed
 
 Plans:
 
 **Wave 1**
 
-- [ ] 05-01-PLAN.md — Tracer: semantic_declined registry memory + TTY y/N offer in _cmd_index (per-repo decline memory); consented uv install + same-invocation semantic enablement; non-TTY/watch/reindex silence pins (SEMA-01, SEMA-02)
+- [x] 05-01-PLAN.md — Tracer: semantic_declined registry memory + TTY y/N offer in _cmd_index (per-repo decline memory); consented uv install + same-invocation semantic enablement; non-TTY/watch/reindex silence pins (SEMA-01, SEMA-02)
 
 ## Progress
 
@@ -150,7 +150,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 | 2. scip-swift Toolchain Update | 3/3 | Complete    | 2026-08-22 |
 | 3. Opt-In Self-Healing Fallback | 3/3 | Complete    | 2026-08-23 |
 | 4. Swift Failure Signatures | 1/1 | Complete    | 2026-08-23 |
-| 5. Semantic Install Onboarding | 0/1 | Not started | - |
+| 5. Semantic Install Onboarding | 1/1 | In Progress|  |
 
 ---
 *Roadmap created: 2026-08-21 — milestone v1.0, 5 phases, 14/14 requirements mapped (granularity: standard)*

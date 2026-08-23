@@ -30,8 +30,8 @@ Requirements for milestone v1.0. Each maps to roadmap phases.
 
 ### Semantic Onboarding
 
-- [ ] **SEMA-01**: TTY `jarvis index` with semantic extra missing offers install (y/N), auto-installs on yes, remembers decline per-repo
-- [ ] **SEMA-02**: Non-TTY paths (watch, MCP reindex) never prompt — silent skip + stderr hint preserved
+- [x] **SEMA-01**: TTY `jarvis index` with semantic extra missing offers install (y/N), auto-installs on yes, remembers decline per-repo
+- [x] **SEMA-02**: Non-TTY paths (watch, MCP reindex) never prompt — silent skip + stderr hint preserved
 
 ## v2 Requirements
 
@@ -73,8 +73,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SWFT-02 | Phase 2 | Complete |
 | SWFT-03 | Phase 2 | Complete |
 | SWFT-04 | Phase 4 | Complete |
-| SEMA-01 | Phase 5 | Pending |
-| SEMA-02 | Phase 5 | Pending |
+| SEMA-01 | Phase 5 | Complete |
+| SEMA-02 | Phase 5 | Complete |
 
 **Coverage:**
 

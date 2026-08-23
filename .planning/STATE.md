@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 5
 current_phase_name: Semantic Install Onboarding
-status: executing
-stopped_at: Phase 4 complete, ready to plan Phase 5
-last_updated: "2026-08-23T05:07:01.069Z"
+status: verifying
+stopped_at: Completed 05-01-PLAN.md — Phase 5 execution complete (SEMA-01/SEMA-02 code-complete, 18 new tests, full suite 656 green)
+last_updated: "2026-08-23T05:28:34.257Z"
 last_activity: 2026-08-23
-last_activity_desc: Phase 4 complete, transitioned to Phase 5
-state_head: dde0a692a3b1b52370da66a1d52a8990cc1c00b6
+last_activity_desc: Phase 5 execution started
+state_head: 147487e9c10bd3fcc347eda7a03955eae36d994e
 progress:
   total_phases: 5
   completed_phases: 4
   total_plans: 11
-  completed_plans: 10
+  completed_plans: 11
 milestone_name: Indexing Robustness & scip-swift Update
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-08-23)
 
 ## Current Position
 
-Phase: 5 (Semantic Install Onboarding) — READY TO EXECUTE
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-08-23 — Phase 4 complete, transitioned to Phase 5
+Phase: 5 (Semantic Install Onboarding) — EXECUTING
+Plan: 1 of 1
+Status: Phase complete — ready for verification
+Last activity: 2026-08-23 — Phase 5 execution started
 
 Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 
@@ -80,6 +80,7 @@ Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
 | Phase 03 P02 | 5min | 2 tasks | 5 files |
 | Phase 03 P03 | 9min | 2 tasks | 2 files |
 | Phase 04 P01 | 9min | 3 tasks | 2 files |
+| Phase 5 P01 | 19min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -125,6 +126,8 @@ Recent decisions affecting current work:
 - [Phase 4]: [Phase 04]: 04-01: tokens are path-free (both error lines interpolate repo/cache paths) and drift fails hard — re-capture on any scip-swift version bump, documented in the constant's provenance comment
 
 - [Phase 04 UAT]: Reason-prose drift risk ACCEPTED by user (verifier confirmed both Swift reasons cause-only today; IN-01 optional pin declined) — recorded for milestone audit
+- [Phase 5]: [Phase 05]: 05-01: decline memory is a plain bool column (NULL reads False) written only by set_semantic_declined — no tri-state, unlike fallback_enabled there is no precedence chain
+- [Phase 5]: [Phase 05]: 05-01: the offer lives post-publish in _cmd_index only — offer_semantic argparse default on the index subparser is the structural SEMA-02 gate (watch/reindex/MCP can never reach the prompt); consent installs jarvis-mcp[semantic] unpinned via fixed-argv uv (timeout 600s) and enables semantic in the same invocation; install failure never remembered as decline
 
 ### Pending Todos
 
@@ -144,8 +147,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-08-23T02:06:26.164Z
-Stopped at: Phase 4 complete, ready to plan Phase 5
+Last session: 2026-08-23T05:28:33.842Z
+Stopped at: Completed 05-01-PLAN.md — Phase 5 execution complete (SEMA-01/SEMA-02 code-complete, 18 new tests, full suite 656 green)
 Resume file: None
 
 ### Planning Overrides
