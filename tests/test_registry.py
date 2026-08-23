@@ -634,6 +634,79 @@ def test_fallback_enabled_tri_state_roundtrip(tmp_path: Path):
         registry.close()
 
 
+def test_semantic_declined_column_migrates_onto_an_existing_database(tmp_path: Path):
+    """SEMA-01/SC2: a phase-3-era registry (fallback_enabled present,
+    semantic_declined absent) gains the decline-memory column on first
+    open via `_ensure_column`; the legacy row reads NULL → False — never
+    answered, so the offer fires again — with existing fields intact."""
+    db = tmp_path / "registry.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE repos (slug TEXT PRIMARY KEY, path TEXT NOT NULL, "
+        "language TEXT NOT NULL, commit_sha TEXT, last_indexed TEXT NOT NULL, "
+        "status TEXT NOT NULL, scheme_override TEXT, semantic_indexed_at TEXT, "
+        "semantic_include TEXT, language_override TEXT, "
+        "search_only INTEGER NOT NULL DEFAULT 0, tracked_files INTEGER, "
+        "status_origin TEXT, status_reason TEXT, status_stderr TEXT, "
+        "fallback_enabled INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO repos VALUES ('old', '/p', 'python', 'abc', "
+        "'2026-01-01T00:00:00+00:00', 'indexed', NULL, NULL, NULL, NULL, "
+        "0, 42, NULL, NULL, NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    registry = Registry(db)
+    try:
+        entry = registry.get("old")
+        assert entry is not None
+        assert entry.status == "indexed"
+        assert entry.tracked_files == 42
+        assert entry.fallback_enabled is None  # the phase-3 column is untouched
+        assert entry.semantic_declined is False  # NULL = never answered
+    finally:
+        registry.close()
+
+    probe = sqlite3.connect(str(db))
+    try:
+        cols = {row[1] for row in probe.execute("PRAGMA table_info(repos)")}
+        assert "semantic_declined" in cols
+    finally:
+        probe.close()
+
+
+def test_semantic_declined_roundtrip_and_preservation(tmp_path: Path):
+    """SEMA-01 memory semantics: the decline bit roundtrips through the
+    dedicated setter and survives every plain `upsert` and
+    `record_failure` write (neither column list ever names it — the
+    tracked_files trap), and dies only with the row via `jarvis forget`
+    (locked Area 3)."""
+    from jarvis.registry import ORIGIN_FAILED_HARD
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("mine", "/repos/mine", "python", "abc", "indexing")
+        assert registry.get("mine").semantic_declined is False
+        registry.set_semantic_declined("mine", True)
+        assert registry.get("mine").semantic_declined is True
+        # The terminal-write shape: no decline argument rides the upsert.
+        registry.upsert("mine", "/repos/mine", "python", "def", "indexed")
+        assert registry.get("mine").semantic_declined is True
+        # A failed run must not forget the decline either.
+        registry.record_failure(
+            "mine", "/repos/mine", "python", ORIGIN_FAILED_HARD,
+            "scip-python index failed", "scip-python index failed:\nboom",
+        )
+        assert registry.get("mine").semantic_declined is True
+        # The memory dies with the row (locked Area 3).
+        assert registry.forget("mine") is True
+        assert registry.get("mine") is None
+    finally:
+        registry.close()
+
+
 def test_recovery_for_fallback_origin_names_the_self_heal():
     """FALL-01/Area 3: locked wording — names the fix, the reindex verb,
     and the self-heal (full build retries automatically), so a degraded

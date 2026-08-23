@@ -4194,3 +4194,149 @@ def test_cmd_watch_skips_full_build_retry_on_degraded_row_at_same_sha(
     assert rc == 0
     assert invoked == [], "the skip path must not invoke index_repo"
     assert "still degraded at the same commit" in capsys.readouterr().err
+
+
+# --- Phase 5: semantic install onboarding (SEMA-01/02) ----------------------
+
+
+def _offer_test_repo(tmp_path: Path, name: str = "repo") -> Path:
+    """A fixture repo the offer tests can index through the mocked
+    healthy pipeline (the degraded-row CLI test setup)."""
+    repo_dir = tmp_path / name
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    return repo_dir
+
+
+def _force_offer_seams(monkeypatch) -> None:
+    """Force every SEMA-01 gate open except the decline bit: the extra is
+    missing and both streams are a TTY. Seams are monkeypatched by full
+    path — no real stdin, no real find_spec (this checkout and CI both
+    have the extra installed, so detection must never run for real)."""
+    monkeypatch.setattr("jarvis.index_cli._semantic_extra_missing", lambda: True)
+    monkeypatch.setattr("jarvis.index_cli._at_interactive_tty", lambda: True)
+
+
+def _script_input(monkeypatch, answer=None, error=None) -> list[str]:
+    """Replace builtins.input with a recorder returning `answer` (or
+    raising `error`); returns every prompt string seen."""
+    prompts: list[str] = []
+
+    def _input(prompt=""):
+        prompts.append(prompt)
+        if error is not None:
+            raise error
+        return answer
+
+    monkeypatch.setattr("builtins.input", _input)
+    return prompts
+
+
+def test_cmd_index_tty_offer_decline_answer_persists_semantic_declined(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """SEMA-01/SC2 tracer: on a TTY with the extra missing, `jarvis index`
+    offers exactly once, after the index is published, with the locked
+    prompt text; Enter (the safe default) declines and the bit persists
+    per-repo with no traceback."""
+    import argparse
+
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = _offer_test_repo(tmp_path)
+    _mock_healthy_full_run(monkeypatch)
+    _force_offer_seams(monkeypatch)
+    prompts = _script_input(monkeypatch, answer="")
+
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(repo_dir), slug="declined-repo", scheme=None, semantic_include=None,
+        language=None, search_only=None, fallback_search_only=None, offer_semantic=True,
+    ))
+
+    assert rc == 0
+    assert prompts == ["Install semantic search support for this repo? [y/N] "]
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out + captured.err
+    registry = Registry(tmp_path / "data" / "registry.db")
+    try:
+        entry = registry.get("declined-repo")
+        assert entry is not None
+        assert entry.semantic_declined is True
+    finally:
+        registry.close()
+
+
+def test_cmd_index_tty_offer_not_repeated_for_a_declined_repo(
+    tmp_path: Path, monkeypatch
+):
+    """SC2 memory: a second `jarvis index` of a declined repo never
+    prompts (input itself is poisoned) and keeps the bit."""
+    import argparse
+
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = _offer_test_repo(tmp_path)
+    _mock_healthy_full_run(monkeypatch)
+    _force_offer_seams(monkeypatch)
+    _script_input(monkeypatch, answer="")
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(repo_dir), slug="declined-repo", scheme=None, semantic_include=None,
+        language=None, search_only=None, fallback_search_only=None, offer_semantic=True,
+    ))
+    assert rc == 0
+
+    # Second run: prompting at all is the failure.
+    _script_input(monkeypatch, error=AssertionError("must not prompt for a declined repo"))
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(repo_dir), slug="declined-repo", scheme=None, semantic_include=None,
+        language=None, search_only=None, fallback_search_only=None, offer_semantic=True,
+    ))
+
+    assert rc == 0
+    registry = Registry(tmp_path / "data" / "registry.db")
+    try:
+        entry = registry.get("declined-repo")
+        assert entry is not None
+        assert entry.semantic_declined is True
+    finally:
+        registry.close()
+
+
+def test_cmd_index_tty_offer_still_made_for_a_different_repo(
+    tmp_path: Path, monkeypatch
+):
+    """SC2 per-repo memory: declining one repo never suppresses the offer
+    for a different repo in the same data dir."""
+    import argparse
+
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = _offer_test_repo(tmp_path, name="repo-a")
+    other_dir = _offer_test_repo(tmp_path, name="repo-b")
+    _mock_healthy_full_run(monkeypatch)
+    _force_offer_seams(monkeypatch)
+    prompts = _script_input(monkeypatch, answer="")
+
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(repo_dir), slug="repo-a", scheme=None, semantic_include=None,
+        language=None, search_only=None, fallback_search_only=None, offer_semantic=True,
+    ))
+    assert rc == 0
+    assert len(prompts) == 1
+    prompts.clear()
+
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(other_dir), slug="repo-b", scheme=None, semantic_include=None,
+        language=None, search_only=None, fallback_search_only=None, offer_semantic=True,
+    ))
+    assert rc == 0
+    assert prompts == ["Install semantic search support for this repo? [y/N] "]
+    registry = Registry(tmp_path / "data" / "registry.db")
+    try:
+        assert registry.get("repo-a").semantic_declined is True
+        assert registry.get("repo-b").semantic_declined is True
+    finally:
+        registry.close()
