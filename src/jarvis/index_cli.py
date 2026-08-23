@@ -132,6 +132,11 @@ _SEARCH_ONLY_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
         "the repo has Swift sources but neither a Package.swift nor an Xcode project, so "
         "scip-swift has no build system to run",
     ),
+    (
+        ("Build succeeded but no IndexStore was produced",),
+        "the build completed but produced no index store — scip-swift cannot extract "
+        "symbols from a build that emits none",
+    ),
 )
 
 
