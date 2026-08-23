@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 5
-status: completed
+status: Awaiting next milestone
 stopped_at: Phase 5 complete — all phases complete
-last_updated: "2026-08-23T05:59:49.806Z"
+last_updated: "2026-08-23T07:15:10.999Z"
 last_activity: 2026-08-23
-last_activity_desc: Phase 5 complete
-state_head: 9f91581e358f55079bcf515c1b2a72ff8317b6a2
+last_activity_desc: Milestone v1.0 completed and archived
+state_head: 498ad1080087c9890b00058c235c600db20384ef
 progress:
   total_phases: 5
   completed_phases: 5
   total_plans: 11
   completed_plans: 11
 milestone_name: Indexing Robustness & scip-swift Update
+current_phase: 5
 ---
 
 # Project State
@@ -27,12 +27,10 @@ See: .planning/PROJECT.md (updated 2026-08-23)
 
 ## Current Position
 
-Phase: 5
-Plan: Not started
-Status: All phases complete
-Last activity: 2026-08-23 — Phase 5 complete
-
-Progress: [░░░░░░░░░░░░░░░░░░] 12/12 plans
+Phase: Milestone v1.0 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-08-23 — Milestone v1.0 completed and archived
 
 ### Milestone Phase List
 
@@ -131,6 +129,7 @@ Recent decisions affecting current work:
 
 - [Phase 05 UAT]: Live y-consent leg executed at a real pty — prompt post-publish, real network install of jarvis-mcp[semantic], same-invocation semantic enablement (semantic_indexed_at same-second), decline bit never written
 - [Phase 05]: Code review 1 fix pass (WR-01 undecodable-stdin decline, WR-02 spawn/decode failures warn+continue); final 0 critical / 0 warning / 2 info; 657 unit tests green; offer keyed to jarvis index via argparse (watch-is-also-a-TTY insight)
+
 ### Pending Todos
 
 None yet.
@@ -158,3 +157,7 @@ Resume file: None
 - [Phase 5]: decision-coverage-plan gate — same smart-discuss area-format gap (checker verified all locked decisions); substantive coverage confirmed
 - [Phase 4]: decision-coverage-plan gate — same smart-discuss area-format gap as Phase 3; checker dimension 7 verified all 6 locked decisions honored
 - [Phase 3]: decision-coverage-plan gate returned could-not-parse (smart-discuss CONTEXT.md has area-formatted decisions, no D-NN ids). Substantive coverage verified by gsd-plan-checker dedicated CONTEXT-translation check (VERIFICATION PASSED). Accepted as format gap, not a coverage gap.
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone

@@ -78,8 +78,9 @@ first-time index nothing publishes at all (Zoekt runs after the SCIP indexer), d
 search being perfectly viable. Swift is the most failure-prone supported language (scheme
 selection, xcodebuild vs swiftpm) and the only caveated one with no fallback.
 
-The latest scip-swift release version could not be verified during questioning (network tools
-denied); verify at plan time via `gh release list --repo jarvis-intelligence/scip-swift`.
+Shipped v1.0 (2026-08-23): 5 phases, 12 plans, ~657 unit tests green; scip-swift auto-rolls ≥ 0.3.0.
+Degradation taxonomy across CLI + MCP: failed_hard / signature / manual / fallback origins with read-time recovery; opt-in self-healing degrade; Swift signatures; TTY semantic onboarding.
+Known debt recorded in .planning/milestones/v1.0-MILESTONE-AUDIT.md (tech_debt: ~20 Info-tier items, 1 integration warning, 5 unreconciled Nyquist files).
 
 ## Constraints
 
@@ -120,4 +121,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-23 after Phase 5 (milestone v1.0 complete)*
+*Last updated: 2026-08-23 after v1.0 milestone*
