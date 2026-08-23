@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 4
 current_phase_name: Swift Failure Signatures
-status: planning
+status: executing
 stopped_at: Phase 3 complete, ready to plan Phase 4
-last_updated: "2026-08-23T00:40:10.060Z"
+last_updated: "2026-08-23T01:55:26.665Z"
 last_activity: 2026-08-23
 last_activity_desc: Phase 3 complete, transitioned to Phase 4
-state_head: a16ec1cadc96630546816c7cba906f1dc22b3bc3
+state_head: d9bdc85dea08f5ac8dd8731234aeb8e35042e274
 progress:
   total_phases: 5
   completed_phases: 3
-  total_plans: 9
+  total_plans: 10
   completed_plans: 9
 milestone_name: Indexing Robustness & scip-swift Update
 ---
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-23)
 
 ## Current Position
 
-Phase: 4 — Swift Failure Signatures
+Phase: 4 (Swift Failure Signatures) — READY TO EXECUTE
 Plan: Not started
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-08-23 — Phase 3 complete, transitioned to Phase 4
 
 Progress: [░░░░░░░░░░░░░░░░░░] 6/6 plans
@@ -119,6 +119,7 @@ Recent decisions affecting current work:
 
 - [Phase 03 UAT]: All 18 judgment-tier prohibition verdicts confirmed (UPHELD) by human review; 3 live-execution UATs passed (degrade smoke e2e with real zoekt answering, watch-vs-manual race, real-Observer skip-note + sha-change retrigger)
 - [Phase 03]: Code review --auto converged in 2 fix passes — 4 fixes (CR-01 published-flag gate, WR-01 honest bookkeeping failure, WR-02 partial-landing marker + retire reorder, WR-03 best-effort record_failure); final 0 critical / 0 warning / 9 info; 633 unit tests green
+
 ### Pending Todos
 
 None yet.
@@ -143,4 +144,5 @@ Resume file: None
 
 ### Planning Overrides
 
+- [Phase 4]: decision-coverage-plan gate — same smart-discuss area-format gap as Phase 3; checker dimension 7 verified all 6 locked decisions honored
 - [Phase 3]: decision-coverage-plan gate returned could-not-parse (smart-discuss CONTEXT.md has area-formatted decisions, no D-NN ids). Substantive coverage verified by gsd-plan-checker dedicated CONTEXT-translation check (VERIFICATION PASSED). Accepted as format gap, not a coverage gap.

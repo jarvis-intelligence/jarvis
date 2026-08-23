@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Registry Foundation & Degradation Reporting** - Additive per-repo state plus cause/origin/recovery reporting in `jarvis status`, `getIndexStatus`, and nav-tool error payloads (completed 2026-08-22)
 - [x] **Phase 2: scip-swift Toolchain Update** - Pin bump to a fixed release cut from main; setup.sh asset handling, out-of-repo cache dir, watch loop prevention (completed 2026-08-22)
-- [ ] **Phase 3: Opt-In Self-Healing Fallback** - Post-build-start indexer failures degrade to search-only publish; tri-state opt-in (CLI > persisted > env > off); full build retried every reindex; watch anti-treadmill
+- [x] **Phase 3: Opt-In Self-Healing Fallback** - Post-build-start indexer failures degrade to search-only publish; tri-state opt-in (CLI > persisted > env > off); full build retried every reindex; watch anti-treadmill (completed 2026-08-23)
 - [ ] **Phase 4: Swift Failure Signatures** - Verified scip-swift failure signatures captured from the pinned binary join the automatic `_SEARCH_ONLY_SIGNATURES` fallback
 - [ ] **Phase 5: Semantic Install Onboarding** - TTY-gated y/N install offer for the `semantic` extra with per-repo decline memory; non-TTY paths stay silent
 
@@ -113,7 +113,12 @@ Plans:
   2. Every added signature is captured from the pinned scip-swift binary's real stderr against a known-failing repo, and pinned by a unit test embedding that exact output
   3. A Swift failure matching no signature still fails hard — unverified failures are never silently degraded
 
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+**Wave 1**
+
+- [ ] 04-01-PLAN.md — Two scip-swift 0.3.0 signature entries (captured verbatim from real stderr) + five pinning/negative tests; unmatched failures keep failing hard (SWFT-04)
 
 ### Phase 5: Semantic Install Onboarding
 
@@ -137,8 +142,8 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 (Phase 5 may float ea
 |-------|----------------|--------|-----------|
 | 1. Registry Foundation & Degradation Reporting | 3/3 | Complete    | 2026-08-22 |
 | 2. scip-swift Toolchain Update | 3/3 | Complete    | 2026-08-22 |
-| 3. Opt-In Self-Healing Fallback | 3/3 | In Progress|  |
-| 4. Swift Failure Signatures | 0/TBD | Not started | - |
+| 3. Opt-In Self-Healing Fallback | 3/3 | Complete    | 2026-08-23 |
+| 4. Swift Failure Signatures | 0/1 | Not started | - |
 | 5. Semantic Install Onboarding | 0/TBD | Not started | - |
 
 ---

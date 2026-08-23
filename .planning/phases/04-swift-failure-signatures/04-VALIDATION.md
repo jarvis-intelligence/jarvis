@@ -19,20 +19,20 @@ created: 2026-08-23
 
 | Property | Value |
 |----------|-------|
-| **Framework** | {pytest 7.x / jest 29.x / vitest / go test / other} |
-| **Config file** | {path or "none — Wave 0 installs"} |
-| **Quick run command** | `{quick command}` |
-| **Full suite command** | `{full command}` |
-| **Estimated runtime** | ~4 seconds |
+| **Framework** | pytest (testpaths `["tests"]`, `integration` marker — pyproject.toml) |
+| **Config file** | pyproject.toml |
+| **Quick run command** | `uv run pytest tests/test_index_cli.py -m "not integration" -q` |
+| **Full suite command** | `uv run pytest -m "not integration" -rs` (CI gate) |
+| **Estimated runtime** | quick ~16s (measured 2026-08-23: 186 passed, 12 deselected); full ~40s (measured 2026-08-23: 633 passed, 17 deselected) |
 
 ---
 
 ## Sampling Rate
 
-- **After every task commit:** Run `{quick run command}`
-- **After every plan wave:** Run `{full suite command}`
+- **After every task commit:** `uv run pytest tests/test_index_cli.py -m "not integration" -q` (~16s)
+- **After every plan wave:** `uv run pytest -m "not integration" -rs` (single-wave phase — once after Task 3)
 - **Before `/gsd-verify-work`:** Full suite must be green
-- **Max feedback latency:** 4 seconds
+- **Max feedback latency:** ~20 seconds
 
 ---
 
@@ -40,7 +40,9 @@ created: 2026-08-23
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 4-01-01 | 01 | 1 | REQ-{XX} | T-4-01 / — | {expected secure behavior or "N/A"} | unit | `{command}` | ✅ / ❌ W0 | ⬜ pending |
+| 4-01-01 | 01 | 1 | SWFT-04 | T-4-02 | tokens class-specific + path-free; matched reason persisted via existing parameterized upsert (no new parsing) | unit | `uv run pytest "tests/test_index_cli.py::test_swift_no_build_system_signature_degrades_search_only" -q` | ❌ W0 (authored by task, RED-first) | ⬜ pending |
+| 4-01-02 | 01 | 1 | SWFT-04 | T-4-02 | same as 4-01-01 for the no-IndexStore class | unit | `uv run pytest "tests/test_index_cli.py::test_swift_no_index_store_signature_degrades_search_only" -q` | ❌ W0 (authored by task, RED-first) | ⬜ pending |
+| 4-01-03 | 01 | 1 | SWFT-04 | T-4-01 / T-4-02 | negative matcher pins: generic wrappers, empty/stdout-only carriers, first-match order (SC3 + probe predicates) | unit | `uv run pytest "tests/test_index_cli.py::test_swift_generic_build_failure_wrapper_never_matches" "tests/test_index_cli.py::test_empty_or_stdout_only_failure_carriers_never_match" "tests/test_index_cli.py::test_search_only_reason_first_listed_match_wins" -q` | ❌ W0 (authored by task) | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -48,11 +50,11 @@ created: 2026-08-23
 
 ## Wave 0 Requirements
 
-- [ ] `{tests/test_file.py}` — stubs for REQ-{XX}
-- [ ] `{tests/conftest.py}` — shared fixtures
-- [ ] `{framework install}` — if no framework detected
+- [x] Framework installed (pytest via uv — nothing to install)
+- [x] Fixtures: `SWIFT_FIXTURE_REPO` (tests/fixtures/mini_swift_repo) exists — no new fixture
+- [ ] `tests/test_index_cli.py` — the five new test functions are authored by plan tasks 4-01-01..4-01-03 themselves (RED-first for the two pinning tests); no stubs are needed ahead of execution
 
-*If none: "Existing infrastructure covers all phase requirements."*
+Existing infrastructure covers all phase requirements; the only Wave-0 gap (the test functions) is created by the plan's own tasks.
 
 ---
 
@@ -60,9 +62,7 @@ created: 2026-08-23
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| {behavior} | REQ-{XX} | {reason} | {steps} |
-
-*If none: "All phase behaviors have automated verification."*
+| Live degrade smoke: both captured failure shapes through real `jarvis index` (real scip-swift 0.3.0 + zoekt), plus one keep-hard shape staying hard | SWFT-04 (SC1/SC3 live proof) | Needs the real darwin/arm64 scip-swift binary + Xcode toolchain; CI unit legs are binary-free and committed integration tests are deliberately avoided (phase-2 02-03 precedent) | Recreate shapes from 04-RESEARCH.md capture recipes (or reuse /tmp/jarvis-p4-capture/repos/<shape>) with scratch JARVIS_DATA_DIR: no-build-system and empty-Sources shapes exit 0 with the `note: … cannot be SCIP-indexed` stderr line and `jarvis status` origin=signature; broken-manifest shape exits non-zero with a failed_hard row |
 
 ---
 
