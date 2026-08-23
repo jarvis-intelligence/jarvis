@@ -4340,3 +4340,261 @@ def test_cmd_index_tty_offer_still_made_for_a_different_repo(
         assert registry.get("repo-b").semantic_declined is True
     finally:
         registry.close()
+
+
+def _offer_run(monkeypatch, tmp_path, slug, answer=None, error=None):
+    """One mocked healthy `jarvis index` run for `slug` under the forced
+    offer seams, with a scripted prompt answer; returns (rc, prompts)."""
+    import argparse
+
+    import jarvis.index_cli as cli
+
+    repo_dir = _offer_test_repo(tmp_path, name=slug)
+    prompts = _script_input(monkeypatch, answer=answer, error=error)
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(repo_dir), slug=slug, scheme=None, semantic_include=None,
+        language=None, search_only=None, fallback_search_only=None, offer_semantic=True,
+    ))
+    return rc, prompts
+
+
+def test_cmd_index_offer_accept_parse_table(tmp_path: Path, monkeypatch):
+    """SEMA-01 parse table, exactly the locked one: strip+lower in
+    {"y","yes"} accepts and installs (no decline bit); every other
+    answer — empty, whitespace, n/N/no, garbage — declines and persists
+    the bit, without ever attempting an install."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    _mock_healthy_full_run(monkeypatch)
+    _force_offer_seams(monkeypatch)
+
+    for i, answer in enumerate(["y", "Y", "yes", "Yes", "YES"]):
+        slug = f"accept-{i}"
+        installs: list[str] = []
+
+        def _install():
+            installs.append(slug)
+            return True
+
+        monkeypatch.setattr("jarvis.index_cli._install_semantic_extra", _install)
+        rc, prompts = _offer_run(monkeypatch, tmp_path, slug, answer=answer)
+        assert rc == 0
+        assert len(installs) == 1
+        assert len(prompts) == 1
+        registry = Registry(tmp_path / "data" / "registry.db")
+        try:
+            assert registry.get(slug).semantic_declined is False
+        finally:
+            registry.close()
+
+    for i, answer in enumerate(["", " ", "n", "N", "no", "maybe"]):
+        slug = f"refuse-{i}"
+
+        def _boom():
+            raise AssertionError("a declined answer must never install")
+
+        monkeypatch.setattr("jarvis.index_cli._install_semantic_extra", _boom)
+        rc, _ = _offer_run(monkeypatch, tmp_path, slug, answer=answer)
+        assert rc == 0
+        registry = Registry(tmp_path / "data" / "registry.db")
+        try:
+            assert registry.get(slug).semantic_declined is True
+        finally:
+            registry.close()
+
+
+def test_cmd_index_offer_yes_installs_and_enables_semantic_same_invocation(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """SEMA-01/SC1: a consented install re-enables semantic in the SAME
+    invocation — install → importlib.invalidate_caches → the semantic
+    stage re-run with the row's include prefixes → mark_semantic_indexed,
+    and consent never writes a decline bit."""
+    import argparse
+
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = _offer_test_repo(tmp_path)
+    _mock_healthy_full_run(monkeypatch)
+    _force_offer_seams(monkeypatch)
+    _script_input(monkeypatch, answer="y")
+    monkeypatch.setattr("jarvis.index_cli._install_semantic_extra", lambda: True)
+
+    invalidations: list = []
+    monkeypatch.setattr(
+        "importlib.invalidate_caches", lambda: invalidations.append(1)
+    )
+
+    stage_calls: list = []
+
+    def _stage(repo_path, slug, root, include_prefixes=()):
+        stage_calls.append((repo_path, slug, root, include_prefixes))
+        # First call = the pipeline's in-run stage: keep the healthy-mock
+        # False so the pipeline itself stamps nothing (line "if
+        # semantic_ok: mark_semantic_indexed") and only the offer's re-run
+        # (second call) can set semantic_indexed_at.
+        return len(stage_calls) > 1
+
+    # After _mock_healthy_full_run, so this overrides its False lambda.
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", _stage)
+
+    rc = cli._cmd_index(argparse.Namespace(
+        path=str(repo_dir), slug="consented-repo", scheme=None, semantic_include=None,
+        language=None, search_only=None, fallback_search_only=None, offer_semantic=True,
+    ))
+
+    assert rc == 0
+    assert len(invalidations) == 1
+    # Two stage calls, in order: the pipeline's in-run stage, then the
+    # offer's re-run — which carries the row's persisted include
+    # prefixes (none persisted here) and root=None from _cmd_index.
+    assert len(stage_calls) == 2
+    assert stage_calls[1] == (Path(str(repo_dir)), "consented-repo", None, ())
+    assert stage_calls[0][1] == "consented-repo"
+    registry = Registry(tmp_path / "data" / "registry.db")
+    try:
+        entry = registry.get("consented-repo")
+        assert entry is not None
+        assert entry.semantic_indexed_at is not None  # mark_semantic_indexed ran
+        assert entry.semantic_declined is False  # consent writes no bit
+    finally:
+        registry.close()
+
+
+def test_cmd_index_offer_install_failure_warns_and_does_not_remember_decline(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """SEMA-01 three-outcome contract: install failure (uv absent,
+    non-zero exit, timeout — all False at the seam) warns with exactly
+    ONE stderr line naming the tried command, exits 0, never re-runs the
+    stage, and writes no decline bit — failure is not a refusal, so the
+    next TTY index offers again."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    _mock_healthy_full_run(monkeypatch)
+    _force_offer_seams(monkeypatch)
+    monkeypatch.setattr("jarvis.index_cli._install_semantic_extra", lambda: False)
+
+    stage_calls: list = []
+
+    def _stage(repo_path, slug, root, include_prefixes=()):
+        stage_calls.append((repo_path, slug, root, include_prefixes))
+        # Healthy-mock False everywhere: nothing stamps, and any offer
+        # re-run would still be recorded (a second call per slug).
+        return False
+
+    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", _stage)
+
+    for i, shape in enumerate(["uv-absent", "non-zero-exit", "timeout"]):
+        slug = f"failed-install-{i}"
+        rc, _ = _offer_run(monkeypatch, tmp_path, slug, answer="y")
+        assert rc == 0, shape
+        err = capsys.readouterr().err
+        naming = [
+            line for line in err.splitlines()
+            if "uv pip install" in line and "jarvis-mcp[semantic]" in line
+        ]
+        assert len(naming) == 1, (shape, err)
+        assert (
+            len([line for line in err.splitlines()
+                 if "warning: semantic extra install failed" in line]) == 1
+        ), (shape, err)
+        registry = Registry(tmp_path / "data" / "registry.db")
+        try:
+            entry = registry.get(slug)
+            assert entry is not None
+            assert entry.semantic_declined is False, shape
+        finally:
+            registry.close()
+    # Exactly one stage call per run — the pipeline's in-run stage. A
+    # second call for any slug would be the offer's re-run, which must
+    # never happen on the failure path.
+    assert len(stage_calls) == 3
+    assert sorted(c[1] for c in stage_calls) == [
+        "failed-install-0", "failed-install-1", "failed-install-2",
+    ]
+
+
+def test_cmd_index_offer_eof_or_keyboard_interrupt_at_prompt_declines_remembered(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """SEMA-01/SC2: EOF (piped-off stdin) and Ctrl-C at the prompt are
+    declines — remembered, exit 0, no traceback, and no install ever
+    attempted."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    _mock_healthy_full_run(monkeypatch)
+    _force_offer_seams(monkeypatch)
+
+    def _boom():
+        raise AssertionError("EOF/Ctrl-C must never reach an install")
+
+    monkeypatch.setattr("jarvis.index_cli._install_semantic_extra", _boom)
+
+    for i, error in enumerate([EOFError(), KeyboardInterrupt()]):
+        slug = f"interrupted-{i}"
+        rc, prompts = _offer_run(monkeypatch, tmp_path, slug, error=error)
+        assert rc == 0
+        assert len(prompts) == 1
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.out + captured.err
+        registry = Registry(tmp_path / "data" / "registry.db")
+        try:
+            entry = registry.get(slug)
+            assert entry is not None
+            assert entry.semantic_declined is True
+        finally:
+            registry.close()
+
+
+def test_install_semantic_extra_argv_and_failure_paths(monkeypatch):
+    """The locked uv command as a fixed argv: [resolved uv, "pip",
+    "install", "--python", sys.executable, "jarvis-mcp[semantic]"] — list
+    form (no shell), spec unpinned. uv absent → False with no subprocess
+    at all; a non-zero exit → False; a TimeoutExpired → False."""
+    import sys as _sys
+
+    from jarvis.index_cli import _install_semantic_extra
+
+    runs: list = []
+
+    class _Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+    def _run(cmd, **kwargs):
+        runs.append((cmd, kwargs))
+        return _Result(0)
+
+    monkeypatch.setattr("jarvis.index_cli.shutil.which", lambda name: "/fake/bin/uv")
+    monkeypatch.setattr("jarvis.index_cli.subprocess.run", _run)
+
+    assert _install_semantic_extra() is True
+    assert runs == [(
+        ["/fake/bin/uv", "pip", "install", "--python", _sys.executable,
+         "jarvis-mcp[semantic]"],
+        {"capture_output": True, "text": True, "timeout": 600},
+    )]
+
+    # Non-zero exit → False.
+    monkeypatch.setattr(
+        "jarvis.index_cli.subprocess.run", lambda cmd, **k: _Result(1)
+    )
+    assert _install_semantic_extra() is False
+
+    # uv not on PATH → False, and no subprocess is ever spawned.
+    runs.clear()
+    monkeypatch.setattr("jarvis.index_cli.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "jarvis.index_cli.subprocess.run",
+        lambda cmd, **k: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+    assert _install_semantic_extra() is False
+    assert runs == []
+
+    # A stalled install times out into the same failure path.
+    monkeypatch.setattr("jarvis.index_cli.shutil.which", lambda name: "/fake/bin/uv")
+
+    def _timeout(cmd, **k):
+        raise subprocess.TimeoutExpired(cmd, 600)
+
+    monkeypatch.setattr("jarvis.index_cli.subprocess.run", _timeout)
+    assert _install_semantic_extra() is False
