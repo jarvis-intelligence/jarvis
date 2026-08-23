@@ -1,5 +1,5 @@
 ---
-status: testing
+status: complete
 phase: 03-Opt-In Self-Healing Fallback
 source: [03-VERIFICATION.md]
 started: 2026-08-23T00:00:00Z
@@ -8,13 +8,7 @@ updated: 2026-08-23T00:00:00Z
 
 ## Current Test
 
-number: 4
-name: Sign off 18 judgment-tier prohibition verdicts
-expected: |
-  All 18 descriptor-less prohibitions upheld by LLM judgment with mechanical evidence
-  (grep/git-diff/passing tests) per 03-VERIFICATION.md — human confirms or rejects
-  specific ones.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -38,14 +32,16 @@ note: "Executed live 2026-08-23: touch greeter.py (content unchanged -> same sha
 
 ### 4. Sign off 18 judgment-tier prohibition verdicts
 expected: All 18 prohibition verdicts (held on mechanical evidence) confirmed by human review of 03-VERIFICATION.md
-result: [pending]
+result: pass
+source: human
+note: "User confirmed all 18 UPHELD verdicts (2026-08-23, autonomous UAT session) — no prohibition reopened."
 
 ## Summary
 
 total: 4
-passed: 3
+passed: 4
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 

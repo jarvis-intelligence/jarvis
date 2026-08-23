@@ -1,7 +1,7 @@
 ---
 phase: 03-opt-in-self-healing-fallback
 verified: 2026-08-23T00:00:00Z
-status: human_needed
+status: passed
 score: 13/14 must-haves verified
 behavior_unverified: 1
 overrides_applied: 0
@@ -9,21 +9,26 @@ re_verification:
   previous_status: none
 gaps: []
 behavior_unverified_items:
+
   - truth: "Concurrency (verification: backstop): a watch reindex racing a manual index on the same registry relies on busy_timeout=5000 retry rather than corruption; an interrupted run may strand a transitional 'indexing' row, mitigated because the next reindex always retries the full build"
     test: "Run `jarvis watch <repo>` in one terminal and `jarvis index <repo>` in another on the same repo (optionally induce a failure mid-run); inspect registry.db after both settle"
     expected: "No 'database is locked' crash and no corrupted row; a stranded 'indexing' row (if any) is retried by the next reindex — the full build runs again (no skip)"
     why_human: "Backstop tier: no two-process race test exists. The 5 review regression tests simulate locked-db single-process (sqlite3.OperationalError('database is locked') monkeypatches, all passing), busy_timeout=5000 is present in Registry.__init__, and the skip predicate provably never skips a non-degraded row — but a live concurrent interleave is not exercisable by grep or the unit suite"
 coincidental_reliance_items: []
 human_verification:
+
   - test: "Real-binary degrade smoke: with a real repo and real binaries, break one post-build-start step (or point JARVIS_FALLBACK_SEARCH_ONLY=1 at a repo whose indexer fails) and run `jarvis index <repo> --fallback-search-only`"
     expected: "Exit 0, one 'degraded to search-only' warning, row status degraded/origin fallback, and searchCode answering against the freshly published zoekt shards (SC1 'stay queryable' end-to-end)"
     why_human: "Unit tracer mocks _run, so zoekt shards are never actually written in tests; the publish mechanism itself is integration-proven (test_zoekt_git_index_excludes_gitignored_content spins up a real zoekt-webserver), but no integration test drives the degrade path with real binaries — the plan lists this smoke as the optional manual verification"
+
   - test: "Live watch-vs-manual race: run `jarvis watch <repo>` and a concurrent `jarvis index <repo>` on the same registry.db; then commit a source change while the repo is degraded"
     expected: "No lock crash; degraded-at-unchanged-sha saves skip the full build with one '[watch] still degraded' note; the new commit (sha change) re-triggers the full build"
     why_human: "Backstop truth — two-process interleaving and real-time watchdog behavior cannot be verified by the unit harness (which drives _reindex through a fake Observer)"
+
   - test: "Review the 18 judgment-tier prohibitions (Prohibition Verdicts below): all recorded as held on mechanical evidence (grep/git-diff/passing tests), but the tier is non-authoritative by decision (ADR-550 D4)"
     expected: "Confirm no must-NOT was violated; any concern becomes a follow-up"
     why_human: "Descriptor-less prohibitions are judgment-tier: an LLM-judge verdict plus code evidence is recorded, but it is non-authoritative and flagged `unverified-prohibition — human review recommended`, never a silent pass"
+
   - test: "`jarvis watch` foreground flow with the real watchdog Observer (real filesystem events, debounce, Ctrl+C exit)"
     expected: "Changes trigger debounced reindex; skip note appears for a degraded repo at unchanged sha; Ctrl+C exits cleanly"
     why_human: "Real-time observer-thread behavior; 03-03's harness covers the _reindex closure only (03-03 SUMMARY flags this as manual-acceptance-only)"
