@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.7.0] - 2026-09-08
+
+Minor rather than patch: zoekt's `sym:` symbol search works for the first
+time (jarvis never installed the `universal-ctags` binary zoekt auto-discovers
+at index time, so every shard silently built with no symbol data), and
+`searchCode`'s response shape changes — the old `total` field (always just
+`len(hits)`, never a real total) is replaced by fields sourced from zoekt's
+own match statistics.
+
+### Added
+
+- **`setup.sh` installs `universal-ctags`, reviving `sym:` symbol search and
+  zoekt's symbol-definition ranking for every language.** zoekt only
+  extracts symbols when `universal-ctags` (or `$CTAGS_COMMAND`) is on PATH
+  at index time; jarvis never installed it, so every published shard had no
+  symbol data and `sym:` queries silently returned nothing. Installing it
+  wasn't enough on its own: Homebrew's and Debian's `universal-ctags`
+  packages both install a binary literally named `ctags`, never
+  `universal-ctags`, and zoekt's own detection does an exact-name PATH
+  lookup for `universal-ctags` — so `setup.sh` now symlinks the real
+  `ctags` binary under the name zoekt actually looks for. Surfaced as
+  `capabilities.search.ctagsInstalled` in `getIndexStatus`. **To activate:**
+  re-run `setup.sh`, then `jarvis reindex <slug>` — existing shards built
+  without ctags stay symbol-less until reindexed.
+- **`searchCode` reports true match totals.** `totalMatches` and `fileCount`
+  come from zoekt's own `Result.Stats` (accumulated before display
+  truncation, not from the returned page), `truncated` says whether more
+  matches exist than were returned, and `indexedAt` reports which published
+  snapshot the answer came from.
+- **`JARVIS_ZOEKT_PORT`** overrides the embedded zoekt-webserver's port
+  (previously hardcoded to `6070`).
+
+### Fixed
+
+- **`searchCode` and `semanticSearch` could return unbounded payloads.**
+  zoekt's JSON search API applies no display or shard-match caps at all
+  when the request omits `Opts` — a broad query could stream every match
+  zoekt found (up to its own internal limits) into a single MCP response.
+  Requests now send `Opts.MaxDocDisplayCount`/`MaxMatchDisplayCount`, and a
+  single oversized match line (minified or generated files can put an
+  entire file on one "line") is capped at 2000 characters with a visible
+  truncation marker — previously such a line could be megabytes long.
+- **The embedded zoekt-webserver's health check could adopt an unrelated
+  process.** It accepted any HTTP response under 500 from whatever was
+  listening on the zoekt port; it now requires zoekt's own `GET /healthz`,
+  which only returns 200 after a real canary search succeeds against
+  loaded shards. Spawn failures now capture the child's stderr so a bind
+  conflict or crash is diagnosable instead of an opaque "exited
+  immediately", and two jarvis processes racing to spawn the webserver now
+  have the loser adopt the winner's server instead of erroring.
+- **`semanticSearch`'s lexical signal was effectively dead on
+  natural-language queries.** zoekt's default query conjunction is implicit
+  AND, so a query like "how does the retry loop back off" ANDed six words
+  together and typically matched nothing — the zoekt signal contributed
+  nothing on exactly the queries `semanticSearch` exists for.
+  Natural-language-shaped queries now OR-expand through the existing
+  symbol-search tokenizer before reaching zoekt; code-shaped queries
+  (identifiers, `sym:`/`lang:` syntax, quoted phrases) pass through
+  unchanged.
+
+### Changed
+
+- **`searchCode`'s response shape.** The `total` field is removed; use
+  `totalMatches` (true total), `returned` (length of `hits`), `truncated`,
+  `fileCount`, and `indexedAt` instead.
+
 ## [0.6.2] - 2026-08-08
 
 Pure bug fix: Swift indexing was unreachable through the installer for every
