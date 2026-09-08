@@ -10,8 +10,6 @@ tools to Claude Code, Cursor, or any MCP client.
 Runs as a single stdio process reading local SQLite files. **No server, no auth,
 no network, nothing leaves your machine.**
 
-![jarvis C4 container architecture](docs/assets/jarvis-c4-containers.png)
-
 One indexing CLI writes up, one stdio runtime reads down — the storage seam in
 `~/.jarvis` is the only contract between them.
 
@@ -137,9 +135,7 @@ uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers/tree-
 **Storage is the seam.** The runtime half only ever reads down into it; the
 indexing half only ever writes up into it; the two share no other contract:
 
-![jarvis layered architecture](docs/assets/jarvis-layers.png)
-
-Three things worth reading the diagram for:
+Three load-bearing consequences of that seam:
 
 - **The runtime path never writes.** Queries open a published `index-<sha>.db`
   read-only (`mode=ro&immutable=1`). Index files are never mutated in place.
@@ -153,8 +149,6 @@ Three things worth reading the diagram for:
   edge is retracted — `blastRadius` always reflects each repo's *last* index
   run.
 
-Editable source:
-[`docs/assets/jarvis-layers.dot`](docs/assets/jarvis-layers.dot) (Graphviz).
 Layer-by-layer detail, the full index pipeline, and the semantic path are in
 [`docs/system-architecture.md`](docs/system-architecture.md).
 

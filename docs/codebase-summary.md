@@ -7,7 +7,6 @@ jarvis/
 ├── src/jarvis/           # Core library (16 files)
 ├── tests/                   # Test suite (16 files)
 ├── docs/                    # Documentation
-├── docs/assets/             # Architecture diagrams
 ├── plans/                   # Implementation plans
 ├── .github/workflows/       # CI: build-zoekt, publish-pypi, publish-mcp-registry,
 │                            #     sync-public-distribution, setup-smoke, test

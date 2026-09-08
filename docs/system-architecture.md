@@ -13,12 +13,6 @@ The system is built around four core engines:
 
 ### Layered Architecture (primary view)
 
-![jarvis layered architecture](assets/jarvis-layers.png)
-
-*Editable source: [`assets/jarvis-layers.dot`](assets/jarvis-layers.dot) (Graphviz) — also exported as
-`assets/jarvis-layers.svg`. Regenerate with
-`dot -Tpng -o docs/assets/jarvis-layers.png docs/assets/jarvis-layers.dot`.*
-
 Seven layers, top to bottom. **Storage (layer 4) is the seam**: the runtime only ever reads
 down into it, the indexing pipeline only ever writes up into it, and the two halves share no
 other contract.
@@ -55,11 +49,6 @@ Expanding layers 1–4 of the table above, the runtime path is:
 
 The full indexing lifecycle, from file changes → published index (layers 5–7 of the table above,
 writing up into the storage seam):
-
-![jarvis index pipeline](assets/jarvis-index-pipeline.png)
-
-*Editable source: [`assets/jarvis-index-pipeline.dot`](assets/jarvis-index-pipeline.dot) (Graphviz).
-Regenerate with `dot -Tpng -o docs/assets/jarvis-index-pipeline.png docs/assets/jarvis-index-pipeline.dot`.*
 
 ### The Pipeline (index_cli.py)
 
@@ -286,11 +275,6 @@ When a user calls `blastRadius(repo, symbol_or_package)`:
 ## Semantic Path (Runtime)
 
 When a user calls `semanticSearch(repo, query, limit=10)`:
-
-![semanticSearch three-signal fusion](assets/jarvis-semantic-fusion.png)
-
-*Editable source: [`assets/jarvis-semantic-fusion.dot`](assets/jarvis-semantic-fusion.dot) (Graphviz).
-Regenerate with `dot -Tpng -o docs/assets/jarvis-semantic-fusion.png docs/assets/jarvis-semantic-fusion.dot`.*
 
 1. **Admission (indexing time, `chunker.py`)**
    - `iter_source_files()` walks the repo, then drops anything `.gitignore` matches (via one
