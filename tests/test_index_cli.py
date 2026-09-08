@@ -2612,8 +2612,8 @@ def test_zoekt_git_index_excludes_gitignored_content(tmp_path: Path, monkeypatch
     lifecycle = ZoektLifecycle(index_dir=zoekt_dir, data_dir=tmp_path, port=6078)
     try:
         base_url = lifecycle.ensure_running()
-        assert search_zoekt(base_url, "junktoken_beta") == [], "gitignored content must not be searchable"
-        assert len(search_zoekt(base_url, "sourcetoken_alpha")) >= 1, "tracked content must be searchable"
+        assert search_zoekt(base_url, "junktoken_beta").hits == [], "gitignored content must not be searchable"
+        assert len(search_zoekt(base_url, "sourcetoken_alpha").hits) >= 1, "tracked content must be searchable"
 
         monkeypatch.setattr(server, "_zoekt_base_url_if_running", lambda: base_url)
         fields = server._search_coverage_fields("covslug")
