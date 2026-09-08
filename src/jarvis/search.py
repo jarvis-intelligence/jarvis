@@ -36,16 +36,29 @@ class ZoektUnavailableError(Exception):
     """Raised when zoekt-webserver cannot be reached or returns a non-2xx."""
 
 
+# zoekt's LineMatch.Line carries the whole matched line; minified or
+# one-line files make single "lines" megabytes long, which would flow
+# verbatim into MCP responses. Cap the decoded length; the suffix keeps
+# truncation visible to the consumer instead of silently losing text.
+MAX_LINE_CHARS = 2000
+_TRUNCATED_SUFFIX = " …[truncated]"
+
+
 def _decode_line(raw_line: str) -> str:
     """`LineMatch.Line` arrives base64-encoded (Go `[]byte` via
     encoding/json). Never fabricate content on a bad payload — an
-    undecodable line degrades to an empty string."""
+    undecodable line degrades to an empty string. Oversized lines are
+    capped at MAX_LINE_CHARS with a visible suffix.
+    """
     if not raw_line:
         return ""
     try:
-        return base64.b64decode(raw_line).decode("utf-8", errors="replace")
+        decoded = base64.b64decode(raw_line).decode("utf-8", errors="replace")
     except (binascii.Error, ValueError):
         return ""
+    if len(decoded) > MAX_LINE_CHARS:
+        return decoded[:MAX_LINE_CHARS] + _TRUNCATED_SUFFIX
+    return decoded
 
 
 def search_zoekt(

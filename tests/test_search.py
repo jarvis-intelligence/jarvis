@@ -61,6 +61,28 @@ def test_search_zoekt_raises_unavailable_on_http_error():
         search_zoekt("http://localhost:6070", "greet", client=client)
 
 
+def test_decode_line_truncates_oversized_lines():
+    from jarvis.search import MAX_LINE_CHARS, _TRUNCATED_SUFFIX, _decode_line
+
+    encoded = base64.b64encode(("x" * (MAX_LINE_CHARS + 5000)).encode()).decode()
+    decoded = _decode_line(encoded)
+    assert decoded == "x" * MAX_LINE_CHARS + _TRUNCATED_SUFFIX
+
+
+def test_decode_line_leaves_normal_lines_alone():
+    from jarvis.search import _decode_line
+
+    encoded = base64.b64encode(b"def greet(name):").decode()
+    assert _decode_line(encoded) == "def greet(name):"
+
+
+def test_decode_line_empty_and_invalid_still_safe():
+    from jarvis.search import _decode_line
+
+    assert _decode_line("") == ""
+    assert _decode_line("!!!not-base64!!!") == ""
+
+
 _FAKE_ZOEKT_SCRIPT = textwrap.dedent(
     """\
     #!PYTHON_SHEBANG_PLACEHOLDER
