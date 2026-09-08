@@ -21,20 +21,18 @@ from jarvis.search import ZoektHit, ZoektLifecycle, ZoektUnavailableError, searc
 
 def _zoekt_response(request: httpx.Request) -> httpx.Response:
     encoded_line = base64.b64encode(b"def greet(name):").decode()
-    return httpx.Response(
-        200,
-        json={
-            "Result": {
-                "Files": [
-                    {
-                        "Repository": "toy-repo",
-                        "FileName": "toy/greeter.py",
-                        "LineMatches": [{"LineNumber": 5, "Line": encoded_line}],
-                    }
-                ]
-            }
+    return httpx.Response(200, json={
+        "Result": {
+            "Files": [{
+                "FileName": "toy/greeter.py",
+                "Repository": "toy-repo",
+                "LineMatches": [{"LineNumber": 5, "Line": encoded_line}],
+            }],
+            # MatchCount intentionally > the one returned match: proves
+            # totals come from zoekt's Stats, not from len(hits).
+            "Stats": {"MatchCount": 3, "FileCount": 1},
         },
-    )
+    })
 
 
 def _error_response(request: httpx.Request) -> httpx.Response:
@@ -43,22 +41,99 @@ def _error_response(request: httpx.Request) -> httpx.Response:
 
 def test_search_zoekt_decodes_base64_line_and_returns_hits():
     client = httpx.Client(transport=httpx.MockTransport(_zoekt_response))
-    hits = search_zoekt("http://localhost:6070", "greet", client=client)
-    assert hits == [ZoektHit(repo="toy-repo", path="toy/greeter.py", line_number=5, line_text="def greet(name):")]
+    result = search_zoekt("http://localhost:6070", "greet", client=client)
+    assert result.hits == [
+        ZoektHit(repo="toy-repo", path="toy/greeter.py", line_number=5, line_text="def greet(name):")
+    ]
 
 
-def test_search_zoekt_no_hits_returns_empty_list():
+def test_search_zoekt_reports_true_totals_from_stats():
+    client = httpx.Client(transport=httpx.MockTransport(_zoekt_response))
+    result = search_zoekt("http://localhost:6070", "greet", client=client)
+    assert result.total_matches == 3
+    assert result.file_count == 1
+
+
+def test_search_zoekt_totals_fall_back_when_stats_absent():
+    def no_stats(request: httpx.Request) -> httpx.Response:
+        encoded = base64.b64encode(b"x = 1").decode()
+        return httpx.Response(200, json={"Result": {"Files": [{
+            "FileName": "a.py", "Repository": "r",
+            "LineMatches": [{"LineNumber": 1, "Line": encoded}],
+        }]}})
+
+    result = search_zoekt("http://localhost:6070", "x", client=httpx.Client(transport=httpx.MockTransport(no_stats)))
+    assert result.total_matches == 1  # len(hits)
+    assert result.file_count == 1    # distinct (repo, path)
+
+
+def test_search_zoekt_no_hits_returns_empty_result():
     def empty_response(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"Result": {"Files": []}})
+        return httpx.Response(200, json={"Result": {"Files": [], "Stats": {"MatchCount": 0, "FileCount": 0}}})
 
     client = httpx.Client(transport=httpx.MockTransport(empty_response))
-    assert search_zoekt("http://localhost:6070", "no-such-query", client=client) == []
+    assert search_zoekt("http://localhost:6070", "no-such-query", client=client).hits == []
+
+
+def test_search_zoekt_sends_display_cap_opts():
+    from jarvis.search import MAX_DOC_DISPLAY, MAX_MATCH_DISPLAY
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        captured["body"] = _json.loads(request.content)
+        return httpx.Response(200, json={"Result": {"Files": [], "Stats": {"MatchCount": 0, "FileCount": 0}}})
+
+    search_zoekt("http://localhost:6070", "q", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert captured["body"]["Opts"] == {
+        "MaxDocDisplayCount": MAX_DOC_DISPLAY,
+        "MaxMatchDisplayCount": MAX_MATCH_DISPLAY,
+    }
+
+
+def test_search_zoekt_surfaces_parse_error_body():
+    def bad_query(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"Error": "parse error: unexpected ')' in query"})
+
+    with pytest.raises(ZoektUnavailableError, match=r"unexpected '\)' in query"):
+        search_zoekt("http://localhost:6070", "greet(", client=httpx.Client(transport=httpx.MockTransport(bad_query)))
+
+
+def test_search_zoekt_surfaces_non_json_400_body():
+    def non_json_400(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="parse error: unexpected ')' in query (plain-text body)")
+
+    with pytest.raises(ZoektUnavailableError, match=r"parse error: unexpected '\)' in query"):
+        search_zoekt("http://localhost:6070", "greet(", client=httpx.Client(transport=httpx.MockTransport(non_json_400)))
 
 
 def test_search_zoekt_raises_unavailable_on_http_error():
     client = httpx.Client(transport=httpx.MockTransport(_error_response))
     with pytest.raises(ZoektUnavailableError):
         search_zoekt("http://localhost:6070", "greet", client=client)
+
+
+def test_decode_line_truncates_oversized_lines():
+    from jarvis.search import MAX_LINE_CHARS, _TRUNCATED_SUFFIX, _decode_line
+
+    encoded = base64.b64encode(("x" * (MAX_LINE_CHARS + 5000)).encode()).decode()
+    decoded = _decode_line(encoded)
+    assert decoded == "x" * MAX_LINE_CHARS + _TRUNCATED_SUFFIX
+
+
+def test_decode_line_leaves_normal_lines_alone():
+    from jarvis.search import _decode_line
+
+    encoded = base64.b64encode(b"def greet(name):").decode()
+    assert _decode_line(encoded) == "def greet(name):"
+
+
+def test_decode_line_empty_and_invalid_still_safe():
+    from jarvis.search import _decode_line
+
+    assert _decode_line("") == ""
+    assert _decode_line("!!!not-base64!!!") == ""
 
 
 _FAKE_ZOEKT_SCRIPT = textwrap.dedent(
@@ -177,6 +252,100 @@ def test_base_url_if_running_returns_url_when_healthy(tmp_path: Path, monkeypatc
     monkeypatch.setattr(lifecycle, "_is_healthy", lambda: True)
 
     assert lifecycle.base_url_if_running() == lifecycle.base_url()
+
+
+def test_port_env_override(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("JARVIS_ZOEKT_PORT", "16123")
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path)
+    assert lifecycle.base_url() == "http://127.0.0.1:16123"
+
+
+def test_port_env_invalid_falls_back(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("JARVIS_ZOEKT_PORT", "not-a-port")
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path)
+    assert lifecycle.base_url() == "http://127.0.0.1:6070"
+
+
+def test_explicit_port_beats_env(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("JARVIS_ZOEKT_PORT", "16123")
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path, port=16070)
+    assert lifecycle.base_url() == "http://127.0.0.1:16070"
+
+
+def test_base_url_if_running_rejects_foreign_http_server(tmp_path: Path, monkeypatch):
+    """A plain HTTP server on the port answers / with 200 but has no
+    /healthz; it must not be adopted as zoekt."""
+    from types import SimpleNamespace
+
+    (tmp_path / "zoekt-webserver.pid").write_text(str(os.getpid()), encoding="utf-8")
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path)
+    monkeypatch.setattr(
+        "jarvis.search.httpx.get",
+        lambda url, timeout=None: SimpleNamespace(status_code=404 if url.endswith("/healthz") else 200),
+    )
+    assert lifecycle.base_url_if_running() is None
+
+
+def test_is_healthy_requires_healthz_200(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path)
+    monkeypatch.setattr("jarvis.search.httpx.get", lambda url, timeout=None: SimpleNamespace(status_code=200))
+    assert lifecycle._is_healthy() is True
+    monkeypatch.setattr("jarvis.search.httpx.get", lambda url, timeout=None: SimpleNamespace(status_code=500))
+    assert lifecycle._is_healthy() is False
+
+
+def test_failed_spawn_includes_stderr_tail(tmp_path: Path):
+    bad = tmp_path / "bind-loser-zoekt"
+    bad.write_text(
+        f"#!{sys.executable}\nimport sys\n"
+        "sys.stderr.write('listen tcp :16071: bind: address already in use\\n')\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    bad.chmod(bad.stat().st_mode | stat.S_IEXEC)
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path / "d",
+                               port=16071, binary=str(bad))
+    with pytest.raises(ZoektUnavailableError) as excinfo:
+        lifecycle.ensure_running()
+    assert "address already in use" in str(excinfo.value)
+    assert "exited immediately" in str(excinfo.value)
+
+
+def test_spawn_race_adopts_sibling_winner(tmp_path: Path, monkeypatch, fake_zoekt_binary: Path):
+    winner = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path / "d",
+                            port=16072, binary=[sys.executable, str(fake_zoekt_binary)])
+    try:
+        winner.ensure_running()
+        bad = tmp_path / "loser-zoekt"
+        bad.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(1)\n", encoding="utf-8")
+        bad.chmod(bad.stat().st_mode | stat.S_IEXEC)
+        loser = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path / "d",
+                               port=16072, binary=str(bad))
+        real_read = loser._read_pidfile
+        seen: list[int] = []
+
+        def miss_first_read() -> int | None:
+            pid = None if not seen else real_read()
+            seen.append(1)
+            return pid
+
+        monkeypatch.setattr(loser, "_read_pidfile", miss_first_read)
+        # Loser misses the pidfile (the race), spawns, its child dies on the
+        # bind conflict, and the re-check adopts the winner's healthy server.
+        assert loser.ensure_running() == winner.base_url()
+        assert loser._own_process is None
+    finally:
+        winner.stop()
+
+
+def test_stop_does_not_unlink_a_pidfile_it_does_not_own(tmp_path: Path):
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path)
+    (tmp_path / "zoekt-webserver.pid").write_text("999999999", encoding="utf-8")
+    lifecycle.stop()
+    assert (tmp_path / "zoekt-webserver.pid").exists()
+
 
 
 def test_zoekt_repo_documents_reads_the_list_api():

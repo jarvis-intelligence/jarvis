@@ -115,7 +115,8 @@ Read this before installing — jarvis is deliberately narrow.
   | Purpose | Binary | Source |
   |---------|--------|--------|
   | SCIP → SQLite conversion | `scip` | prebuilt, pinned `v0.9.0` (**minimum** — older versions silently drop occurrence ranges) |
-  | Lexical search | `zoekt-index` · `zoekt-webserver` | cross-compiled by [our CI](.github/workflows/build-zoekt.yml) — upstream publishes no binaries |
+  | Lexical search | `zoekt-git-index` · `zoekt-webserver` | cross-compiled by [our CI](.github/workflows/build-zoekt.yml) — upstream publishes no binaries |
+  | Zoekt symbol queries (`sym:`) | `universal-ctags` | system package manager via setup.sh — without it `sym:` silently returns nothing |
   | TypeScript indexing | `scip-typescript` | `npm install -g` |
   | Python indexing | `scip-python` | `npm install -g` |
   | Swift indexing | `scip-swift` | prebuilt, **macOS arm64 only** |

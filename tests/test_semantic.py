@@ -4,8 +4,8 @@ import sys
 
 import pytest
 
-from jarvis.search import ZoektHit, ZoektUnavailableError
-from jarvis.semantic import FusedHit, reciprocal_rank_fusion
+from jarvis.search import ZoektHit, ZoektSearchResult, ZoektUnavailableError
+from jarvis.semantic import FusedHit, _zoekt_lexical_query, reciprocal_rank_fusion
 from jarvis.symbol_search import SymbolHit
 from jarvis.symbols import DescriptorKind
 
@@ -48,6 +48,26 @@ def test_content_truncated_to_500_chars():
     vector_rows = [_row("a.py", 1, 9, content="z" * 900)]
     fused = reciprocal_rank_fusion("r", vector_rows, [])
     assert len(fused[0].content) == 500
+
+
+def test_zoekt_lexical_query_or_expands_nl_queries():
+    # zoekt's default conjunction is implicit AND: a raw NL query matches
+    # nothing. NL legs become OR-groups of identifier-ish tokens.
+    assert _zoekt_lexical_query("how does the retry loop back off") == "(retry or loop or back or off)"
+
+
+def test_zoekt_lexical_query_passes_code_shapes_through():
+    assert _zoekt_lexical_query("ZoektLifecycle") == "ZoektLifecycle"
+    assert _zoekt_lexical_query("user_profile") == "user_profile"
+    assert _zoekt_lexical_query("sym:getUserById") == "sym:getUserById"
+    assert _zoekt_lexical_query('"exact phrase"') == '"exact phrase"'
+    assert _zoekt_lexical_query("(a or b)") == "(a or b)"
+
+
+def test_zoekt_lexical_query_falls_back_when_tokens_vanish():
+    # "how does it work?" yields a single token ("work") — an OR-group of
+    # one is pointless; pass the original through.
+    assert _zoekt_lexical_query("how does it work?") == "how does it work?"
 
 
 class FakeEmbedder:
@@ -181,14 +201,33 @@ def _indexed(tmp_path):
 def test_semantic_search_returns_fused_results(tmp_path, lancedb_available, monkeypatch):
     from jarvis import semantic
     data = _indexed(tmp_path)
+    from jarvis.search import ZoektSearchResult
     monkeypatch.setattr(semantic, "search_zoekt",
-                        lambda url, q: [ZoektHit(repo="myrepo", path="mod_0.py",
-                                                 line_number=1, line_text="def f_0():")])
+                        lambda url, q: ZoektSearchResult(
+                            [ZoektHit(repo="myrepo", path="mod_0.py",
+                                      line_number=1, line_text="def f_0():")], 1, 1))
     result = semantic.semantic_search("myrepo", "function zero", root=data,
                                       zoekt_base_url="http://x", model=FakeEmbedder())
     assert result["total"] >= 1 and "warning" not in result
     top = result["results"][0]
     assert top["filePath"] == "mod_0.py" and set(top["sources"]) == {"vector", "zoekt"}
+
+
+def test_semantic_search_or_expands_zoekt_leg(tmp_path, lancedb_available, monkeypatch):
+    from jarvis import semantic
+    from jarvis.search import ZoektSearchResult
+
+    captured: dict = {}
+
+    def fake_search(url, q):
+        captured["q"] = q
+        return ZoektSearchResult([], 0, 0)
+
+    monkeypatch.setattr(semantic, "search_zoekt", fake_search)
+    data = _indexed(tmp_path)
+    semantic.semantic_search("myrepo", "function zero", root=data,
+                             zoekt_base_url="http://x", model=FakeEmbedder())
+    assert captured["q"] == "r:myrepo (function or zero)"
 
 
 def test_missing_table_raises_reindex_hint(tmp_path, lancedb_available):
@@ -393,7 +432,8 @@ def test_query_uses_the_tables_prefixes_not_the_configured_ones(tmp_path, lanced
     from jarvis.semantic import index_semantic, semantic_search
     repo = _write_repo(tmp_path)
     index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
-    monkeypatch.setattr(semantic_module, "search_zoekt", lambda *a, **k: [])
+    monkeypatch.setattr(semantic_module, "search_zoekt",
+                        lambda *a, **k: ZoektSearchResult([], 0, 0))
 
     rebuilt: list[tuple] = []
 

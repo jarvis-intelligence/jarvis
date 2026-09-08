@@ -7,6 +7,7 @@ works without the `semantic` extra.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -19,12 +20,40 @@ from jarvis.chunker import (
 )
 from jarvis.embeddings import EmbeddingModel, default_model
 from jarvis.search import ZoektHit, ZoektUnavailableError, search_zoekt
-from jarvis.symbol_search import SymbolHit, search_symbols
+from jarvis.symbol_search import SymbolHit, extract_tokens, search_symbols
 
 RRF_K = 60
 VECTOR_TOP_K = 30
 ZOEKT_TOP_K = 30
 CONTENT_TRUNCATE = 500
+
+
+# zoekt query-language field selectors and grouping characters: a query
+# containing any of these is authored zoekt syntax (or a quoted/regex
+# phrase) and must pass through untouched.
+_ZOEKT_SYNTAX_RE = re.compile(
+    r"(?:^|\s)(?:r|repo|f|file|sym|lang|l|case|content|c|branch|type|archived|fork|public|regex|meta):"
+    r'|["()]'
+)
+
+
+def _zoekt_lexical_query(query: str) -> str:
+    """The zoekt leg of semanticSearch. A natural-language query must not
+    reach zoekt verbatim: the default conjunction is implicit AND, so six
+    NL words typically match nothing and the lexical signal contributes
+    zero on exactly the queries semanticSearch exists for. NL-shaped
+    queries (multi-word, no zoekt syntax) become an OR-group of
+    extract_tokens output — recall up, and zoekt's atom-count scoring
+    still favors documents matching more tokens. Anything code-shaped
+    (identifiers, sym:/lang: syntax, quoted phrases, grouping) passes
+    through untouched.
+    """
+    if not query or _ZOEKT_SYNTAX_RE.search(query) or len(query.split()) <= 1:
+        return query
+    tokens = extract_tokens(query)
+    if len(tokens) < 2:
+        return query
+    return "(" + " or ".join(tokens) + ")"
 
 
 class NoSemanticIndexError(Exception):
@@ -344,7 +373,9 @@ def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None
     zoekt_hits: list[ZoektHit] = []
     if zoekt_base_url is not None:
         try:
-            zoekt_hits = search_zoekt(zoekt_base_url, f"r:{slug} {query}")[:ZOEKT_TOP_K]
+            zoekt_hits = search_zoekt(
+                zoekt_base_url, f"r:{slug} {_zoekt_lexical_query(query)}"
+            ).hits[:ZOEKT_TOP_K]
         except ZoektUnavailableError:
             pass  # hybrid degrades to vector-only; sources fields reflect it
 
