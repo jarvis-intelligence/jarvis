@@ -8,6 +8,7 @@ without performing a real install.
 import hashlib
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 from pathlib import Path
@@ -756,12 +757,17 @@ def test_install_ctags_skips_when_already_installed():
     assert "already installed" in result.stdout
 
 
-def test_install_ctags_uses_brew_when_available():
+def test_install_ctags_uses_brew_when_available(tmp_path):
+    # JARVIS_BIN_DIR must be set: a successful install chains
+    # link_universal_ctags -> ensure_bin_dir -> bin_dir(), and this host's
+    # real /usr/bin/ctags (BSD ctags, ships with Xcode CLT) is on PATH, so
+    # the symlink step actually runs here instead of warning.
     result = run_func(
         'already_installed() { return 1; }\n'
         'have_cmd() { [ "$1" = brew ]; }\n'
         'brew() { echo "BREW $*"; }\n'
-        'install_ctags'
+        'install_ctags',
+        env={"JARVIS_BIN_DIR": str(tmp_path / "install")},
     )
     assert result.returncode == 0
     assert "BREW install universal-ctags" in result.stdout
@@ -771,7 +777,8 @@ def test_install_ctags_apt_get_when_root(tmp_path):
     # dash rejects `apt-get() { ... }` outright ("Bad function name": hyphens
     # are not valid in a POSIX function name), so the fake apt-get must be a
     # real executable on PATH rather than a shell function, unlike the other
-    # fakes in this test.
+    # fakes in this test. JARVIS_BIN_DIR must be set for the same reason as
+    # the brew test above.
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
     apt_get_stub = fake_bin / "apt-get"
@@ -782,7 +789,7 @@ def test_install_ctags_apt_get_when_root(tmp_path):
         'have_cmd() { [ "$1" = apt-get ]; }\n'
         'id() { echo 0; }\n'
         'install_ctags',
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        env={"JARVIS_BIN_DIR": str(tmp_path / "install"), "PATH": f"{fake_bin}:/usr/bin:/bin"},
     )
     assert result.returncode == 0
     assert "APT install -y -qq universal-ctags" in result.stdout
@@ -797,6 +804,83 @@ def test_install_ctags_warns_when_no_installer():
     # Warn, not fail: ctags absence degrades zoekt sym: only.
     assert result.returncode == 0
     assert "sym:" in (result.stdout + result.stderr)
+
+
+def test_link_universal_ctags_symlinks_the_real_ctags_binary(tmp_path):
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    real_ctags = fake_bin / "ctags"
+    real_ctags.write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
+    real_ctags.chmod(real_ctags.stat().st_mode | stat.S_IEXEC)
+    install_dir = tmp_path / "install"
+    result = run_func(
+        "link_universal_ctags",
+        env={"JARVIS_BIN_DIR": str(install_dir), "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    assert result.returncode == 0
+    link = install_dir / "universal-ctags"
+    assert link.is_symlink()
+    assert link.resolve() == real_ctags.resolve()
+
+
+def test_link_universal_ctags_warns_when_ctags_binary_missing(tmp_path):
+    # This host's real /usr/bin/ctags (BSD ctags, ships with Xcode CLT)
+    # would otherwise satisfy `command -v ctags`, so PATH must be pared
+    # down to only the externals link_universal_ctags actually needs
+    # (mkdir, ln) -- none of which is ctags.
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    for tool in ("mkdir", "ln"):
+        (fake_bin / tool).symlink_to(shutil.which(tool))
+    result = run_func(
+        "link_universal_ctags",
+        env={"JARVIS_BIN_DIR": str(tmp_path / "install"), "PATH": str(fake_bin)},
+    )
+    assert result.returncode == 0
+    assert "sym:" in (result.stdout + result.stderr)
+
+
+def test_install_ctags_brew_links_ctags_after_install(tmp_path):
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    real_ctags = fake_bin / "ctags"
+    real_ctags.write_text("#!/bin/sh\n", encoding="utf-8")
+    real_ctags.chmod(real_ctags.stat().st_mode | stat.S_IEXEC)
+    install_dir = tmp_path / "install"
+    result = run_func(
+        'already_installed() { return 1; }\n'
+        'have_cmd() { [ "$1" = brew ]; }\n'
+        'brew() { echo "BREW $*"; }\n'
+        'install_ctags',
+        env={"JARVIS_BIN_DIR": str(install_dir), "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    assert result.returncode == 0
+    assert "BREW install universal-ctags" in result.stdout
+    assert (install_dir / "universal-ctags").is_symlink()
+
+
+def test_install_ctags_apt_get_links_ctags_after_install(tmp_path):
+    # Same dash-hyphen limitation as test_install_ctags_apt_get_when_root:
+    # the fake apt-get must be a real script on PATH, not a shell function.
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    apt_get_stub = fake_bin / "apt-get"
+    apt_get_stub.write_text('#!/bin/sh\necho "APT $*"\n')
+    apt_get_stub.chmod(0o755)
+    real_ctags = fake_bin / "ctags"
+    real_ctags.write_text("#!/bin/sh\n", encoding="utf-8")
+    real_ctags.chmod(real_ctags.stat().st_mode | stat.S_IEXEC)
+    install_dir = tmp_path / "install"
+    result = run_func(
+        'already_installed() { return 1; }\n'
+        'have_cmd() { [ "$1" = apt-get ]; }\n'
+        'id() { echo 0; }\n'
+        'install_ctags',
+        env={"JARVIS_BIN_DIR": str(install_dir), "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    assert result.returncode == 0
+    assert "APT install -y -qq universal-ctags" in result.stdout
+    assert (install_dir / "universal-ctags").is_symlink()
 
 
 # ------------------------------------------------------ scip-swift installer ----

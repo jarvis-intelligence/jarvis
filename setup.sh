@@ -613,6 +613,24 @@ install_zoekt() {
 	log_info "zoekt: installed"
 }
 
+# universal-ctags' own binary is literally named "ctags" (both Homebrew's
+# and Debian's packages install .../bin/ctags, never .../universal-ctags --
+# confirmed via `brew info universal-ctags`: "Conflicts with: ctags
+# (because both install `ctags` binaries)"). zoekt-git-index's own
+# detection is exec.LookPath("universal-ctags") -- a literal name match,
+# not "any ctags" -- so a bare `ctags` on PATH is invisible to it. Symlink
+# it into bin_dir() under the name zoekt actually looks for; bin_dir() is
+# already on the user's PATH via ensure_on_path, so this makes both
+# zoekt's subprocess lookup and jarvis's own presence check succeed.
+link_universal_ctags() {
+	_real_ctags=$(command -v ctags) || {
+		log_warn "universal-ctags: installed but no 'ctags' binary found on PATH -- sym: will stay unavailable"
+		return 0
+	}
+	ensure_bin_dir
+	ln -sf "$_real_ctags" "$(bin_dir)/universal-ctags"
+}
+
 # zoekt auto-discovers universal-ctags on PATH (or $CTAGS_COMMAND) at index
 # time; shards built without it carry no symbol sections, so zoekt's sym:
 # queries and its symbol-definition ranking silently return nothing
@@ -628,10 +646,10 @@ install_ctags() {
 	fi
 	if have_cmd brew; then
 		log_info "universal-ctags: installing via brew"
-		brew install universal-ctags
+		brew install universal-ctags && link_universal_ctags
 	elif have_cmd apt-get && [ "$(id -u)" = "0" ]; then
 		log_info "universal-ctags: installing via apt-get"
-		apt-get update -qq && apt-get install -y -qq universal-ctags
+		apt-get update -qq && apt-get install -y -qq universal-ctags && link_universal_ctags
 	else
 		log_warn "universal-ctags: no supported installer (need brew, or apt-get as root) -- zoekt sym: queries will return nothing until it is installed (then reindex)"
 		return 0
