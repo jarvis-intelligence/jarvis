@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from jarvis.search import ZoektHit, ZoektUnavailableError
+from jarvis.search import ZoektHit, ZoektSearchResult, ZoektUnavailableError
 from jarvis.semantic import FusedHit, reciprocal_rank_fusion
 from jarvis.symbol_search import SymbolHit
 from jarvis.symbols import DescriptorKind
@@ -181,9 +181,11 @@ def _indexed(tmp_path):
 def test_semantic_search_returns_fused_results(tmp_path, lancedb_available, monkeypatch):
     from jarvis import semantic
     data = _indexed(tmp_path)
+    from jarvis.search import ZoektSearchResult
     monkeypatch.setattr(semantic, "search_zoekt",
-                        lambda url, q: [ZoektHit(repo="myrepo", path="mod_0.py",
-                                                 line_number=1, line_text="def f_0():")])
+                        lambda url, q: ZoektSearchResult(
+                            [ZoektHit(repo="myrepo", path="mod_0.py",
+                                      line_number=1, line_text="def f_0():")], 1, 1))
     result = semantic.semantic_search("myrepo", "function zero", root=data,
                                       zoekt_base_url="http://x", model=FakeEmbedder())
     assert result["total"] >= 1 and "warning" not in result
@@ -392,8 +394,8 @@ def test_query_uses_the_tables_prefixes_not_the_configured_ones(tmp_path, lanced
     from jarvis import semantic as semantic_module
     from jarvis.semantic import index_semantic, semantic_search
     repo = _write_repo(tmp_path)
-    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
-    monkeypatch.setattr(semantic_module, "search_zoekt", lambda *a, **k: [])
+    monkeypatch.setattr(semantic_module, "search_zoekt",
+                        lambda *a, **k: ZoektSearchResult([], 0, 0))
 
     rebuilt: list[tuple] = []
 

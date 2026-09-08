@@ -193,7 +193,9 @@ async def test_search_code_roundtrip(tmp_path: Path, monkeypatch):
         async with create_connected_server_and_client_session(server.mcp) as client:
             result = await client.call_tool("searchCode", {"query": "greet"})
             payload = json.loads(result.content[0].text)
-            assert payload["total"] == 1
+            assert payload["totalMatches"] == 1
+            assert payload["returned"] == 1
+            assert payload["truncated"] is False
             assert payload["hits"][0]["repo"] == "toy-repo"
             assert payload["hits"][0]["lineText"] == "def greet(name):"
     finally:

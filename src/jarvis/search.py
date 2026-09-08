@@ -32,6 +32,27 @@ class ZoektHit:
     line_text: str
 
 
+# Display caps sent with every search. zoekt's JSON API applies NO display
+# limit and skips SetDefaults entirely when `Opts` is absent
+# (internal/json/json.go at our pin 33f1f18af292), so a broad query streams
+# every match into one MCP payload. These bounds mirror what an agent can
+# consume; Result.Stats.MatchCount still reports the true total (accumulated
+# before display truncation), so totalMatches stays honest. There is no
+# TotalMatchCount option at this pin — do not add one.
+MAX_DOC_DISPLAY = 50     # files returned per query
+MAX_MATCH_DISPLAY = 200  # line matches returned per query
+
+
+@dataclass(frozen=True)
+class ZoektSearchResult:
+    """Hits plus zoekt's own totals. `total_matches` is Stats.MatchCount
+    (non-overlapping matches found, pre-display-truncation); `file_count`
+    is Stats.FileCount (files containing a match)."""
+    hits: list[ZoektHit]
+    total_matches: int
+    file_count: int
+
+
 class ZoektUnavailableError(Exception):
     """Raised when zoekt-webserver cannot be reached or returns a non-2xx."""
 
@@ -63,11 +84,13 @@ def _decode_line(raw_line: str) -> str:
 
 def search_zoekt(
     base_url: str, query: str, *, client: httpx.Client | None = None, timeout_seconds: float = 5.0
-) -> list[ZoektHit]:
+) -> ZoektSearchResult:
     """Query zoekt-webserver's real JSON search API: `POST /api/search` with
-    body `{"Q": "<query>"}` (requires the webserver started with `-rpc`).
-    Response shape: `{"Result": {"Files": [{"FileName", "Repository",
-    "LineMatches": [{"LineNumber", "Line", ...}]}]}}` — `Line` is base64.
+    body `{"Q": ..., "Opts": {...}}` (requires the webserver started with
+    `-rpc`). Response shape: `{"Result": {"Files": [...], "Stats": ...}}` —
+    `LineMatch.Line` is base64; `Stats.MatchCount`/`FileCount` are the true
+    totals. A 400 carries zoekt's parse error in `{"Error": ...}` and is
+    surfaced verbatim so a bad query explains itself.
 
     `client` is injectable (a real `httpx.Client`, or one backed by
     `httpx.MockTransport` in tests); defaults to a short-lived real client.
@@ -77,9 +100,14 @@ def search_zoekt(
     try:
         response = client.post(
             f"{base_url.rstrip('/')}/api/search",
-            json={"Q": query},
+            json={"Q": query,
+                  "Opts": {"MaxDocDisplayCount": MAX_DOC_DISPLAY,
+                           "MaxMatchDisplayCount": MAX_MATCH_DISPLAY}},
             timeout=timeout_seconds,
         )
+        if response.status_code == 400:
+            detail = response.json().get("Error", response.text[:300])
+            raise ZoektUnavailableError(f"zoekt rejected the query: {detail}")
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise ZoektUnavailableError(f"zoekt-webserver request failed: {exc}") from exc
@@ -101,7 +129,14 @@ def search_zoekt(
                     line_text=_decode_line(line_match.get("Line", "")),
                 )
             )
-    return hits
+    stats = payload.get("Result", {}).get("Stats", {}) or {}
+    return ZoektSearchResult(
+        hits=hits,
+        # Absent Stats (older/mock servers) degrade to countable truths
+        # rather than a fabricate-by-zero.
+        total_matches=stats.get("MatchCount", len(hits)),
+        file_count=stats.get("FileCount", len({(hit.repo, hit.path) for hit in hits})),
+    )
 
 
 def zoekt_repo_documents(

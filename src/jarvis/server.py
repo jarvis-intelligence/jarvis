@@ -415,21 +415,31 @@ def search_code(query: str, repo: str | None = None) -> dict[str, Any]:
     """Lexical code search via an embedded Zoekt index (lazy-started on
     first call). `repo`, if given, is applied as a Zoekt `r:` query filter
     scoping results to that one indexed repo; omitted, results span every
-    indexed repo."""
+    indexed repo. Results answer over the last published index snapshot,
+    not the working tree — `indexedAt` says when that was. Zoekt query
+    syntax is live: `sym:`, `file:`, `lang:`, `case:` filters, `-term`
+    negation, quoted phrases, and `(a or b)` grouping; `sym:` needs
+    universal-ctags installed at index time. `truncated` is true when
+    zoekt found more matches than the returned cap."""
     scoped_query = f"r:{repo} {query}" if repo else query
     try:
         base_url = _zoekt().ensure_running()
-        hits = search_zoekt(base_url, scoped_query)
+        result = search_zoekt(base_url, scoped_query)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return {"error": str(exc)}
+    entry = _registry_entry(repo) if repo else None  # best-effort; None-safe
     return {
         "query": query,
         "hits": [
             {"repo": hit.repo, "path": hit.path, "lineNumber": hit.line_number, "lineText": hit.line_text}
-            for hit in hits
+            for hit in result.hits
         ],
-        "total": len(hits),
+        "totalMatches": result.total_matches,
+        "fileCount": result.file_count,
+        "returned": len(result.hits),
+        "truncated": result.total_matches > len(result.hits),
+        "indexedAt": entry.last_indexed.isoformat() if entry is not None else None,
     }
 
 

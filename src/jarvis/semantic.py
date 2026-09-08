@@ -344,7 +344,9 @@ def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None
     zoekt_hits: list[ZoektHit] = []
     if zoekt_base_url is not None:
         try:
-            zoekt_hits = search_zoekt(zoekt_base_url, f"r:{slug} {query}")[:ZOEKT_TOP_K]
+            zoekt_hits = search_zoekt(
+                zoekt_base_url, f"r:{slug} {query}"
+            ).hits[:ZOEKT_TOP_K]
         except ZoektUnavailableError:
             pass  # hybrid degrades to vector-only; sources fields reflect it
 

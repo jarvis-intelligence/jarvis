@@ -21,20 +21,18 @@ from jarvis.search import ZoektHit, ZoektLifecycle, ZoektUnavailableError, searc
 
 def _zoekt_response(request: httpx.Request) -> httpx.Response:
     encoded_line = base64.b64encode(b"def greet(name):").decode()
-    return httpx.Response(
-        200,
-        json={
-            "Result": {
-                "Files": [
-                    {
-                        "Repository": "toy-repo",
-                        "FileName": "toy/greeter.py",
-                        "LineMatches": [{"LineNumber": 5, "Line": encoded_line}],
-                    }
-                ]
-            }
+    return httpx.Response(200, json={
+        "Result": {
+            "Files": [{
+                "FileName": "toy/greeter.py",
+                "Repository": "toy-repo",
+                "LineMatches": [{"LineNumber": 5, "Line": encoded_line}],
+            }],
+            # MatchCount intentionally > the one returned match: proves
+            # totals come from zoekt's Stats, not from len(hits).
+            "Stats": {"MatchCount": 3, "FileCount": 1},
         },
-    )
+    })
 
 
 def _error_response(request: httpx.Request) -> httpx.Response:
@@ -43,16 +41,63 @@ def _error_response(request: httpx.Request) -> httpx.Response:
 
 def test_search_zoekt_decodes_base64_line_and_returns_hits():
     client = httpx.Client(transport=httpx.MockTransport(_zoekt_response))
-    hits = search_zoekt("http://localhost:6070", "greet", client=client)
-    assert hits == [ZoektHit(repo="toy-repo", path="toy/greeter.py", line_number=5, line_text="def greet(name):")]
+    result = search_zoekt("http://localhost:6070", "greet", client=client)
+    assert result.hits == [
+        ZoektHit(repo="toy-repo", path="toy/greeter.py", line_number=5, line_text="def greet(name):")
+    ]
 
 
-def test_search_zoekt_no_hits_returns_empty_list():
+def test_search_zoekt_reports_true_totals_from_stats():
+    client = httpx.Client(transport=httpx.MockTransport(_zoekt_response))
+    result = search_zoekt("http://localhost:6070", "greet", client=client)
+    assert result.total_matches == 3
+    assert result.file_count == 1
+
+
+def test_search_zoekt_totals_fall_back_when_stats_absent():
+    def no_stats(request: httpx.Request) -> httpx.Response:
+        encoded = base64.b64encode(b"x = 1").decode()
+        return httpx.Response(200, json={"Result": {"Files": [{
+            "FileName": "a.py", "Repository": "r",
+            "LineMatches": [{"LineNumber": 1, "Line": encoded}],
+        }]}})
+
+    result = search_zoekt("http://localhost:6070", "x", client=httpx.Client(transport=httpx.MockTransport(no_stats)))
+    assert result.total_matches == 1  # len(hits)
+    assert result.file_count == 1    # distinct (repo, path)
+
+
+def test_search_zoekt_no_hits_returns_empty_result():
     def empty_response(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"Result": {"Files": []}})
+        return httpx.Response(200, json={"Result": {"Files": [], "Stats": {"MatchCount": 0, "FileCount": 0}}})
 
     client = httpx.Client(transport=httpx.MockTransport(empty_response))
-    assert search_zoekt("http://localhost:6070", "no-such-query", client=client) == []
+    assert search_zoekt("http://localhost:6070", "no-such-query", client=client).hits == []
+
+
+def test_search_zoekt_sends_display_cap_opts():
+    from jarvis.search import MAX_DOC_DISPLAY, MAX_MATCH_DISPLAY
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        captured["body"] = _json.loads(request.content)
+        return httpx.Response(200, json={"Result": {"Files": [], "Stats": {"MatchCount": 0, "FileCount": 0}}})
+
+    search_zoekt("http://localhost:6070", "q", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert captured["body"]["Opts"] == {
+        "MaxDocDisplayCount": MAX_DOC_DISPLAY,
+        "MaxMatchDisplayCount": MAX_MATCH_DISPLAY,
+    }
+
+
+def test_search_zoekt_surfaces_parse_error_body():
+    def bad_query(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"Error": "parse error: unexpected ')' in query"})
+
+    with pytest.raises(ZoektUnavailableError, match=r"unexpected '\)' in query"):
+        search_zoekt("http://localhost:6070", "greet(", client=httpx.Client(transport=httpx.MockTransport(bad_query)))
 
 
 def test_search_zoekt_raises_unavailable_on_http_error():
