@@ -10,6 +10,11 @@ tools to Claude Code, Cursor, or any MCP client.
 Runs as a single stdio process reading local SQLite files. **No server, no auth,
 no network, nothing leaves your machine.**
 
+![jarvis C4 container architecture](docs/assets/jarvis-c4-containers.png)
+
+One indexing CLI writes up, one stdio runtime reads down — the storage seam in
+`~/.jarvis` is the only contract between them.
+
 ## Quick Start
 
 ```bash
