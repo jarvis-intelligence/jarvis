@@ -176,6 +176,16 @@ def zoekt_repo_documents(
     return None
 
 
+def _default_port() -> int:
+    """`JARVIS_ZOEKT_PORT` overrides the zoekt-webserver port; an invalid
+    value degrades to the default rather than breaking every search."""
+    raw = os.environ.get("JARVIS_ZOEKT_PORT", "")
+    try:
+        return int(raw) if raw else 6070
+    except ValueError:
+        return 6070
+
+
 class ZoektLifecycle:
     """Lazy-spawns `zoekt-webserver -index <index_dir> -rpc -listen :<port>`
     on first `ensure_running()` call. A pidfile under `data_dir` survives
@@ -184,18 +194,30 @@ class ZoektLifecycle:
     of spawning a duplicate; `atexit` kills the process this instance
     itself started, so a clean process exit leaves no orphan."""
 
+    # A freshly spawned process that is about to die (e.g. a bind conflict
+    # with a sibling that already won the spawn race) can take far longer
+    # to be reaped than a health check's round trip to that sibling's
+    # already-running server. Without a bounded wait here, an instant
+    # health success is always credited to our own spawn before its
+    # eventual failure is observable.
+    _spawn_settle_seconds: float = 2.0
+
     def __init__(
         self,
         index_dir: Path,
         data_dir: Path,
         *,
-        port: int = 6070,
+        port: int | None = None,
         binary: str | list[str] | None = None,
         health_timeout_seconds: float = 5.0,
     ) -> None:
         self._index_dir = index_dir
         self._pidfile = data_dir / "zoekt-webserver.pid"
-        self._port = port
+        # stderr of the spawned webserver — surfaced in spawn-failure
+        # errors; zoekt's bind failures ("address already in use") are
+        # otherwise invisible (stdout/stderr were DEVNULL).
+        self._log_path = data_dir / "zoekt-webserver.log"
+        self._port = port if port is not None else _default_port()
         resolved_binary = binary or os.environ.get("JARVIS_ZOEKT_BIN", "zoekt-webserver")
         # A list lets a caller (test doubles, mainly) prefix an explicit
         # interpreter rather than relying on the target's own shebang.
@@ -234,11 +256,21 @@ class ZoektLifecycle:
             return None
 
     def _is_healthy(self) -> bool:
+        """GET /healthz: zoekt registers it unconditionally and it runs a
+        real canary search, returning 500 until shards are loaded — so 200
+        proves both identity (not some other HTTP server that grabbed the
+        port) and readiness."""
         try:
-            response = httpx.get(self.base_url(), timeout=1.0)
+            response = httpx.get(f"{self.base_url()}/healthz", timeout=1.0)
         except httpx.HTTPError:
             return False
-        return response.status_code < 500
+        return response.status_code == 200
+
+    def _stderr_tail(self, limit: int = 2000) -> str:
+        try:
+            return self._log_path.read_text(encoding="utf-8", errors="replace")[-limit:]
+        except OSError:
+            return ""
 
     def ensure_running(self) -> str:
         """Returns the base URL of a healthy zoekt-webserver, spawning one
@@ -248,23 +280,61 @@ class ZoektLifecycle:
             return self.base_url()
 
         self._pidfile.parent.mkdir(parents=True, exist_ok=True)
-        process = subprocess.Popen(
-            [*self._argv_prefix, "-index", str(self._index_dir), "-rpc", "-listen", f":{self._port}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        log_file = open(self._log_path, "ab")
+        try:
+            process = subprocess.Popen(
+                [*self._argv_prefix, "-index", str(self._index_dir), "-rpc", "-listen", f":{self._port}"],
+                stdout=subprocess.DEVNULL,
+                stderr=log_file,
+            )
+        finally:
+            log_file.close()  # the child keeps its own duplicated fd
+
         self._own_process = process
-        self._pidfile.write_text(str(process.pid), encoding="utf-8")
         atexit.register(self.stop)
 
+        def _adopt_sibling_or_raise() -> str:
+            # A sibling jarvis process may have won the spawn race — its
+            # server holding the port is exactly what kills our child.
+            # Re-check once before giving up, and adopt the winner. We
+            # never wrote our own pid to the pidfile (below), so it still
+            # names the sibling that was already there.
+            sibling = self._read_pidfile()
+            if (sibling is not None and sibling != process.pid
+                    and self._pid_alive(sibling) and self._is_healthy()):
+                self._own_process = None
+                return self.base_url()
+            tail = self._stderr_tail()
+            detail = f"\nzoekt-webserver stderr tail:\n{tail}" if tail else ""
+            raise ZoektUnavailableError(
+                f"{' '.join(self._argv_prefix)} exited immediately with code {process.returncode}"
+                f" (port {self._port}; log: {self._log_path}){detail}"
+            )
+
         deadline = time.monotonic() + self._health_timeout_seconds
+        settled = False
         while time.monotonic() < deadline:
             if self._is_healthy():
-                return self.base_url()
+                if not settled and process.poll() is None:
+                    # A healthy answer before our own process could
+                    # plausibly have started serving (bound a port, loaded
+                    # shards) almost certainly means a sibling already held
+                    # this port. Give our spawn a moment to resolve (bind
+                    # conflict vs. coincidence) before crediting its health
+                    # to us — otherwise a sibling's pre-existing server
+                    # always wins this race before our own child's bind
+                    # failure is even observable.
+                    try:
+                        process.wait(timeout=self._spawn_settle_seconds)
+                    except subprocess.TimeoutExpired:
+                        pass
+                if process.poll() is None:
+                    # Still alive: this is legitimately our own server.
+                    self._pidfile.write_text(str(process.pid), encoding="utf-8")
+                    return self.base_url()
+            settled = True
             if process.poll() is not None:
-                raise ZoektUnavailableError(
-                    f"{' '.join(self._argv_prefix)} exited immediately with code {process.returncode}"
-                )
+                return _adopt_sibling_or_raise()
             time.sleep(0.1)
         raise ZoektUnavailableError(
             f"{' '.join(self._argv_prefix)} did not become healthy within {self._health_timeout_seconds}s"
@@ -277,6 +347,8 @@ class ZoektLifecycle:
                 self._own_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._own_process.kill()
+            if self._pidfile.exists():
+                # Only the spawner removes the pidfile: an adopter (pidfile
+                # reuse or race adoption) never owned it.
+                self._pidfile.unlink()
         self._own_process = None
-        if self._pidfile.exists():
-            self._pidfile.unlink()
