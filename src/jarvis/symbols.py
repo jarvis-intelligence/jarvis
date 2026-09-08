@@ -295,7 +295,7 @@ def _matches(name_map: dict[str, list[Candidate]], query: str, *, case_sensitive
         path = candidate.dotted_path if case_sensitive else candidate.dotted_path.lower()
         return path == query or path.endswith(suffix)
 
-    bucketed = [c for c in name_map.get(query.rsplit(".", 1)[-1], ()) if hit(c)]
+    bucketed = [c for c in name_map.get(query.rsplit(".", 1)[-1], []) if hit(c)]
     if bucketed:
         return bucketed
     return [c for candidates in name_map.values() for c in candidates if hit(c)]

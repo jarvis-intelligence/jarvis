@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.7.2] - 2026-09-08
+
+No functional changes — v0.7.1's own publish run also failed the
+compiled-wheel build, for two further reasons the v0.7.1 fix missed. Same
+code as v0.7.0/v0.7.1, ships for real this time.
+
+### Fixed
+
+- **One more `interactive_input` test was missed.**
+  `test_cmd_index_semantic_include_runs_on_declined_repo_without_clearing_bit`
+  also calls `_force_offer_seams`/`_offer_run` (the same real-`input()` path
+  v0.7.1 marked seven other tests for) but its name doesn't match the
+  `tty_offer`/`offer_` pattern the first pass was grepped against. Now
+  marked and excluded from the cibuildwheel test-command like the other
+  seven.
+- **A real Cython compilation bug in `jarvis.symbols._matches`, exposed for
+  the first time by this release's compiled-wheel test run.**
+  `_matches`'s `name_map` parameter is annotated `dict[str, list[Candidate]]`,
+  but its lookup used `name_map.get(key, ())` — an empty *tuple* default
+  where the annotation promises `list` values. Pure Python's duck typing
+  never noticed (iterating an empty tuple or empty list is identical), so
+  this shipped unnoticed in every previous release. Cython's compiled code
+  enforces the annotated value type on `dict.get()`'s default argument,
+  raising `TypeError: Expected list, got tuple` on every call that missed
+  the fast-path bucket — which broke `resolve()` for any unknown or
+  dotted-suffix symbol query, cascading into ten failing tests
+  (`goToDefinition`/`findReferences`/`callHierarchy` on unknown symbols, and
+  every dotted-suffix resolution path). Fixed by defaulting to `[]`,
+  matching the parameter's own declared type — a genuine latent bug, not a
+  workaround, that only a real compiled-wheel test run could have caught.
+
 ## [0.7.1] - 2026-09-08
 
 No functional changes — v0.7.0's first publish run never reached PyPI, so
