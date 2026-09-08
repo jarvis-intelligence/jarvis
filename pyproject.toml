@@ -13,7 +13,7 @@
 # abandoned Komodo Edit CodeIntel package. That distribution is still
 # installable at 0.4.0 and receives no further releases.)
 name = "jarvis-mcp"
-version = "0.7.0"
+version = "0.7.1"
 description = "Local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
 readme = "README.md"
 license = "MIT"
@@ -108,7 +108,10 @@ packages = ["jarvis"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: exercises real external binaries (scip-python, scip, zoekt-index)"]
+markers = [
+    "integration: exercises real external binaries (scip-python, scip, zoekt-index)",
+    "interactive_input: monkeypatches builtins.input/isatty for the semantic-offer TTY prompt",
+]
 
 [tool.cibuildwheel]
 # cp312..cp314 x {linux x86_64/aarch64, macOS arm64/x86_64}; the runner list
@@ -131,4 +134,15 @@ test-requires = ["pytest>=8.3"]
 # wheel, and it hard-requires dash (its own first test guards on that), which
 # manylinux containers do not ship. Proven the hard way: v0.6.0's first
 # publish run failed exactly there, inside the cp312 manylinux test phase.
-test-command = "pytest {project}/tests -m 'not integration' -q --ignore={project}/tests/test_setup_sh.py"
+#
+# interactive_input-marked tests are excluded too: cibuildwheel's isolated
+# --test-command subprocess does not give pytest a real, monkeypatch-honoring
+# stdin the way the regular unit-test job's interpreter does, so
+# `builtins.input` replacement in these tests intermittently loses the race
+# to pytest's own capture-mode stdin guard (`OSError: pytest: reading from
+# stdin while output is captured!`). Proven the hard way: v0.7.0's first
+# publish run failed exactly there, on every platform in the matrix. The
+# regular unit job (test.yml) already exercises these tests successfully on
+# every push, so no real coverage is lost -- only the compiled-wheel smoke
+# pass narrows.
+test-command = "pytest {project}/tests -m 'not integration and not interactive_input' -q --ignore={project}/tests/test_setup_sh.py"
