@@ -1,0 +1,362 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "jarvis — C4 Container Model",
+    "locale": "en",
+    "output": "jarvis-c4-containers.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1255,
+      480
+    ],
+    "views": [
+      {
+        "id": "read-path",
+        "label": "Read path",
+        "focus": [
+          "assistant",
+          "server",
+          "indexdb",
+          "zweb",
+          "shards"
+        ],
+        "note": "An AI assistant calls MCP tools over stdio; jarvis-server answers from immutable published indexes."
+      },
+      {
+        "id": "write-path",
+        "label": "Write path",
+        "focus": [
+          "developer",
+          "cli",
+          "gitrepo",
+          "scip",
+          "indexdb",
+          "zgi",
+          "shards"
+        ],
+        "note": "jarvis index rebuilds every artifact from git, then swaps the current pointer atomically."
+      },
+      {
+        "id": "semantic-graph",
+        "label": "Semantic + graph",
+        "focus": [
+          "server",
+          "lance",
+          "registrydb"
+        ],
+        "note": "Optional vector fusion and the package dependency graph live beside the core index."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "assistant",
+      "type": "external",
+      "label": "AI Coding Assistant",
+      "sublabel": "MCP client · stdio JSON-RPC",
+      "pos": [
+        990,
+        12
+      ],
+      "size": [
+        170,
+        60
+      ]
+    },
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "jarvis-server",
+      "sublabel": "FastMCP stdio · 9 tools",
+      "pos": [
+        990,
+        170
+      ],
+      "size": [
+        190,
+        68
+      ]
+    },
+    {
+      "id": "zweb",
+      "type": "backend",
+      "label": "zoekt-webserver",
+      "sublabel": "lazy :6070 · pidfile",
+      "pos": [
+        990,
+        395
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "registrydb",
+      "type": "database",
+      "label": "registry.db",
+      "sublabel": "repos · package graph",
+      "pos": [
+        700,
+        40
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "indexdb",
+      "type": "database",
+      "label": "index-<sha>.db",
+      "sublabel": "SCIP-converted SQLite",
+      "pos": [
+        700,
+        170
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "shards",
+      "type": "database",
+      "label": "Zoekt shards",
+      "sublabel": ".zoekt/<slug>_v*.zoekt",
+      "pos": [
+        700,
+        300
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "lance",
+      "type": "database",
+      "label": "LanceDB",
+      "sublabel": "vectors · semantic extra",
+      "pos": [
+        460,
+        300
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "zgi",
+      "type": "external",
+      "label": "zoekt-git-index",
+      "sublabel": "git blobs → shards",
+      "pos": [
+        560,
+        395
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "developer",
+      "type": "external",
+      "label": "Developer",
+      "sublabel": "uv run jarvis …",
+      "pos": [
+        6,
+        180
+      ],
+      "size": [
+        120,
+        60
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "backend",
+      "label": "jarvis CLI",
+      "sublabel": "Writer · atomic publish",
+      "pos": [
+        205,
+        176
+      ],
+      "size": [
+        160,
+        68
+      ]
+    },
+    {
+      "id": "scip",
+      "type": "external",
+      "label": "SCIP indexers",
+      "sublabel": "py · ts · java · swift",
+      "pos": [
+        205,
+        50
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "gitrepo",
+      "type": "external",
+      "label": "Git repository",
+      "sublabel": "working tree · HEAD",
+      "pos": [
+        6,
+        300
+      ],
+      "size": [
+        130,
+        60
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "~/.jarvis (JARVIS_DATA_DIR)",
+      "wraps": [
+        "registrydb",
+        "indexdb",
+        "shards",
+        "lance"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "jarvis reader processes",
+      "wraps": [
+        "server",
+        "zweb"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "assistant-mcp",
+      "from": "assistant",
+      "to": "server",
+      "label": "MCP stdio · 9 tools",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "server-graph",
+      "from": "server",
+      "to": "registrydb",
+      "label": "status + graph"
+    },
+    {
+      "id": "server-nav",
+      "from": "server",
+      "to": "indexdb",
+      "label": "nav SQL",
+      "labelDy": 16
+    },
+    {
+      "id": "server-vector",
+      "from": "server",
+      "to": "lance",
+      "label": "vector search",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "server-spawn-portal",
+      "from": "server",
+      "to": "zweb",
+      "label": "spawns :6070",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "portal-shards",
+      "from": "zweb",
+      "to": "shards"
+    },
+    {
+      "id": "developer-cli",
+      "from": "developer",
+      "to": "cli",
+      "label": "jarvis index",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cli-scip",
+      "from": "cli",
+      "to": "scip",
+      "label": "subprocess",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "cli-git",
+      "from": "cli",
+      "to": "gitrepo",
+      "label": "git ls-files · blobs",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "cli-zgi",
+      "from": "cli",
+      "to": "zgi",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "zgi-shards",
+      "from": "zgi",
+      "to": "shards",
+      "fromSide": "right",
+      "toSide": "bottom"
+    },
+    {
+      "id": "cli-convert",
+      "from": "cli",
+      "to": "indexdb",
+      "label": "expt-convert"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Read path",
+      "items": [
+        "9 MCP tools over stdio: documentSymbols → blastRadius",
+        "Nav SQL reads immutable index-<sha>.db behind the current pointer",
+        "searchCode lazily spawns zoekt-webserver on :6070",
+        "semanticSearch fuses LanceDB + Zoekt + symbols via RRF"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Write path",
+      "items": [
+        "index: detect language → SCIP indexer → scip expt-convert",
+        "zoekt-git-index builds shards from git blobs (HEAD)",
+        "Repo rows + package graph rebuilt in registry.db",
+        "Atomic publish: write index-<sha>.db, then os.replace(current)"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Invariants",
+      "items": [
+        "Published DBs are never mutated; readers open mode=ro&immutable=1",
+        "Zoekt reflects HEAD while SCIP reflects the working tree",
+        "Single-tenant by design: PROJECT = BRANCH = \"_\""
+      ]
+    }
+  ]
+}

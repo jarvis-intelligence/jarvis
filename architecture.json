@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Jarvis Runtime Architecture",
+    "output": "jarvis-runtime-architecture.html",
+    "viewBox": [1380, 820],
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [80, 80],
+    "cols": 5,
+    "gapX": 44,
+    "gapY": 30,
+    "cellW": 220,
+    "cellH": 120
+  },
+  "components": [
+    { "id": "mcp-client", "type": "external", "label": "MCP Client / Agent", "sublabel": "stdio", "row": 0, "col": 0 },
+    { "id": "mcp-server", "type": "backend", "label": "FastMCP Server", "sublabel": "9 tool wrappers", "tag": "primary edge", "row": 0, "col": 1 },
+    { "id": "query-service", "type": "backend", "label": "QueryService", "sublabel": "SCIP navigation", "row": 0, "col": 2 },
+    { "id": "scip-reader", "type": "backend", "label": "Index Reader Cache", "sublabel": "read-only SQLite", "row": 0, "col": 3 },
+    { "id": "scip-db", "type": "database", "label": "SCIP Index", "sublabel": "published / immutable", "tag": "source of truth", "row": 0, "col": 4, "size": [180, 90] },
+    { "id": "search-facade", "type": "backend", "label": "Search + Semantic", "sublabel": "lexical / hybrid RRF", "row": 1, "col": 2 },
+    { "id": "zoekt", "type": "external", "label": "Zoekt Webserver", "sublabel": "local HTTP :6070", "row": 1, "col": 3 },
+    { "id": "search-index", "type": "database", "label": "Zoekt Shards", "sublabel": "lexical index", "row": 1, "col": 4 },
+    { "id": "graph-registry", "type": "database", "label": "Registry + Graph DB", "sublabel": "repo state / deps", "row": 2, "col": 2 },
+    { "id": "lancedb", "type": "database", "label": "Per-repo LanceDB", "sublabel": "optional embeddings", "row": 2, "col": 3 },
+    { "id": "indexer", "type": "backend", "label": "Index CLI + Watcher", "sublabel": "build / publish", "row": 2, "col": 0 },
+    { "id": "toolchain", "type": "external", "label": "SCIP Toolchain", "sublabel": "indexers / converters", "row": 2, "col": 1, "size": [180, 90] },
+    { "id": "repository", "type": "external", "label": "Git Repository", "sublabel": "tracked source files", "row": 3, "col": 0 }
+  ],
+  "boundaries": [
+    { "kind": "security-group", "label": "User-owned local runtime", "wraps": ["mcp-server", "query-service", "scip-reader", "search-facade", "graph-registry", "indexer"] },
+    { "kind": "region", "label": "Persistent local data", "wraps": ["scip-db", "search-index", "lancedb", "graph-registry"] }
+  ],
+  "connections": [
+    { "id": "request", "from": "mcp-client", "to": "mcp-server", "label": "MCP stdio request", "variant": "emphasis" },
+    { "id": "dispatch", "from": "mcp-server", "to": "query-service", "label": "navigation tool", "variant": "emphasis" },
+    { "id": "read", "from": "query-service", "to": "scip-reader", "label": "resolve / query", "variant": "emphasis" },
+    { "id": "published", "from": "scip-reader", "to": "scip-db", "label": "immutable read", "variant": "emphasis" },
+    { "id": "search", "from": "mcp-server", "to": "search-facade", "label": "search tools", "labelDx": -120 },
+    { "id": "zoekt-http", "from": "search-facade", "to": "zoekt", "label": "HTTP JSON search" },
+    { "id": "zoekt-data", "from": "zoekt", "to": "search-index", "label": "read shards" },
+    { "id": "blast", "from": "mcp-server", "to": "graph-registry", "label": "blastRadius", "labelDx": 100, "labelDy": 47 },
+    { "id": "vectors", "from": "search-facade", "to": "lancedb", "label": "vector query" },
+    { "id": "index-source", "from": "indexer", "to": "repository", "label": "read files", "labelDy": 24 },
+    { "id": "index-tools", "from": "indexer", "to": "toolchain", "label": "invoke indexers" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Primary query path", "items": ["The MCP server dispatches navigation calls into QueryService", "IndexConnectionCache opens the selected published database read-only", "Queries use the current pointer, so readers never observe an in-place mutation"] },
+    { "dot": "orange", "title": "Indexing, publication + boundaries", "items": ["Index CLI detects language from git-tracked files and invokes the matching SCIP toolchain", "Graph and Zoekt work must succeed before the current pointer is swapped", "A watcher can trigger the same foreground indexing workflow", "The MCP client and local toolchain are boundary peers; persistent indexes remain on the local filesystem"] },
+    { "dot": "emerald", "title": "Optional capability branches", "items": ["searchCode lazy-starts one local Zoekt webserver and queries its shards over HTTP", "semanticSearch fuses LanceDB vectors with Zoekt and symbol hits using reciprocal rank fusion", "blastRadius reads a rebuilt package dependency graph from the registry database"] }
+  ]
+}
