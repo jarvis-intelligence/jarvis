@@ -648,6 +648,21 @@ def test_get_index_status_search_capability_follows_zoekt_shards_on_disk(tmp_pat
     assert search["reason"] == "no zoekt shards on disk"
 
 
+def test_capability_fields_report_ctags_availability(monkeypatch, tmp_path):
+    from jarvis import server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("CTAGS_COMMAND", raising=False)
+    monkeypatch.setattr(server.shutil, "which",
+                        lambda name: None if name == "universal-ctags" else f"/usr/bin/{name}")
+    fields = server._capability_fields("nosuchrepo", indexed=False, freshness=None)
+    assert fields["capabilities"]["search"]["ctagsInstalled"] is False
+
+    monkeypatch.setenv("CTAGS_COMMAND", "/opt/ctags/bin/ctags")
+    fields = server._capability_fields("nosuchrepo", indexed=False, freshness=None)
+    assert fields["capabilities"]["search"]["ctagsInstalled"] is True
+
+
 def test_get_index_status_semantic_capability_follows_the_row(tmp_path: Path, monkeypatch):
     """A6: semantic availability derives from `semantic_indexed_at` on the
     row (recorded at index time); the reason names the missing extra —

@@ -747,6 +747,58 @@ def test_install_zoekt_extracts_both_binaries(tmp_path):
     assert (bin_path / "zoekt-git-index").stat().st_mode & 0o111
 
 
+# ------------------------------------------------------ ctags installer ----
+
+
+def test_install_ctags_skips_when_already_installed():
+    result = run_func('already_installed() { return 0; }\ninstall_ctags')
+    assert result.returncode == 0
+    assert "already installed" in result.stdout
+
+
+def test_install_ctags_uses_brew_when_available():
+    result = run_func(
+        'already_installed() { return 1; }\n'
+        'have_cmd() { [ "$1" = brew ]; }\n'
+        'brew() { echo "BREW $*"; }\n'
+        'install_ctags'
+    )
+    assert result.returncode == 0
+    assert "BREW install universal-ctags" in result.stdout
+
+
+def test_install_ctags_apt_get_when_root(tmp_path):
+    # dash rejects `apt-get() { ... }` outright ("Bad function name": hyphens
+    # are not valid in a POSIX function name), so the fake apt-get must be a
+    # real executable on PATH rather than a shell function, unlike the other
+    # fakes in this test.
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    apt_get_stub = fake_bin / "apt-get"
+    apt_get_stub.write_text('#!/bin/sh\necho "APT $*"\n')
+    apt_get_stub.chmod(0o755)
+    result = run_func(
+        'already_installed() { return 1; }\n'
+        'have_cmd() { [ "$1" = apt-get ]; }\n'
+        'id() { echo 0; }\n'
+        'install_ctags',
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    assert "APT install -y -qq universal-ctags" in result.stdout
+
+
+def test_install_ctags_warns_when_no_installer():
+    result = run_func(
+        'already_installed() { return 1; }\n'
+        'have_cmd() { return 1; }\n'
+        'install_ctags'
+    )
+    # Warn, not fail: ctags absence degrades zoekt sym: only.
+    assert result.returncode == 0
+    assert "sym:" in (result.stdout + result.stderr)
+
+
 # ------------------------------------------------------ scip-swift installer ----
 
 

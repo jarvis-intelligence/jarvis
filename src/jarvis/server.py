@@ -7,6 +7,8 @@ callHierarchy, typeHierarchy, getIndexStatus, searchCode, semanticSearch, blastR
 
 from __future__ import annotations
 
+import os
+import shutil
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any
@@ -141,6 +143,15 @@ def _search_coverage_fields(repo: str) -> dict[str, Any]:
         return {"searchCoverage": None, "searchCoverageReason": str(exc)}
 
 
+def _ctags_available() -> bool:
+    """zoekt auto-discovers universal-ctags on PATH (or $CTAGS_COMMAND) at
+    index time; shards built without it carry no symbol sections, so sym:
+    queries and zoekt's symbol-definition ranking silently do nothing.
+    Reports the tool's presence, not per-shard truth: existing shards stay
+    symbol-less until a reindex after installation."""
+    return bool(os.environ.get("CTAGS_COMMAND")) or shutil.which("universal-ctags") is not None
+
+
 def _capability_fields(repo: str, indexed: bool, freshness: FreshnessSnapshot | None) -> dict[str, Any]:
     """The two orthogonal layers a status consumer needs (D-15):
     `last_index_run` reports what the latest run did (registry-row truth),
@@ -208,6 +219,7 @@ def _capability_fields(repo: str, indexed: bool, freshness: FreshnessSnapshot | 
                 "search": {
                     "available": search_available,
                     "reason": None if search_available else "no zoekt shards on disk",
+                    "ctagsInstalled": _ctags_available(),
                 },
                 "semantic": {
                     "available": semantic_available,

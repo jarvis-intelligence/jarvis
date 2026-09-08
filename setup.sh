@@ -613,6 +613,31 @@ install_zoekt() {
 	log_info "zoekt: installed"
 }
 
+# zoekt auto-discovers universal-ctags on PATH (or $CTAGS_COMMAND) at index
+# time; shards built without it carry no symbol sections, so zoekt's sym:
+# queries and its symbol-definition ranking silently return nothing
+# (index/builder.go: HasSymbols = CTagsPath != ""). Unlike the pinned
+# tarball binaries, ctags comes from the system package manager: it is a
+# build tool zoo of parsers, not a single static binary. Absence is a warn,
+# not a failure -- it degrades sym: only. NOTE: shards indexed before this
+# install stay symbol-less until `jarvis reindex <slug>`.
+install_ctags() {
+	if already_installed universal-ctags; then
+		log_info "universal-ctags: already installed, skipping"
+		return 0
+	fi
+	if have_cmd brew; then
+		log_info "universal-ctags: installing via brew"
+		brew install universal-ctags
+	elif have_cmd apt-get && [ "$(id -u)" = "0" ]; then
+		log_info "universal-ctags: installing via apt-get"
+		apt-get update -qq && apt-get install -y -qq universal-ctags
+	else
+		log_warn "universal-ctags: no supported installer (need brew, or apt-get as root) -- zoekt sym: queries will return nothing until it is installed (then reindex)"
+		return 0
+	fi
+}
+
 install_scip_swift() {
 	_os=$1
 	_arch=$2
@@ -913,7 +938,7 @@ uvx launch reuses, so the first MCP connect doesn't compile from source).
 
 Options:
   --only <name>   Install just one dependency. One of:
-                  scip, zoekt, scip-swift, scip-typescript,
+                  scip, zoekt, ctags, scip-swift, scip-typescript,
                   scip-python, scip-java, bash-shim, jarvis-mcp
   --force         Reinstall even if already present
   --help          Show this message
@@ -1001,6 +1026,7 @@ main() {
 	# semantics under `set -e` across dash and bash-posix.
 	if should_run scip; then run_one scip install_scip "$OS" "$ARCH"; fi
 	if should_run zoekt; then run_one zoekt install_zoekt "$OS" "$ARCH"; fi
+	if should_run ctags; then run_one ctags install_ctags; fi
 	if should_run scip-swift; then run_one scip-swift install_scip_swift "$OS" "$ARCH"; fi
 	if should_run scip-typescript; then run_one scip-typescript install_scip_typescript; fi
 	if should_run scip-python; then run_one scip-python install_scip_python; fi
