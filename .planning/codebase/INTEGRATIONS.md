@@ -1,139 +1,115 @@
 ---
-last_mapped_commit: 55a25abf97c4ffd41cd326e8216b1497145b72d4
+focus: tech
+last_mapped_commit: 7911fc568fbdc8c4736c068477cb47157fd5cfea
 ---
 
 # External Integrations
 
-**Analysis Date:** 2026-08-21
+**Analysis Date:** 2026-09-08
 
-## External Binaries (subprocess)
+jarvis is local-first: at runtime the only network client is httpx talking to a localhost zoekt-webserver, plus an optional Hugging Face model download when the `semantic` extra is used. The heavyweight "integrations" are local subprocesses (external binaries) and the release/distribution pipeline.
 
-All external binaries are driven via `subprocess.run()` in `src/jarvis/index_cli.py` (the `_run()` helper merges env over `os.environ`). None are Python libraries — they are CLI tools installed to `~/.jarvis/bin/` by `setup.sh`.
+## APIs & External Services
 
-**SCIP ecosystem:**
-- `scip` — `scip index` (language-specific), `scip expt-convert` (protobuf → SQLite), `scip --version` (version gate)
-  - Installed from fork `phuongddx/scip` at commit `56791658a873` (upstream v0.9.0 + relationships fix scip-code/scip#465)
-  - Pinned in `setup.sh` (`SCIP_COMMIT_PIN`) and `SCIP_COMMIT` (must match; enforced by `tests/test_setup_sh.py`)
-  - Version gate: `src/jarvis/index_cli.py` rejects `scip` below v0.9.0 (`MIN_SCIP_VERSION`)
-- `scip-typescript` (`@sourcegraph/scip-typescript`) — npm global, indexes TypeScript/TSX repos
-  - Invoked: `scip-typescript npm <package_name> <version> <output.scip>`
-- `scip-python` (`@sourcegraph/scip-python`) — npm global, indexes Python repos
-  - Invoked: `scip-python <output.scip>`
-- `scip-java` (`scip-code/scip-java` v0.13.1) — self-contained launcher (embedded JAR), indexes Java/Kotlin repos
-  - Requires JVM; Kotlin plugin compiled against Kotlin 2.2.0 exactly
-  - `src/jarvis/index_cli.py`'s `_java_indexer_env()` puts shim dir first on PATH (bash ≥4.4 requirement)
-  - Known failure: `AbstractMethodError` / `NoSuchMethodError` with wrong Kotlin version → degrades to search-only
-  - Known failure: bash 3.2 `unbound variable` → degrades to search-only with remedy message
-- `scip-swift` (`jarvis-intelligence/scip-swift` v0.1.2) — macOS arm64 only, indexes Swift repos
-  - Uses xcodebuild backend when `.xcodeproj`/`.xcworkspace` detected (`src/jarvis/index_cli.py` `_prefers_xcodebuild()`)
-  - Requires Xcode
+**Local subprocess indexers (driven by `src/jarvis/index_cli.py`):**
+- `scip expt-convert --output <db> <scip-file>` — converts a `.scip` occurrence file into the SQLite index jarvis queries (`src/jarvis/index_cli.py:1151`). Version-gated by `MIN_SCIP_VERSION = (0, 9, 0)`.
+- `scip-python index`, `scip-typescript index` — per-language SCIP emitters, dispatched via `_LANGUAGE_INDEXERS` (`src/jarvis/index_cli.py:46-59`).
+- `scip-java index` — Java/Kotlin; run with a patched env from `_java_indexer_env()` (`src/jarvis/index_cli.py:271`): `GRADLE_OPTS` forced single-threaded (upstream `scip-java#987` race) and the bash-shim dir prepended to PATH (bash >= 4.4 requirement, upstream `scip-java#987`).
+- `scip-swift` — Swift; argv extended by `_swift_indexer_cmd()` with `--build-tool xcodebuild` / `--scheme` for `.xcodeproj` repos and always `--cache-dir` pointing under `~/.jarvis/cache/scip-swift/<slug>` (tree-cleanliness contract, asserted in `.github/workflows/setup-smoke.yml`). Runtime version gate `>= 0.3.0` in `check_scip_swift_version()` (`src/jarvis/index_cli.py:505`).
+- `zoekt-git-index -index <dir> -incremental=false -submodules=false …` — builds search shards from the git tree so gitignored content never enters the index (`_zoekt_index_cmd`, `src/jarvis/index_cli.py:559-590`). No fallback to `zoekt-index`, deliberately.
+- `git` — `ls-files`, tracked-blob counts, remote-origin resolution for zoekt repo naming.
 
-**Zoekt:**
-- `zoekt-git-index` (from `sourcegraph/zoekt` at commit `33f1f18af292`) — indexes git-tracked files into Zoekt shard format
-  - Pinned in `setup.sh` (`ZOEKT_COMMIT_PIN`) and `ZOEKT_COMMIT` (must match; enforced by `tests/test_setup_sh.py`)
-  - Invoked: `zoekt-git-index -repo <slug> -branch <branch> <repo_path>`
-- `zoekt-webserver` — serves search API over HTTP
-  - Lazily spawned by `ZoektLifecycle` in `src/jarvis/search.py`; owned PID with pidfile, health-checked, killed on process exit
-  - Binary path overridable via `JARVIS_ZOEKT_BIN`
+**zoekt-webserver HTTP API (localhost):**
+- Client: `src/jarvis/search.py` (httpx).
+- `POST /api/search` with body `{"Q": "<query>"}` (webserver must run with `-rpc`); response `{"Result": {"Files": [{"FileName", "Repository", "LineMatches": [{"LineNumber", "Line", …}]}]}}` with base64-encoded `Line`.
+- `GET /api/list` — repo document counts, used by the searchCoverage status field (`src/jarvis/server.py:79`).
+- Lifecycle: `ZoektLifecycle` (`src/jarvis/search.py:128`) lazily spawns `zoekt-webserver -index <data>/.zoekt -rpc -listen :6070` on first use; a pidfile (`<data>/zoekt-webserver.pid`) lets a fresh MCP server process reuse a running webserver; `atexit` kills only the process this instance started. Base URL `http://127.0.0.1:6070`; binary overridable via `JARVIS_ZOEKT_BIN`. Status calls never spawn a webserver — `base_url_if_running()` (`src/jarvis/search.py:158`) is probe-only.
+- Failure mode: `ZoektUnavailableError` on connection errors or non-2xx; surfaced to MCP clients as `{"error": …}`.
 
-**Git:**
-- `git` — used for: `git ls-files` (language detection, tracked file count), `git rev-parse HEAD` (commit SHA), `git config zoekt.name` (repo name pinning), `git ls-files -z --others --exclude-standard` (gitignored detection in `src/jarvis/chunker.py`)
+**MCP clients ( inbound, stdio ):**
+- `jarvis-server` (`src/jarvis/server.py`) speaks MCP over stdio via FastMCP; 9 tools: documentSymbols, goToDefinition, findReferences, callHierarchy, typeHierarchy, getIndexStatus, searchCode, semanticSearch, blastRadius.
+- Registration: `claude mcp add jarvis --scope user -- jarvis-server`, or JSON config `{"mcpServers": {"jarvis": {"command": "jarvis-server"}}}` (`README.md`). The Claude Code plugin in the public distribution repo launches it via `uvx --from jarvis-mcp jarvis-server`.
+
+**Hugging Face Hub (implicit, `semantic` extra only):**
+- `sentence-transformers` downloads `BAAI/bge-m3` (pinned revision `5617a9f61b028005a4858fdac845db406aefb181`) on first embed (`src/jarvis/embeddings.py:13-14`). Model never loaded at server startup — lazy on first embed, mirroring ZoektLifecycle. Override with `JARVIS_EMBEDDING_MODEL` (revision then unpinned); query/doc instruction prefixes auto-selected per model family (`MODEL_PREFIXES` in `src/jarvis/embeddings.py:33`).
+- Model identity `(model_name, revision, prefixes)` is persisted in every LanceDB row; a mismatch forces a full semantic rebuild (`table_identity` in `src/jarvis/semantic.py:171`) — vectors from different models must never mix.
+
+**GitHub Releases (downloads made by `setup.sh`):**
+- `jarvis-intelligence/jarvis-index` (PUBLIC artifact repo) — scip and zoekt tarballs + `.sha256` sidecars, pinned to exact commits: scip `56791658a873` (repo-root `SCIP_COMMIT`), zoekt `33f1f18af292` (`ZOEKT_COMMIT`). Sidecar format `<digest>  <filename>` verified by `verify_sha256`.
+- `jarvis-intelligence/scip-swift` — `install_scip_swift` (`setup.sh:624`) queries `https://api.github.com/repos/…/releases/latest`, picks the macOS asset by name, verifies GitHub's server-computed immutable `digest` field (sha256:…, 64 hex chars), and enforces the `>= 0.3.0` floor. Every JSON field is shape-validated before use (untrusted network input).
+- `scip-code/scip-java` — v0.13.1 single-file launcher + `.sha256` sidecar via `install_raw_binary` (`setup.sh:461-485` area).
+- Exit ramp documented in `setup.sh:17-25` and `.github/workflows/build-scip.yml`: when upstream scip-code/scip merges #465 and releases, repoint at upstream and delete the fork pin.
+
+**npm registry:**
+- `npm install -g @sourcegraph/scip-python` and `@sourcegraph/scip-typescript` (`install_npm_indexer`, `setup.sh`). Missing npm is a soft skip with instructions, not a failure.
+
+**PyPI (runtime, optional):**
+- `_install_semantic_extra()` (`src/jarvis/index_cli.py:761`) runs `uv pip install --python <sys.executable> jarvis-mcp[semantic]` when an interactive user accepts the post-index offer — a torch-scale download bounded at 600 s; any failure degrades to one stderr warning, rc 0.
 
 ## Data Storage
 
-**SQLite (stdlib `sqlite3`, no ORM):**
-- `~/.jarvis/registry.db` — repo registry table (`repos`: slug, path, language, commit_sha, last_indexed, status, scheme_override, language_override, search_only, semantic_include, tracked_files)
-  - Written by: `src/jarvis/registry.py` (`Registry` class)
-- `~/.jarvis/scip/_/<slug>/_/index-<sha>.db` — per-repo SCIP navigation index (versioned, immutable after publish)
-  - Schema: vendored from `scip expt-convert` v0.7.0-era (tables: `documents`, `global_symbols`, `external_symbols`, `chunks`, `mentions`)
-  - Opened `mode=ro&immutable=1` for queries; never mutated in place
-  - Connection cache: `src/jarvis/index_reader.py` (`IndexConnectionCache`, keyed on `(project, repo, branch, pointer_content)`)
-  - Queried by: `src/jarvis/query.py` (`QueryService`) and `src/jarvis/graph.py` (`extract_package_names`)
-  - Atomic publish: write new `index-<sha>.db`, then `os.replace()` on `current` pointer (`src/jarvis/index_cli.py` `_publish_atomically()`)
-- `~/.jarvis/registry-graph.db` — package dependency graph (tables: `packages`, `edges`)
-  - Written by: `src/jarvis/graph.py` (`GraphStore`)
-  - Rebuild-not-accumulate: `populate_graph_for_repo()` deletes old edges before recomputing
+**Databases (all local, no server, no ORM — raw stdlib `sqlite3`):**
+- `<data>/registry.db` — repo registry (`src/jarvis/registry.py`) AND package dependency graph (`src/jarvis/graph.py` `GraphStore`). Opened per-call in server tools; single RW database.
+- `<data>/scip/_/<slug>/_/<version>.db` — per-repo index DBs produced by `scip expt-convert`, read through `IndexConnectionCache` (`src/jarvis/index_reader.py`, LRU + threading lock) and selected by the atomic `current` pointer file. Queried by `src/jarvis/query.py`, `src/jarvis/symbols.py`, `src/jarvis/symbol_search.py`, `src/jarvis/semantic.py`.
+- Publishing is atomic-by-construction: `zoekt-git-index` and the SCIP convert both run BEFORE the pointer swap, so a failed index never leaves a repo half-published (`src/jarvis/index_cli.py:985`).
 
-**LanceDB (optional, `semantic` extra):**
-- `~/.jarvis/lancedb/<slug>.lance/` — one LanceDB table per repo
-  - Written by: `src/jarvis/semantic.py` (`SemanticStore`)
-  - Stores: file-path, start/end line, content, vector (1024-dim from BAAI/bge-m3), file hash, language, content format version
-  - Model-identity rule: a table only ever holds vectors from one model+revision (`TableIdentity` dataclass in `src/jarvis/semantic.py`)
+**Vectors:**
+- LanceDB (semantic extra): one table per repo under `<data>/lancedb/`, on-disk `<slug>.lance/` (`SemanticStore`, `src/jarvis/semantic.py:148`). Table opens avoid `table_names()` pagination traps via direct `open_table` + `ValueError` handling.
 
-**Zoekt shard files:**
-- `~/.jarvis/zoekt/` — Zoekt index shards, managed by `zoekt-git-index`
-  - Stranded `.tmp` orphans cleaned by `src/jarvis/index_cli.py` `_sweep_zoekt_tmp_orphans()`
+**File Storage:**
+- Local filesystem only (tarball/cache/pidfile/pointer management under `~/.jarvis`). No cloud object storage.
 
-**Filesystem:**
-- `~/.jarvis/scip/_/<slug>/_/current` — pointer file containing versioned db filename
-- `~/.jarvis/scip/_/<slug>/_/index-<sha>.metadata.json` — sibling metadata (commit, generatedAt)
-- `~/.jarvis/bin/` — pinned external binaries downloaded by `setup.sh`
-- `~/.jarvis/shims/` — symlinks to system tools (currently bash ≥4.4 for scip-java compat)
+**Caching:**
+- `~/.jarvis/cache/scip-swift/<slug>/` — scip-swift incremental build cache (`swift_cache_dir`, `src/jarvis/config.py`); removed on `jarvis forget`.
+- uv tool cache pre-warmed by `setup.sh`'s `install_jarvis_mcp` so the plugin's `uvx` launch stays inside the MCP client's ~30 s connect window.
 
 ## Authentication & Identity
 
-**Auth Provider:** None
-- jarvis is a single-user, local-first tool with no authentication, no multi-tenancy, no network surface
-- Single-tenant hardcoding in `src/jarvis/config.py`: `PROJECT = "_"`, `BRANCH = "_"`
+**Auth Provider (end users):**
+- None. Everything is local and unauthenticated by design (single-tenant, localhost-only zoekt listener on 127.0.0.1).
+
+**CI/distribution identities:**
+- PyPI trusted publishing — OIDC, short-lived token minted from the publish job (`id-token: write`, `uv publish --trusted-publishing always` in `.github/workflows/publish-pypi.yml`). Publisher pinned to workflow name `publish-pypi.yml`, EMPTY environment (free-plan org cannot provide environments on private repos). Renaming the workflow file breaks publishing.
+- MCP Registry — `mcp-publisher login github-oidc` (v1.8.0, `.github/workflows/publish-mcp-registry.yml`); unlocks the `io.github.jarvis-intelligence/*` namespace with no stored secret. Registry verifies ownership via the `mcp-name: io.github.jarvis-intelligence/jarvis` marker in the PyPI README (`README.md:3`; asserted by publish-pypi preflight).
+- `JARVIS_DIST_TOKEN` — fine-grained PAT, Contents:write on `jarvis-intelligence/jarvis-index` only, used by build-scip/build-zoekt/sync-public-distribution to publish artifacts to the public repo.
 
 ## Monitoring & Observability
 
-**Error Tracking:** None
+**Error Tracking:**
+- None (no Sentry/crash reporting).
 
 **Logs:**
-- `src/jarvis/index_cli.py`: CLI output to stdout, warnings/errors to stderr
-- `src/jarvis/embeddings.py`: warnings for missing prefix configuration
-- `src/jarvis/server.py`: tools catch exceptions broadly and return `{"error": "..."}` dicts (never raise — keeps stdio server alive)
+- CLI progress and warnings via `print` to stdout/stderr (`src/jarvis/index_cli.py`); MCP tools return structured `{"error": …}` dicts rather than raising across the stdio boundary (`src/jarvis/server.py`). `setup.sh` logs `log_info`/`log_warn`/`log_error` and a per-dependency summary.
 
 ## CI/CD & Deployment
 
 **Hosting:**
-- PyPI (`jarvis-mcp` distribution)
-- GitHub: `jarvis-intelligence/jarvis` (private source), `jarvis-intelligence/jarvis-index` (public, hosts release assets for zoekt/scip binaries)
+- None at runtime (local-first). Distribution surfaces: PyPI (`jarvis-mcp`), official MCP Registry (`server.json`), public GitHub repo `jarvis-intelligence/jarvis-index` (binaries, `setup.sh`, Claude Code plugin).
 
-**CI Pipeline:**
-- `.github/workflows/test.yml` — unit tests on every push/PR (ubuntu py3.12, ubuntu py3.13, macos py3.13); installs `--extra semantic`; runs `scripts/check_versions.py`
-- `.github/workflows/publish-pypi.yml` — builds compiled wheels via cibuildwheel, uploads to PyPI
-- `.github/workflows/build-scip.yml` — cross-compiles forked scip binary at pinned commit
-- `.github/workflows/setup-smoke.yml` — verifies `setup.sh` installs real binaries
-- `.github/workflows/build-zoekt.yml` — builds zoekt from pinned commit
-- `.github/workflows/publish-mcp-registry.yml` — updates MCP registry
-- `.github/workflows/sync-public-distribution.yml` — syncs public distribution repo
+**CI Pipeline (`.github/workflows/`, 7 workflows):**
+- `test.yml` — unit suite on push/PR; matrix ubuntu 3.12/3.13 + macos 3.13, `uv sync --extra semantic`, `pytest -m "not integration" -rs`, plus `scripts/check_versions.py`. `UV_PYTHON` env (not `--python`) because `.python-version` otherwise wins.
+- `setup-smoke.yml` — runs `setup.sh` on real runners (dash parse check, scip/zoekt install + run, scip-swift latest-resolution against the real GitHub API, idempotency, `tests/test_setup_sh.py` with dash, and a macOS Swift fixture index through `jarvis index` with tree-cleanliness assertions).
+- `publish-pypi.yml` — on GitHub Release: preflight (unit tests, tag/version match, README registry marker) → 12 compiled wheels via cibuildwheel on 4 native runners → smoke (fresh `uv pip install` from dist + real MCP handshake, 9-tools check, `.so` compiled-module check) → `uv publish --trusted-publishing always`.
+- `publish-mcp-registry.yml` — `workflow_run` after publish-pypi succeeds (ordering matters: registry 404s if PyPI is not yet consistent; publish retries 6×20 s); validates `server.json` versions match `pyproject.toml` and publishes via mcp-publisher.
+- `build-scip.yml` / `build-zoekt.yml` — on `SCIP_COMMIT`/`ZOEKT_COMMIT` change or manual dispatch: Go 1.25 cross-compile for darwin/linux × arm64/amd64, sha256 sidecars, native smoke test, release to `jarvis-intelligence/jarvis-index` with `JARVIS_DIST_TOKEN`.
+- `sync-public-distribution.yml` — on release: rsyncs `setup.sh` (only) into the public repo and pushes if changed.
 
 ## Environment Configuration
 
-**Required env vars (runtime):**
-- None required — all have sensible defaults (`~/.jarvis` data dir, `zoekt-webserver` on PATH, BAAI/bge-m3 model)
-
-**Optional `JARVIS_`-prefixed overrides:**
-- `JARVIS_DATA_DIR` — data directory (default: `~/.jarvis`)
-- `JARVIS_ZOEKT_BIN` — zoekt-webserver binary path or argv list
-- `JARVIS_EMBEDDING_MODEL` — embedding model name (default: `BAAI/bge-m3`)
-- `JARVIS_EMBEDDING_BATCH_SIZE` — embedding batch size (default: 8)
-- `JARVIS_EMBEDDING_QUERY_PREFIX` — query instruction prefix
-- `JARVIS_EMBEDDING_DOC_PREFIX` — document instruction prefix
-- `JARVIS_COMPILE` — enable Cython compilation (default: off; only set by release CI)
-- `JARVIS_BIN_DIR` — override binary install directory (for `setup.sh`)
-- `JARVIS_SETUP_SOURCED` — test seam flag for `setup.sh`
+**Required env vars:**
+- None required. All optional with defaults (see STACK.md Configuration section for the full `JARVIS_*` list: `JARVIS_DATA_DIR`, `JARVIS_FALLBACK_SEARCH_ONLY`, `JARVIS_ZOEKT_BIN`, `JARVIS_EMBEDDING_*`; setup.sh: `JARVIS_BIN_DIR`, `ZOEKT_BASE_URL`, `SCIP_SWIFT_API_URL`, `BASH_SHIM_CANDIDATES`, `FORCE`, `JARVIS_SETUP_SOURCED`).
 
 **Secrets location:**
-- No secrets — local-first tool with no remote API keys
-- HuggingFace model download (sentence-transformers) uses default cache (`~/.cache/huggingface/`)
+- `.env`-style files: none. CI secrets (`JARVIS_DIST_TOKEN`) live in GitHub Actions; end users need no credentials.
 
 ## Webhooks & Callbacks
 
-**Incoming:** None
+**Incoming:**
+- None (MCP stdio requests are the only inbound surface).
 
-**Outgoing:** None
-
-## MCP stdio Surface
-
-**Server:** `src/jarvis/server.py` — `FastMCP("jarvis")`, entry point `jarvis-server` (defined in `pyproject.toml` `[project.scripts]`)
-- Transport: stdio only (defined in `server.json`)
-- 9 registered tools: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius`
-- All tools catch exceptions and return error dicts rather than raising
-- Manifest: `server.json` — MCP registry schema 2025-12-11, references `jarvis-mcp` on PyPI
+**Outgoing:**
+- None. No telemetry, no update pings.
 
 ---
 
-*Integration audit: 2026-08-21*
+*Integration audit: 2026-09-08*

@@ -1,236 +1,275 @@
 ---
-last_mapped_commit: 55a25abf97c4ffd41cd326e8216b1497145b72d4
+focus: arch
+last_mapped_commit: 7911fc568fbdc8c4736c068477cb47157fd5cfea
 ---
 
 # Codebase Structure
 
-**Analysis Date:** 2026-08-21
+**Analysis Date:** 2026-09-08
 
 ## Directory Layout
 
 ```
-jarvis/
+jarvis/                              # repo root (distribution name: jarvis-mcp)
 ├── src/
-│   └── jarvis/              # Main package — one module per concern
-│       ├── __init__.py      # Empty
-│       ├── index_cli.py     # CLI + indexing pipeline (largest file)
-│       ├── server.py        # MCP stdio server (FastMCP, 9 tools)
-│       ├── query.py         # SCIP navigation (SQL against scip schema)
-│       ├── index_reader.py  # Read-only SQLite connection cache
-│       ├── search.py        # Zoekt search client + ZoektLifecycle
-│       ├── semantic.py      # LanceDB vector storage + hybrid RRF search
-│       ├── chunker.py       # tree-sitter AST chunking for semantic index
-│       ├── embeddings.py    # sentence-transformers model wrapper
-│       ├── symbol_search.py # NL query → ranked SCIP symbol hits
-│       ├── graph.py         # Package dependency graph (packages + edges)
-│       ├── registry.py      # SQLite registry of indexed repos
-│       ├── scip_decoder.py  # Isolation seam: zstd + protobuf decode
-│       ├── scip_pb2.py      # Vendored gencode (scip.proto v0.9.0)
-│       ├── symbols.py       # SCIP symbol-string parsing + resolution
-│       ├── config.py        # Data-dir / slug / path resolution
-│       ├── models.py        # Frozen dataclasses for tool result shapes
-│       └── watch.py         # Debouncer + path-ignore for auto-reindex
-├── tests/                   # Unit + integration tests (mirrors src/jarvis/)
-│   ├── conftest.py          # Shared fixtures
-│   ├── test_index_cli.py    # Indexing pipeline (largest test file)
-│   ├── test_server_tools.py # MCP tool integration
-│   ├── test_query.py        # SCIP navigation queries
-│   ├── test_index_reader.py # Connection cache + pointer resolution
-│   ├── test_search.py       # Zoekt search client
-│   ├── test_semantic.py     # Semantic search + RRF fusion
-│   ├── test_embeddings.py   # Embedding model wrapper
-│   ├── test_chunker.py      # Tree-sitter chunking (has integration marks)
-│   ├── test_symbol_search.py# NL symbol search
-│   ├── test_graph.py        # Package graph + blast radius
-│   ├── test_registry.py     # Registry CRUD
-│   ├── test_scip_decoder.py # Blob decode + symbol package extraction
-│   ├── test_symbols.py      # Symbol parsing + resolution
-│   ├── test_config.py       # Config / slug resolution
-│   ├── test_watch.py        # Debouncer
-│   ├── test_setup_sh.py     # Version-pin consistency (SCIP_COMMIT ↔ setup.sh)
-│   ├── test_check_versions.py # pyproject.toml/server.json version guard
-│   ├── test_check_wheel_contents.py # Compiled wheel integrity
-│   └── fixtures/            # Mini repos + synthetic index builder
-│       ├── mini_py_repo/    # Minimal Python repo for integration tests
-│       ├── mini_swift_repo/ # Minimal Swift repo for integration tests
-│       ├── mini_java_repo/  # Minimal Java/Gradle repo for integration tests
-│       ├── synthetic_index.py # Builds fake SCIP index.db for unit tests
-│       └── scip_encoder.py  # Helper: encodes SCIP protobuf blobs
+│   ├── jarvis/                      # ALL product code — flat single package, 18 modules
+│   │   ├── index_cli.py             # Writer CLI + indexing pipeline (1,738 lines)
+│   │   ├── server.py                # Reader: FastMCP stdio, 9 tools (508 lines)
+│   │   ├── query.py                 # QueryService nav SQL (521 lines)
+│   │   ├── symbols.py               # SCIP symbol parsing + bare-name resolution
+│   │   ├── symbol_search.py         # NL → symbol-definition hits (RRF 3rd signal)
+│   │   ├── index_reader.py          # Pointer resolution + read-only conn cache
+│   │   ├── search.py                # Zoekt HTTP client + ZoektLifecycle
+│   │   ├── graph.py                 # Package graph store + blast_radius BFS
+│   │   ├── registry.py              # repos/packages/edges store, status taxonomy
+│   │   ├── semantic.py              # LanceDB SemanticStore + RRF fusion
+│   │   ├── chunker.py               # tree-sitter chunking + admission policy
+│   │   ├── embeddings.py            # Lazy sentence-transformers wrapper
+│   │   ├── scip_decoder.py          # zstd+protobuf decode (sole scip_pb2 seam)
+│   │   ├── scip_pb2.py              # Vendored protobuf gencode — never hand-edit
+│   │   ├── config.py                # Data dir, slug, path layout
+│   │   ├── models.py                # Frozen result dataclasses
+│   │   ├── watch.py                 # Pure Debouncer + ignore set
+│   │   └── __init__.py              # Empty
+│   ├── codeintel/                   # EMPTY legacy leftover (pre-0.5.0 name) — untracked
+│   └── jarvis_mcp.egg-info/         # Build metadata (generated)
+├── tests/                           # pytest suite, mirrors src/jarvis 1:1
+│   ├── fixtures/                    # mini repos + index builders (no binaries needed)
+│   ├── conftest.py
+│   ├── test_index_cli.py            # Largest suite (~190KB) — pipeline + degrade paths
+│   ├── test_server_tools.py         # MCP tool wrappers
+│   ├── test_registry.py             # Registry statuses/origins/migrations
+│   ├── test_query.py / test_symbols.py / test_symbol_search.py
+│   ├── test_search.py / test_graph.py / test_scip_decoder.py
+│   ├── test_semantic.py / test_embeddings.py / test_chunker.py
+│   ├── test_index_reader.py / test_index_status.py
+│   ├── test_watch.py / test_config.py
+│   ├── test_setup_sh.py             # Bootstrap-script tests (dash-guarded)
+│   └── test_check_versions.py / test_check_wheel_contents.py
+├── docs/                            # Published docs (GitHub Pages) + references
+│   ├── system-architecture.md       # Canonical architecture narrative
+│   ├── code-standards.md / project-roadmap.md / codebase-summary.md
+│   ├── project-overview-pdr.md
+│   ├── assets/                      # .dot/.svg/.png diagram sources
+│   ├── journals/ · superpowers/ · index.html · .nojekyll
 ├── scripts/
-│   ├── check_versions.py   # Version-consistency guard (pyproject/server.json)
-│   └── check_wheel_contents.py # Asserts wheel ships .so, not .py/.pyx/.c
-├── docs/                    # Architecture docs, roadmap, code standards
-├── evals/                   # Eval harnesses (Claude Code workspace evals)
-│   ├── codeintel-setup-workspace/
-│   └── codeintel-use-workspace/
-├── plans/                   # Design plans + execution reports
-│   ├── reports/
-│   └── <timestamp>-<name>/  # Per-plan directories with plan.md
-├── .github/workflows/       # CI
-├── setup.sh                 # POSIX dependency bootstrapper (pins SCIP/Zoekt)
-├── setup.py                 # Cython build glue (exclude .py when .so exists)
-├── pyproject.toml           # Distribution metadata, deps, build config
-├── server.json              # MCP registry manifest
-├── ZOEKT_COMMIT             # Zoekt commit pin (must match setup.sh)
-├── SCIP_COMMIT              # SCIP fork commit pin (must match setup.sh)
-├── uv.lock                  # Lockfile
-├── CLAUDE.md                 # Claude Code context file
-├── AGENTS.md                 # Repository guidelines (contributor guide)
-└── CHANGELOG.md             # Release changelog
+│   ├── check_versions.py            # CI: toolchain version pins vs setup.sh
+│   └── check_wheel_contents.py      # CI: wheel manifest audit
+├── evals/                           # Skill eval workspaces (setup + use)
+├── plans/                           # Archived implementation plan reports (history)
+├── .github/workflows/               # test, publish-pypi, publish-mcp-registry,
+│                                    # build-scip, build-zoekt, setup-smoke,
+│                                    # sync-public-distribution
+├── .planning/                       # GSD state (ROADMAP, STATE, milestones) — GSD-only
+├── setup.sh                         # POSIX-sh bootstrapper for external binaries
+├── pyproject.toml                   # Dist jarvis-mcp; import pkg jarvis; extras
+├── setup.py                         # Cython compile shim for release wheels
+├── server.json                      # MCP server registration manifest
+├── SCIP_COMMIT / ZOEKT_COMMIT       # Pins for CI toolchain builds
+├── uv.lock · .python-version (3.12)
+├── README.md · CHANGELOG.md · LICENSE · AGENTS.md · CLAUDE.md
+└── setup artifacts: .ruff_cache/ .pytest_cache/ .superpowers/ .worktrees/ .claude/
+```
+
+On-disk runtime layout (created by the writer, read by the reader; default root
+`~/.jarvis`, override `JARVIS_DATA_DIR` — see `src/jarvis/config.py`):
+
+```
+~/.jarvis/
+├── registry.db                     # repos + packages + edges tables
+├── scip/_/<slug>/_/
+│   ├── current                     # Pointer file → "index-<sha>.db" (atomic os.replace)
+│   ├── index-<sha>.db              # Versioned, immutable SCIP SQLite
+│   └── index-<sha>.metadata.json   # commit_sha + published_at sibling
+├── .zoekt/                         # <slug>_v*.zoekt shards + zoekt-webserver.pid
+├── lancedb/<slug>.lance/           # One semantic table per repo
+├── cache/scip-swift/<slug>/        # Per-repo scip-swift incremental cache (D-05)
+└── shims/                          # bash shim for scip-java (PATH-prepended)
 ```
 
 ## Directory Purposes
 
 **`src/jarvis/`:**
-- Purpose: The entire application — one Python module per concern, flat (no sub-packages)
-- Contains: 18 `.py` files (16 source + `__init__.py` + vendored `scip_pb2.py`)
-- Key files: `index_cli.py` (1189 LOC, the indexing pipeline + CLI), `query.py` (521 LOC, SCIP navigation), `semantic.py` (376 LOC, hybrid search)
+- Purpose: the entire product — writer CLI, reader server, engines, storage access
+- Contains: 18 flat Python modules; deliberately **no subpackages** — the package is one
+  concern-list, and module count is the whole map
+- Key files: `index_cli.py` (writer), `server.py` (reader), `query.py` (nav),
+  `scip_decoder.py` (protobuf/zstd seam)
 
 **`tests/`:**
-- Purpose: Unit and integration tests mirroring source modules ~1:1
-- Contains: 17 test files + `conftest.py` + `fixtures/` directory
-- Key files: `test_index_cli.py` (largest), `test_server_tools.py` (MCP tool coverage), `fixtures/synthetic_index.py` (test index builder)
+- Purpose: pytest suite; one `test_<module>.py` per source module, plus bootstrap/wheel audits
+- Contains: unit tests (fake indexes via fixtures — no real scip/zoekt binaries needed),
+  `integration`-marked tests that do exercise real binaries (marker declared in
+  `pyproject.toml [tool.pytest.ini_options]`)
+- Key files: `fixtures/synthetic_index.py` (builds a real-schema `index.db` without `scip
+  expt-convert`), `fixtures/scip_encoder.py` (encodes occurrence blobs)
 
 **`tests/fixtures/`:**
-- Purpose: Mini per-language repos for integration tests + synthetic SCIP index builder
-- Contains: `mini_py_repo/`, `mini_swift_repo/`, `mini_java_repo/` (real repo structures), `synthetic_index.py` (builds fake `index.db` in-memory for unit tests), `scip_encoder.py` (protobuf helper)
-- Key files: `synthetic_index.py` — the workhorse that lets unit tests run without real SCIP binaries
-
-**`scripts/`:**
-- Purpose: Build-time integrity checks
-- Contains: Version-consistency guard, compiled-wheel assertion
-- Key files: `check_versions.py` (asserts pyproject.toml, server.json, plugin manifest agree)
+- Purpose: deterministic mini repos and index builders
+- Contains: `mini_py_repo/`, `mini_java_repo/`, `mini_swift_repo/`, `mini_xcode_repo/`,
+  `synthetic_index.py`, `scip_encoder.py`
+- Convention: a new language support PR adds a `mini_<lang>_repo/` here
 
 **`docs/`:**
-- Purpose: Architecture documentation and project planning materials
-- Contains: HTML architecture diagrams, markdown docs (roadmap, code standards, system architecture)
+- Purpose: GitHub-Pages-published documentation plus the architecture narrative consumed by
+  agents (`system-architecture.md` is the canonical reference; keep it in sync with pipeline
+  changes)
+- Contains: markdown pages, `assets/` Graphviz sources + rendered images, `journals/`
+
+**`scripts/`:**
+- Purpose: repo maintenance executed by CI, not shipped
+- Contains: `check_versions.py` (toolchain pins vs `setup.sh`), `check_wheel_contents.py`
 
 **`evals/`:**
-- Purpose: Claude Code workspace evaluation harnesses
-- Contains: `codeintel-setup-workspace/`, `codeintel-use-workspace/` — each with iteration directories and eval definitions
+- Purpose: skill-evaluation workspaces (`codeintel-setup-workspace/`,
+  `codeintel-use-workspace/`) with with/without-skill grading runs
 
 **`plans/`:**
-- Purpose: Historical design plans and execution reports
-- Contains: Timestamped plan directories (`<timestamp>-<name>/plan.md`) and `reports/` subdirectory
-- Generated: No (authored during development)
-- Committed: Yes
+- Purpose: archived, dated implementation-plan reports (`MMDD-HHMM-<slug>/`) — read-only
+  history, not living docs
+
+**`.planning/`:**
+- Purpose: GSD workflow state (`ROADMAP.md`, `STATE.md`, `milestones/`, `codebase/`)
+- Generated: partially (this document); Committed: yes
+- Rule: only GSD workflows write here
+
+**`.github/workflows/`:**
+- Purpose: CI/CD — `test.yml` (unit suite), `publish-pypi.yml` (cibuildwheel matrix cp312–314),
+  `publish-mcp-registry.yml`, `build-scip.yml` / `build-zoekt.yml` (Go cross-compiles pinned by
+  `SCIP_COMMIT` / `ZOEKT_COMMIT`), `setup-smoke.yml` (`sh -n setup.sh` POSIX guard),
+  `sync-public-distribution.yml`
 
 ## Key File Locations
 
 **Entry Points:**
-- `src/jarvis/index_cli.py`: CLI entry point — `jarvis index|list|status|reindex|forget|watch`
-- `src/jarvis/server.py`: MCP server entry point — `jarvis-server` stdio
+- `src/jarvis/index_cli.py`: `main()` → `build_parser()` — the `jarvis` writer CLI
+  (`index`, `list`, `status`, `reindex`, `forget`, `watch` subcommands)
+- `src/jarvis/server.py`: `main()` → `mcp.run()` — the `jarvis-server` MCP stdio reader
+- `pyproject.toml` `[project.scripts]`: `jarvis = "jarvis.index_cli:main"`,
+  `jarvis-server = "jarvis.server:main"`
+- `server.json`: MCP client registration manifest
+- `setup.sh`: bootstrap for external binaries (scip, indexers, zoekt, shims)
 
 **Configuration:**
-- `pyproject.toml`: Distribution metadata, dependencies, build system, entry points
-- `server.json`: MCP registry manifest (two version fields)
-- `src/jarvis/config.py`: Runtime path resolution, single-tenant constants
-- `setup.sh`: Dependency bootstrapper (SCIP, Zoekt, language indexers)
+- `pyproject.toml`: dependencies (`mcp[cli]`, `protobuf`, `zstandard`, `httpx`), extras
+  (`watch`, `semantic`), pytest config, cibuildwheel matrix
+- `setup.py`: Cython compilation for release wheels (`JARVIS_COMPILE=1`)
+- `src/jarvis/config.py`: data-dir/slug/path resolution; env tiers
+  (`JARVIS_DATA_DIR`, `JARVIS_FALLBACK_SEARCH_ONLY`)
+- `SCIP_COMMIT`, `ZOEKT_COMMIT`: toolchain build pins consumed by CI workflows
 
 **Core Logic:**
-- `src/jarvis/index_cli.py`: Full indexing pipeline (detect → SCIP → convert → graph → zoekt → semantic → publish)
-- `src/jarvis/query.py`: SCIP navigation queries (raw SQL against scip schema)
-- `src/jarvis/search.py`: Zoekt search client and process lifecycle
-- `src/jarvis/semantic.py`: Hybrid RRF search (vector + Zoekt + SCIP symbols)
-- `src/jarvis/graph.py`: Package dependency graph and blast radius
+- `src/jarvis/index_cli.py`: `index_repo()` (pipeline), `_publish_search_only()`,
+  `_publish_atomically()`, `_retire_scip_artifacts()`, degrade gate
+- `src/jarvis/query.py`: `QueryService` (nav tools + freshness)
+- `src/jarvis/symbols.py`: `parse_symbol()`, `resolve()` (rungs), name-map cache
+- `src/jarvis/registry.py`: `Registry`, status/origin constants, `recovery_for()`
+- `src/jarvis/graph.py`: `GraphStore`, `populate_graph_for_repo()`, `blast_radius()`
+- `src/jarvis/semantic.py`: `SemanticStore`, `table_identity()`, `reciprocal_rank_fusion()`
 
 **Testing:**
-- `tests/test_index_cli.py`: Indexing pipeline tests
-- `tests/test_query.py`: Navigation query tests
-- `tests/test_search.py`: Zoekt search tests
-- `tests/test_semantic.py`: Semantic search + RRF tests
-- `tests/fixtures/synthetic_index.py`: Shared test index builder
-
-**Version Pins:**
-- `ZOEKT_COMMIT`: Zoekt commit SHA (top-level file)
-- `SCIP_COMMIT`: SCIP fork commit SHA (top-level file)
-- `setup.sh`: Contains `ZOEKT_COMMIT_PIN` and `SCIP_COMMIT_PIN` (must match top-level files)
+- `tests/test_index_cli.py`: pipeline stages, degrade/fallback state machine, watch driver
+- `tests/test_server_tools.py`: all 9 MCP tools, error shapes, capability/coverage fields
+- `tests/test_registry.py`: statuses, origins, migrations, recovery derivation
+- `tests/conftest.py`: shared fixtures
 
 ## Naming Conventions
 
 **Files:**
-- Source modules: `snake_case.py` — one word or compound with underscores (e.g., `index_cli.py`, `scip_decoder.py`, `symbol_search.py`)
-- Test files: `test_<module>.py` — mirrors the source module name (e.g., `test_query.py` ↔ `query.py`)
-- Vendored gencode: `scip_pb2.py` — follows protobuf naming convention
-- Top-level pins: `UPPER_CASE` with underscore separator (e.g., `ZOEKT_COMMIT`, `SCIP_COMMIT`)
+- Source modules: singular snake_case nouns naming the concern — `query.py`, `search.py`,
+  `graph.py`, `registry.py`, `chunker.py`. One module per concern; no `utils.py` dumping ground.
+- Tests: `test_<module>.py`, exactly 1:1 with `src/jarvis/` modules (plus a few cross-cutting
+  suites like `test_setup_sh.py`).
+- Fixtures: `mini_<lang>_repo/` directories; `synthetic_index.py` / `scip_encoder.py` builders.
 
 **Directories:**
-- Source: flat under `src/jarvis/` — no sub-packages
-- Tests: flat under `tests/` — no sub-packages; `tests/fixtures/` for shared test data
-- Mini repos: `mini_<language>_repo/` (e.g., `mini_py_repo/`, `mini_swift_repo/`)
-- Plans: `<timestamp>-<short-name>/` (e.g., `0805-2346-scip-boosted-retrieval/`)
+- Lowercase, no nesting inside `src/jarvis/` (flat by design). Repo-root dirs are singular
+  (`docs/`, `scripts/`, `evals/`, `plans/`).
 
-**Symbols (within code):**
-- Modules: `snake_case`
-- Classes: `PascalCase` (e.g., `QueryService`, `ZoektLifecycle`, `GraphStore`)
-- Functions/variables: `snake_case` (e.g., `detect_language`, `populate_graph_for_repo`)
-- Constants: `UPPER_CASE` (e.g., `PROJECT`, `BRANCH`, `MAX_TOKENS`, `RRF_K`)
-- Private members: `_`-prefixed (e.g., `_query_service`, `_publish_atomically`, `_IGNORED_DIRS`)
-- Environment overrides: `JARVIS_`-prefixed (e.g., `JARVIS_DATA_DIR`, `JARVIS_EMBEDDING_MODEL`)
+**Symbols:**
+- Frozen dataclasses for all result shapes (`src/jarvis/models.py`; engine dataclasses like
+  `ScipOccurrence`, `Candidate`, `FusedHit`, `RegisteredRepo`). MCP JSON keys are camelCase
+  (`displayName`, `resolvedSymbol`); status sub-objects use snake_case
+  (`last_index_run`) — follow the existing tool's shape.
+- Private helpers: leading underscore. Test seams are module-level underscore functions so
+  tests can monkeypatch them (`_scip_version_output`, `_scip_swift_version_output`,
+  `_semantic_extra_missing`, `_at_interactive_tty`, `_install_semantic_extra`).
+- Exceptions: domain-specific classes defined next to their concern (`IndexingError` family in
+  `index_cli.py`, `SymbolNotFoundError`/`AmbiguousSymbolError` in `symbols.py`,
+  `OccurrenceDecodeError` in `scip_decoder.py`, `ZoektUnavailableError` in `search.py`).
+- Constants: SCREAMING_SNAKE at module top with a rationale comment
+  (`MIN_SCIP_VERSION`, `PARTIAL_STATUS`, `_EXT_PRIORITY`, `CONTENT_FORMAT`).
+- Registry status/origin strings are module constants in `src/jarvis/registry.py`
+  (`SEARCH_ONLY_STATUS`, `DEGRADED_STATUS`, `ORIGIN_*`) — import them, never inline literals.
+
+**Design-rationale comments:** module docstrings and block comments carry the *why* (invariant
+reasoning, upstream issue links, decision IDs like FALL-02/D-15/WR-02). Preserve and extend
+them; they are the documentation of record for invariants.
 
 ## Where to Add New Code
 
+**New language indexer:**
+- Add one row to `_LANGUAGE_INDEXERS` and, if a new extension, `_EXT_PRIORITY` in
+  `src/jarvis/index_cli.py` — `_INDEXER_BY_LANGUAGE` (the `--language` validator) is derived
+  and updates itself.
+- Fixture: `tests/fixtures/mini_<lang>_repo/`; tests in `tests/test_index_cli.py`.
+
 **New MCP tool:**
-- Tool registration: add `@mcp.tool(name="...")` function in `src/jarvis/server.py`
-- Query logic: add method to `QueryService` in `src/jarvis/query.py` (if SCIP-based) or a new module in `src/jarvis/`
-- Result shapes: add frozen dataclass to `src/jarvis/models.py`
-- Tests: add test function in `tests/test_server_tools.py`
+- Engine method first (e.g. `QueryService.<method>` in `src/jarvis/query.py`); result shape as a
+  frozen dataclass in `src/jarvis/models.py` if new.
+- Thin `@mcp.tool` wrapper in `src/jarvis/server.py`: unpack → call → broad `except Exception` →
+  `{"error": ...}`; serialize with `_json_safe(asdict(...))`; update the tool-count docstring
+  ("Registers 9 tools") and `docs/system-architecture.md`.
+- Tests: `tests/test_server_tools.py` + `tests/test_query.py`.
 
-**New navigation query type:**
-- Implementation: add method to `QueryService` in `src/jarvis/query.py` with raw SQL against the SCIP schema
-- If new blob decoding is needed: add to `src/jarvis/scip_decoder.py` (the isolation seam)
-- Tests: add to `tests/test_query.py`
+**New registry column / status:**
+- `_SCHEMA` + an `_ensure_column()` migration + `RegisteredRepo`/`_row_to_repo()` in
+  `src/jarvis/registry.py`; additive only (old rows must keep reading). Tests in
+  `tests/test_registry.py`.
 
-**New language indexer support:**
-- Language map: add entry to `_LANGUAGE_INDEXERS` in `src/jarvis/index_cli.py`
-- Extension priority: add to `_EXT_PRIORITY` in `src/jarvis/index_cli.py`
-- Mini repo: add `tests/fixtures/mini_<lang>_repo/` for integration tests
-- Bootstrapper: add download/build block to `setup.sh`
+**New persisted CLI flag:**
+- Follow the `_resolve_<flag>()` pattern in `src/jarvis/index_cli.py`: `None` means "leave the
+  persisted value alone"; persist only the explicit CLI value; add the argparse argument in
+  `build_parser()`.
 
-**New search signal (for semantic RRF):**
-- Retrieval function: add to `src/jarvis/semantic.py` or a new module
-- Integration into RRF: add signal to `reciprocal_rank_fusion()` in `src/jarvis/semantic.py`
-- Tests: add to `tests/test_semantic.py`
+**New engine module:**
+- Flat file in `src/jarvis/` (no subpackage); wire a lazy singleton accessor in
+  `src/jarvis/server.py` if the reader needs it; defer optional-extra imports inside functions;
+  add `test_<module>.py`.
 
-**New component/module:**
-- Implementation: add `<module>.py` to `src/jarvis/` (flat, no sub-package)
-- Tests: add `tests/test_<module>.py`
+**New decode capability over SCIP blobs:**
+- Inside `src/jarvis/scip_decoder.py` only — it is the sole `scip_pb2`/`zstandard` import seam.
 
-**Utilities:**
-- Shared helpers: add to the most relevant existing module in `src/jarvis/` (no separate `utils.py` — the codebase avoids it)
-- Test helpers: add to `tests/conftest.py` or `tests/fixtures/`
+**Utilities / shared helpers:**
+- There is no utils module; put a helper in the module that owns the concern. Cross-engine
+  shapes (e.g. `FreshnessSnapshot`) live in `src/jarvis/query.py` and are imported by peers
+  (`graph.py` does this).
 
 ## Special Directories
 
-**`src/jarvis/scip_pb2.py`:**
-- Purpose: Vendored gencode from `scip.proto` at SCIP v0.9.0
-- Generated: Yes (regenerated from proto, never hand-edited)
-- Committed: Yes
+**`src/codeintel/`:**
+- Purpose: empty leftover from the pre-0.5.0 package name
+- Generated: no · Committed: no (untracked; safe to ignore)
 
-**`tests/fixtures/`:**
-- Purpose: Mini repos and synthetic index builder for tests
-- Generated: No (authored)
-- Committed: Yes
-
-**`plans/`:**
-- Purpose: Historical design plans and execution reports
-- Generated: No (authored during development)
-- Committed: Yes
-
-**`evals/`:**
-- Purpose: Claude Code workspace evaluation harnesses
-- Generated: Partially (iteration results generated during eval runs)
-- Committed: Yes
-
-**`docs/`:**
-- Purpose: Architecture documentation and planning materials
-- Generated: Partially (HTML diagrams generated, markdown authored)
-- Committed: Yes
+**`src/jarvis_mcp.egg-info/`:**
+- Purpose: setuptools build metadata
+- Generated: yes · Committed: no
 
 **`.planning/`:**
-- Purpose: GSD planning artifacts (PROJECT.md, ROADMAP.md, REQUIREMENTS.md, codebase maps)
-- Generated: Yes (by GSD workflow commands)
-- Committed: Sometimes (varies by workflow)
+- Purpose: GSD workflow state including this map
+- Generated: by GSD commands · Committed: yes · Rule: edit only via GSD workflows
+
+**`plans/`:**
+- Purpose: archived dated plan reports — append-only history
+- Generated: by past planning sessions · Committed: yes
+
+**`tests/fixtures/`:**
+- Purpose: deterministic mini repos and synthetic index builders
+- Generated: no · Committed: yes
+
+**Caches (`.ruff_cache/`, `.pytest_cache/`, `__pycache__/`):**
+- Generated tooling artifacts, gitignored — never edit
 
 ---
-*Structure analysis: 2026-08-21*
+
+*Structure analysis: 2026-09-08*
