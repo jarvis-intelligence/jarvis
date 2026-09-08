@@ -4841,6 +4841,7 @@ def test_cmd_index_no_prompt_when_extra_already_installed(
         registry.close()
 
 
+@pytest.mark.interactive_input
 def test_cmd_index_semantic_include_runs_on_declined_repo_without_clearing_bit(
     tmp_path: Path, monkeypatch
 ):
