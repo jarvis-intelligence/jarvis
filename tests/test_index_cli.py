@@ -4232,6 +4232,7 @@ def _script_input(monkeypatch, answer=None, error=None) -> list[str]:
     return prompts
 
 
+@pytest.mark.interactive_input
 def test_cmd_index_tty_offer_decline_answer_persists_semantic_declined(
     tmp_path: Path, monkeypatch, capsys
 ):
@@ -4267,6 +4268,7 @@ def test_cmd_index_tty_offer_decline_answer_persists_semantic_declined(
         registry.close()
 
 
+@pytest.mark.interactive_input
 def test_cmd_index_tty_offer_not_repeated_for_a_declined_repo(
     tmp_path: Path, monkeypatch
 ):
@@ -4304,6 +4306,7 @@ def test_cmd_index_tty_offer_not_repeated_for_a_declined_repo(
         registry.close()
 
 
+@pytest.mark.interactive_input
 def test_cmd_index_tty_offer_still_made_for_a_different_repo(
     tmp_path: Path, monkeypatch
 ):
@@ -4358,6 +4361,7 @@ def _offer_run(monkeypatch, tmp_path, slug, answer=None, error=None):
     return rc, prompts
 
 
+@pytest.mark.interactive_input
 def test_cmd_index_offer_accept_parse_table(tmp_path: Path, monkeypatch):
     """SEMA-01 parse table, exactly the locked one: strip+lower in
     {"y","yes"} accepts and installs (no decline bit); every other
@@ -4402,6 +4406,7 @@ def test_cmd_index_offer_accept_parse_table(tmp_path: Path, monkeypatch):
             registry.close()
 
 
+@pytest.mark.interactive_input
 def test_cmd_index_offer_yes_installs_and_enables_semantic_same_invocation(
     tmp_path: Path, monkeypatch, capsys
 ):
@@ -4461,6 +4466,7 @@ def test_cmd_index_offer_yes_installs_and_enables_semantic_same_invocation(
         registry.close()
 
 
+@pytest.mark.interactive_input
 def test_cmd_index_offer_install_failure_warns_and_does_not_remember_decline(
     tmp_path: Path, monkeypatch, capsys
 ):
@@ -4514,6 +4520,7 @@ def test_cmd_index_offer_install_failure_warns_and_does_not_remember_decline(
     ]
 
 
+@pytest.mark.interactive_input
 def test_cmd_index_offer_eof_or_keyboard_interrupt_at_prompt_declines_remembered(
     tmp_path: Path, monkeypatch, capsys
 ):

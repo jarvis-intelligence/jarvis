@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.7.1] - 2026-09-08
+
+No functional changes — v0.7.0's first publish run never reached PyPI, so
+this release exists solely to fix the compiled-wheel build and ship the
+same code.
+
+### Fixed
+
+- **`publish-pypi.yml`'s compiled-wheel matrix failed on every platform,
+  before any upload happened.** The `build-wheels` job runs the unit suite
+  inside cibuildwheel's isolated `--test-command` subprocess as its
+  Cython-fidelity gate; seven tests exercising the semantic-index install
+  prompt (`test_cmd_index_tty_offer_*`, `test_cmd_index_offer_*`) monkeypatch
+  `builtins.input` to script answers, but that subprocess does not give
+  pytest a real, monkeypatch-honoring stdin the way the regular unit-test
+  job's interpreter does — the replacement lost the race to pytest's own
+  capture-mode stdin guard, raising `OSError: pytest: reading from stdin
+  while output is captured!` on the very first affected test, and
+  `fail-fast: true` then cancelled the other three matrix legs before any
+  wheel was built or uploaded. These seven tests are unrelated to
+  compilation itself — the regular unit job (`test.yml`) already runs them
+  successfully on macOS and Linux on every push — so they are now marked
+  `interactive_input` and excluded from the cibuildwheel test-command
+  specifically, the same narrow, environment-scoped treatment
+  `test_setup_sh.py` already gets there for its own unrelated (`dash`)
+  environment mismatch. No test coverage is lost: the regular unit gate
+  still runs all seven on every push and PR.
+
 ## [0.7.0] - 2026-09-08
 
 Minor rather than patch: zoekt's `sym:` symbol search works for the first
