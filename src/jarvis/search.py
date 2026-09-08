@@ -106,7 +106,10 @@ def search_zoekt(
             timeout=timeout_seconds,
         )
         if response.status_code == 400:
-            detail = response.json().get("Error", response.text[:300])
+            try:
+                detail = response.json().get("Error", response.text[:300])
+            except ValueError:  # non-JSON body (e.g. a plain-text proxy error)
+                detail = response.text[:300]
             raise ZoektUnavailableError(f"zoekt rejected the query: {detail}")
         response.raise_for_status()
     except httpx.HTTPError as exc:

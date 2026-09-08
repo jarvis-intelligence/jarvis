@@ -100,6 +100,14 @@ def test_search_zoekt_surfaces_parse_error_body():
         search_zoekt("http://localhost:6070", "greet(", client=httpx.Client(transport=httpx.MockTransport(bad_query)))
 
 
+def test_search_zoekt_surfaces_non_json_400_body():
+    def non_json_400(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="parse error: unexpected ')' in query (plain-text body)")
+
+    with pytest.raises(ZoektUnavailableError, match=r"parse error: unexpected '\)' in query"):
+        search_zoekt("http://localhost:6070", "greet(", client=httpx.Client(transport=httpx.MockTransport(non_json_400)))
+
+
 def test_search_zoekt_raises_unavailable_on_http_error():
     client = httpx.Client(transport=httpx.MockTransport(_error_response))
     with pytest.raises(ZoektUnavailableError):

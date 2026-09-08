@@ -394,6 +394,7 @@ def test_query_uses_the_tables_prefixes_not_the_configured_ones(tmp_path, lanced
     from jarvis import semantic as semantic_module
     from jarvis.semantic import index_semantic, semantic_search
     repo = _write_repo(tmp_path)
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
     monkeypatch.setattr(semantic_module, "search_zoekt",
                         lambda *a, **k: ZoektSearchResult([], 0, 0))
 
