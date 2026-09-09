@@ -1,6 +1,7 @@
-"""`jarvis` CLI: detect language -> run the matching SCIP indexer ->
-`scip expt-convert` -> populate package graph -> zoekt-git-index -> atomic
-pointer swap -> registry update.
+"""`jarvis` CLI: capture tracked sources -> build the tree-sitter syntax
+baseline -> optionally enrich with SCIP -> zoekt-git-index -> optional
+semantic stage -> revalidate + graph edges -> atomic pointer swap ->
+registry record -> retire superseded snapshots (spec TSI-04 §5 order).
 
 Subcommands: index, list, status, reindex, forget, watch.
 """
@@ -19,26 +20,45 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jarvis import config
-from jarvis.graph import GraphStore, populate_graph_for_repo
+from jarvis.graph import (
+    GraphStore,
+    clear_graph_edges_for_repo,
+    populate_graph_for_repo,
+)
 from jarvis.registry import (
     DEGRADED_STATUS,
     ORIGIN_FAILED_HARD,
-    ORIGIN_FALLBACK,
-    ORIGIN_MANUAL,
-    ORIGIN_SIGNATURE,
-    SEARCH_ONLY_STATUS,
+    PARTIAL_STATUS,
     Registry,
     RegisteredRepo,
+    SCIP_STATES,
+    SEARCH_ONLY_STATUS,  # noqa: F401 — legacy read-compat constant (spec §12)
+    ScipStageFields,
+    UNKNOWN_LANGUAGE,
     origin_of,
     recovery_for,
 )
+from jarvis.syntax_index import (
+    SourceManifest,
+    build_syntax_index,
+    capture_sources,
+    copy_syntax_tables,
+    finalize_snapshot,
+    validate_sources,
+)
 from jarvis.watch import Debouncer, should_ignore_path
+
+if TYPE_CHECKING:
+    from jarvis.semantic import SemanticIndexReport, SemanticWork
+
+    from tree_sitter import Tree
 
 if TYPE_CHECKING:
     from jarvis.semantic import SemanticIndexReport
@@ -85,80 +105,20 @@ MIN_SCIP_VERSION = (0, 9, 0)
 MIN_SCIP_SWIFT_VERSION = (0, 3, 0)
 
 
-# Registry status for an index that published real symbols but no navigable
-# positions -- the fingerprint of a converter or indexer that dropped every
-# occurrence range. Publishing still proceeds (the symbol table is useful),
-# but the status must not claim unqualified success.
-PARTIAL_STATUS = "partial"
-
-# Recorded as the language when a search-only repo has no SCIP-indexable
-# source at all (a Go or Ruby repo). `registry.language` is NOT NULL, so this
-# has to be a value rather than NULL.
-UNKNOWN_LANGUAGE = "unknown"
-
-# Indexer failures that are known to be unfixable from here, and so degrade to
-# a search-only publish instead of a hard failure. Each entry is
-# (required substrings, human reason) — EVERY substring must be present, which
-# is what keeps a generic AbstractMethodError from some unrelated library out.
+# PARTIAL_STATUS and UNKNOWN_LANGUAGE now live in registry.py (imported
+# above): the status vocabulary is the registry's contract, and the CLI
+# writer and the MCP reader must spell them identically.
 #
-# Deliberately narrow. This is not "fall back on any failure": a transient
-# Gradle break or a missing binary must still fail loudly rather than be
-# laundered into an apparent success.
-_SEARCH_ONLY_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (
-        ("AbstractMethodError", "org.jetbrains.kotlin.fir"),
-        "scip-kotlinc is compiled against one exact Kotlin version and this repo uses another "
-        "(the compiler-plugin API is internal and unstable)",
-    ),
-    (
-        ("NoSuchMethodError", "org.jetbrains.kotlin.fir"),
-        "scip-kotlinc is compiled against one exact Kotlin version and this repo uses another "
-        "(the compiler-plugin API is internal and unstable)",
-    ),
-    (
-        ("No SCIP shards found",),
-        "the build produced no SCIP shards — for Android/AGP this is expected, because "
-        "scip-java's Gradle plugin keys off standard source sets that AGP replaces with "
-        "variants (upstream scip-java#177)",
-    ),
-    # --- scip-swift 0.3.0 (captured 2026-08-23) -------------------------------
-    # Captured from the pinned scip-swift 0.3.0 against known-failing repo
-    # shapes. The tokens are deliberately path-free: both scip-swift error
-    # lines interpolate the repo/cache paths, which would pin a signature to
-    # one machine. On a scip-swift version bump these must be re-captured —
-    # wording drift fails hard (unmatched → hard failure) and must never
-    # silently degrade.
-    (
-        ("Could not detect a build system", "no Package.swift and no .xcodeproj/.xcworkspace found"),
-        "the repo has Swift sources but neither a Package.swift nor an Xcode project, so "
-        "scip-swift has no build system to run",
-    ),
-    (
-        ("Build succeeded but no IndexStore was produced",),
-        "the build completed but produced no index store — scip-swift cannot extract "
-        "symbols from a build that emits none",
-    ),
-)
-
-
-def _search_only_reason(output: str) -> str | None:
-    """Match indexer output against `_SEARCH_ONLY_SIGNATURES`; None means the
-    failure is not recognized and must propagate."""
-    for required, reason in _SEARCH_ONLY_SIGNATURES:
-        if all(token in output for token in required):
-            return reason
-    return None
-
-
-# Not a _SEARCH_ONLY_SIGNATURES entry on purpose: that path persists
-# search_only=1, and --search-only is store_true/default=None -- settable but
-# never clearable, so the only escape is `jarvis forget` + reindex. Correct
-# for Android/AGP, which is permanently unindexable; a trap for this, which one
-# `brew install bash` fixes. Failing loudly with the remedy keeps the repo
-# `failed` and recoverable by a plain reindex.
+# The search-only signature machinery was removed with the fallback design
+# (spec §12: FALL-01/FALL-02 superseded). Every SCIP build/conversion
+# failure now degrades the optional enrichment to exit-0 `degraded` with
+# the cause recorded on the stage fields — the syntax baseline publishes
+# regardless — and the watch suppression predicate owns the anti-treadmill
+# policy that used to need signatures.
 #
-# Upstream: https://github.com/scip-code/scip-java/issues/987 -- remove this
-# workaround once scip-java emits a bash-3.2-safe wrapper.
+# The bash-shim remedy below is the retained piece: the cause text it wraps
+# is genuinely the fix, and it now rides the recorded stage failure instead
+# of a hard failure.
 _BASH_SHIM_TOKENS = ("LAUNCHER_ARGS[@]", "unbound variable")
 
 _BASH_SHIM_REMEDY = (
@@ -184,20 +144,20 @@ class IndexingError(Exception):
 class MissingBinaryError(IndexingError):
     """A pipeline step's executable was not on PATH.
 
-    Deliberately its own type beside IndexingError (FALL-04): a missing
-    binary is a setup.sh problem, and the opt-in fallback must keep it a
-    loud failure instead of laundering "run setup.sh" into a published
-    index. IS-A IndexingError, so every existing except-site keeps working.
+    Deliberately its own type beside IndexingError (narrowed FALL-04, spec
+    §12): a missing binary is a setup.sh problem. For the REQUIRED stages
+    (zoekt, grammars) it stays a loud hard failure; inside the optional
+    SCIP stage it classifies the attempt as `unavailable` — exit-0
+    degraded with the remedy recorded, never a fabricated SCIP snapshot.
+    IS-A IndexingError, so every existing except-site keeps working.
     """
 
 
-class SearchPublishedButIncomplete(IndexingError):
-    """`_publish_search_only` wrote its zoekt shards and then failed a later
-    step (SCIP retirement) -- a PARTIAL publish, not "nothing published".
-    The degrade handler catches it separately so its message states what
-    actually landed (WR-02); every other caller treats it as the
-    IndexingError it IS-A, so their except-clauses keep working unchanged.
-    """
+class ScipStageSkipped(Exception):
+    """Internal marker: the watch suppression predicate decided this run
+    skips the SCIP attempt (spec TSI-07, replacing FALL-05's whole-run
+    skip). Never escapes index_repo — the baseline still runs, publishes,
+    and preserves the last stage failure record."""
 
 
 class NotAGitRepositoryError(Exception):
@@ -384,45 +344,64 @@ def _git_head(repo_path: Path) -> str:
     return result.stdout.strip()
 
 
-def _watch_should_retry_full_build(entry: RegisteredRepo | None, current_sha: str) -> bool:
-    """FALL-05 anti-treadmill: the watch driver skips the full-build retry
-    only when the repo is degraded AND the source sha is still the one the
-    last full-build attempt failed at — the degraded terminal write
-    persists that attempt sha in commit_sha. Everything else retries: a
-    missing row, a failed row (record_failure stores commit_sha=NULL, and
-    NULL never equals a real sha), an indexed/search-only row, or any sha
-    change. The skip is a WATCH-DRIVER policy only — index_repo itself
-    always retries (FALL-03: an explicit `jarvis index` never skips), so
-    the predicate must never move into it. Kept pure (no subprocess, no
-    Registry, no watchdog) per watch.py's own philosophy so the full
-    decision matrix is unit-testable without the observer machinery."""
-    return not (
-        entry is not None
-        and entry.status == DEGRADED_STATUS
-        and entry.commit_sha is not None
-        and entry.commit_sha == current_sha
-    )
+def _scip_suppressed(
+    entry: RegisteredRepo | None, *, watch: bool, scip_enabled: bool,
+    explicit_scip: bool | None, language: str | None, scheme: str | None,
+    head: str,
+) -> bool:
+    """The per-stage watch predicate (spec TSI-07), replacing FALL-05's
+    whole-run skip. True skips ONLY the SCIP attempt; every debounced
+    watch event still runs the baseline, the optional semantic stage, and
+    publication. All four conditions must hold:
+
+    1. The caller is watch — an explicit index/reindex always retries.
+    2. SCIP is enabled and the selected language has a SCIP indexer.
+    3. The persisted stage state is failed/unavailable and
+       `scip_failed_at_sha` equals the current HEAD — the exact attempt
+       that already failed. (FALL-03, retained by spec §12: the failure
+       never changed the user's enablement, so an unchanged commit does
+       not retry a known-failing compiler stage, but any new commit does.)
+    4. No explicit `--scip` re-enable and no explicit `--language`/
+       `--scheme` value that differs from the persisted override — either
+       would invalidate the record this suppression is based on.
+
+    A suppressed attempt never persists `scip_enabled=False`: suppression
+    is an action on a prior failure, not a new capability state.
+    Kept pure (no subprocess, no Registry) so the decision matrix is
+    unit-testable without the observer machinery."""
+    if not watch:  # (1)
+        return False
+    if entry is None:
+        return False
+    if not scip_enabled:  # (2a)
+        return False
+    if entry.language not in _INDEXER_BY_LANGUAGE:  # (2b)
+        return False
+    if entry.scip_state not in ("failed", "unavailable"):  # (3a)
+        return False
+    if entry.scip_failed_at_sha != head:  # (3b)
+        return False
+    if explicit_scip is True:  # (4a) explicit re-enable
+        return False
+    if language is not None and language != entry.language_override:  # (4b)
+        return False
+    if scheme is not None and scheme != entry.scheme_override:  # (4c)
+        return False
+    return True
 
 
-def _watch_skip_check(repo_path: Path, slug: str, root: Path | None = None) -> bool:
-    """FALL-05 consult for the watch driver: True means "retry the full
-    build now". Opens a short-lived Registry over the row, reads the
-    current HEAD sha, and applies `_watch_should_retry_full_build`.
-    Read-only by design (T-3-06): no status churn, no counters — only the
-    attempt sha the degraded terminal write already persisted is
-    consulted. ANY failure (a locked registry.db, a git hiccup) fails
-    OPEN to retry (T-3-07) — the safe direction for self-heal: the worst
-    outcome of a broken consult is one extra build, never a suppressed
-    one."""
-    try:
-        registry = Registry(config.data_dir(root) / "registry.db")
-        try:
-            entry = registry.get(slug)
-        finally:
-            registry.close()
-        return _watch_should_retry_full_build(entry, _git_head(repo_path))
-    except Exception:
-        return True
+def _resolve_scip_enabled(registry: Registry, slug: str, cli: bool | None) -> bool:
+    """Resolve the reversible SCIP choice (spec TSI-07): an explicit
+    `--scip`/`--no-scip` wins; omitted means the persisted choice, defaulting
+    to enabled for a repo with no row yet. There is no environment tier —
+    JARVIS_FALLBACK_SEARCH_ONLY was removed with the fallback design
+    (spec §12)."""
+    if cli is not None:
+        return cli
+    existing = registry.get(slug)
+    if existing is not None:
+        return existing.scip_enabled
+    return True
 
 
 def _run(cmd: list[str], *, cwd: Path, step: str,
@@ -454,22 +433,56 @@ def _run(cmd: list[str], *, cwd: Path, step: str,
     return result
 
 
-def _publish_atomically(target_dir: Path, versioned_name: str, sha: str) -> None:
+def _publish_atomically(target_dir: Path, versioned_name: str) -> None:
     """Write the pointer file via write-temp-then-rename (atomic on the
     same filesystem, POSIX `rename(2)`) so a concurrent reader never
     observes a half-written pointer — it either sees the old versioned
-    filename or the new one, never a partial write."""
-    pointer_file = target_dir / "current"
-    old_pointer = pointer_file.read_text(encoding="utf-8").strip() if pointer_file.exists() else None
+    filename or the new one, never a partial write.
 
+    Pointer flip ONLY: retiring the superseded versioned artifacts moved
+    to `_retire_superseded_snapshots`, which runs strictly AFTER the final
+    registry write (spec TSI-04 stage 7). Deleting the old files here —
+    the old behavior — meant a crash between this flip and the registry
+    success left the new snapshot live and recorded, but the old
+    generation already gone: an orphaned cleanup that could never be
+    retried or audited."""
+    pointer_file = target_dir / "current"
     tmp_pointer = target_dir / f".current.tmp-{os.getpid()}"
     tmp_pointer.write_text(versioned_name, encoding="utf-8")
     os.replace(tmp_pointer, pointer_file)
 
-    if old_pointer and old_pointer != versioned_name:
-        (target_dir / old_pointer).unlink(missing_ok=True)
-        old_metadata = old_pointer.removesuffix(".db") + ".metadata.json"
-        (target_dir / old_metadata).unlink(missing_ok=True)
+
+def _metadata_name(db_filename: str) -> str:
+    """The metadata sibling of a snapshot database, derived from the
+    actual filename (spec TSI-04): `.db` -> `.metadata.json`. The old
+    writer hardcoded a commit-only name, which broke the moment filenames
+    gained a generation suffix — both the writer and the cleanup must
+    derive the sibling from the file they were given."""
+    return db_filename.removesuffix(".db") + ".metadata.json"
+
+
+def _retire_superseded_snapshots(slug: str, root: Path | None, keep: str) -> list[Path]:
+    """Delete every versioned snapshot for `slug` except `keep` (the live
+    pointer's target), together with each one's metadata sibling derived
+    from the actual filename. Called strictly after the final registry
+    write: a failure here must never fail the run (the new snapshot is
+    published and recorded) — callers warn and continue, and the next
+    successful run simply cleans again.
+
+    Also sweeps the pre-baseline naming scheme (`index-<sha>.db` without a
+    generation), which is what makes a first baseline reindex tidy up
+    after the old writer."""
+    target_dir = config.index_dir(slug, root)
+    if not target_dir.is_dir():
+        return []
+    removed: list[Path] = []
+    for db_file in sorted(target_dir.glob("index-*.db")):
+        if db_file.name == keep:
+            continue
+        db_file.unlink(missing_ok=True)
+        (target_dir / _metadata_name(db_file.name)).unlink(missing_ok=True)
+        removed.append(db_file)
+    return removed
 
 
 def parse_scip_version(output: str) -> tuple[int, int, int] | None:
@@ -670,35 +683,6 @@ def _resolve_language(registry: Registry, slug: str, language: str | None) -> st
     return existing.language_override if existing is not None else None
 
 
-def _resolve_search_only(registry: Registry, slug: str, search_only: bool | None) -> bool:
-    """`search_only=None` means "leave the persisted value alone" (a `jarvis
-    watch` reindex never repeats the flag) rather than "clear it" — the same
-    contract as `_resolve_scheme`. This is what stops a repo that already
-    proved un-indexable from re-running a doomed multi-minute build."""
-    if search_only is not None:
-        return search_only
-    existing = registry.get(slug)
-    return existing.search_only if existing is not None else False
-
-
-def _resolve_fallback(registry: Registry, slug: str, cli: bool | None) -> bool:
-    """Fallback resolution, precedence locked by FALL-02: CLI > persisted >
-    env > off. `cli=None` means the flag was not passed and the persisted
-    value (if ever set) decides; a NULL persisted value defers to the
-    JARVIS_FALLBACK_SEARCH_ONLY env tier, which reads off when unset.
-
-    Deliberate deviation from the `_resolve_scheme` idiom: the RESOLVED
-    bool is never written back. Persisting it would collapse NULL to 0 on
-    the first env-off run and permanently lock a later env-on out
-    (persisted outranks env — Pitfall 1). Only the explicit CLI value is
-    ever persisted, via `Registry.set_fallback_enabled`."""
-    if cli is not None:
-        return cli
-    existing = registry.get(slug)
-    if existing is not None and existing.fallback_enabled is not None:
-        return existing.fallback_enabled
-    return config.fallback_search_only_from_env()
-
 
 def _resolve_semantic_include(
     registry: Registry, slug: str, include: tuple[str, ...] | None
@@ -782,126 +766,211 @@ def _install_semantic_extra() -> bool:
     return result.returncode == 0
 
 
-def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
-                        include_prefixes: tuple[str, ...] = ()) -> bool:
-    """Chunk + embed + write the LanceDB table. Optional and non-fatal:
-    a missing `semantic` extra skips with a hint, any other failure warns
-    and lets the SCIP/Zoekt publish proceed — the previous semantic table
-    (if any) stays live."""
+def _prepare_semantic_stage(
+    repo_path: Path, slug: str, root: Path | None,
+    include_prefixes: tuple[str, ...], manifest: SourceManifest | None,
+) -> "SemanticWork | None":
+    """Optional semantic stage, prepare half (spec TSI-04 stage 5 + TSI-09):
+    identity/admission decisions only — no weights loaded, no bytes
+    encoded. Runs BEFORE the syntax build so `semantic_parse_paths` can
+    feed `build_syntax_index`'s shared-parse callback. Optional and
+    non-fatal: a missing `semantic` extra returns None with a hint, any
+    other failure warns and lets the baseline publish proceed."""
     try:
         from jarvis import semantic
-        from jarvis.embeddings import SemanticExtraMissingError
     except ImportError:
         print(
             "semantic indexing skipped — install jarvis-mcp[semantic] "
             "(uv tool install), or `uv sync --extra semantic` in a source checkout",
             file=sys.stderr,
         )
-        return False
+        return None
     try:
-        report = semantic.index_semantic(repo_path, slug, root=root,
-                                         include_prefixes=include_prefixes)
+        return semantic.prepare_semantic(
+            repo_path, slug, root=root, include_prefixes=include_prefixes,
+            manifest=manifest,
+        )
+    except Exception as exc:
+        print(
+            f"warning: semantic indexing failed (index still published): {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _finish_semantic_stage(
+    work: "SemanticWork", prepared_chunks: dict, pool: object,
+) -> bool:
+    """Optional semantic stage, finish half: chunk (reusing the shared
+    parse trees the syntax build captured) + embed + publish the LanceDB
+    table. Optional and non-fatal — the previous table (if any) stays live
+    on any failure."""
+    from jarvis import semantic
+    from jarvis.embeddings import SemanticExtraMissingError
+
+    # Task-4 review directive: `finish_semantic` silently falls back to
+    # re-chunking a file when its prepared entry no longer matches the
+    # admitted input's hash. The discard path must be observable — say so
+    # at debug level before the fallback kicks in.
+    for item in work.inputs:
+        chunks = prepared_chunks.get(item.file_path)
+        if chunks is not None and any(c.file_hash != item.file_hash for c in chunks):
+            print(
+                f"debug: semantic: discarding prepared chunks for "
+                f"{item.file_path} — file hash changed between syntax capture "
+                "and semantic finish; re-chunking from source",
+                file=sys.stderr,
+            )
+    try:
+        report = semantic.finish_semantic(work, prepared_chunks=prepared_chunks,
+                                          pool=pool)
         _print_semantic_report(report)
     except SemanticExtraMissingError as exc:
         print(f"semantic indexing skipped — {exc}", file=sys.stderr)
         return False
     except Exception as exc:
         print(
-            f"warning: semantic indexing failed (SCIP/Zoekt index still published): {exc}",
+            f"warning: semantic indexing failed (index still published): {exc}",
             file=sys.stderr,
         )
         return False
     return True
 
 
-def _retire_scip_artifacts(slug: str, root: Path | None) -> None:
-    """Tear down a previously published SCIP index for `slug` before a
-    search-only publish, so a repo that once had real navigation doesn't
-    keep silently serving it once it degrades to search-only (explicit
-    `--search-only`, or the automatic ABI-mismatch/no-shards fallback).
+def _run_semantic_stage(repo_path: Path, slug: str, root: Path | None,
+                        include_prefixes: tuple[str, ...] = ()) -> bool:
+    """Standalone prepare+finish in one call, for callers with no syntax
+    capture to share a parse with (the interactive post-install path).
+    Optional and non-fatal: a missing `semantic` extra skips with a hint,
+    any other failure warns and lets the publish proceed."""
+    work = _prepare_semantic_stage(repo_path, slug, root, include_prefixes, None)
+    if work is None:
+        return False
+    from jarvis.syntax import ParserPool
 
-    Without this, `_publish_search_only` writes no `current` pointer but
-    also never touches an OLD one left by an earlier successful index —
-    navigation tools would keep answering from stale data instead of
-    raising IndexNotFoundError, and `getIndexStatus` would report the
-    self-contradictory `{"indexed": true, "status": "search-only"}`.
+    return _finish_semantic_stage(work, {}, ParserPool())
 
-    Mirrors `_cmd_forget`'s own teardown for the SCIP-specific artifacts
-    only: the pointer directory (`config.index_dir` holds nothing but the
-    `current` pointer plus versioned `.db`/`.metadata.json` files) and this
-    repo's outgoing graph edges (cleared via the same store method
-    `populate_graph_for_repo` uses to make a reindex rebuild-not-accumulate,
-    package rows themselves stay so a later real reindex still resolves by
-    name). Zoekt shards and the semantic LanceDB table are deliberately left
-    alone — this same publish republishes both further down, `_cmd_forget`'s
-    full deletion of those does not apply here."""
-    # Graph teardown BEFORE the rmtree (WR-02): the GraphStore writes are
-    # the failure-prone half — a locked registry.db, the same race that
-    # triggers this publish, raises right here — and the rmtree is the
-    # irreversible half. Clearing edges first keeps a retire that fails
-    # partway in the "failed run with a live pointer" state the system
-    # already models and reports, instead of destroying the previous
-    # navigation index on a run that is about to fail anyway; stale edges
-    # are rebuilt by the next successful run's rebuild-not-accumulate
-    # populate.
-    graph_store = GraphStore(config.data_dir(root) / "registry.db")
+
+class ScipAttempt:
+    """Outcome of the optional SCIP enrichment stage (spec TSI-04 stage 3).
+    `state` is the registry stage vocabulary value: `available` when real
+    converter output was produced at `db_path`; `failed` for a build/
+    conversion failure; `unavailable` for absent/incompatible tooling.
+    `reason` is the one-line carrier for status_reason and the watch
+    diagnostic; `stderr` the complete output for the stage field."""
+
+    __slots__ = ("state", "reason", "stderr", "db_path")
+
+    def __init__(self, state: str, reason: str | None = None,
+                 stderr: str | None = None, db_path: Path | None = None) -> None:
+        self.state = state
+        self.reason = reason
+        self.stderr = stderr
+        self.db_path = db_path
+
+
+def _attempt_scip(
+    repo_path: Path, language: str, scheme: str | None, slug: str,
+    scratch: Path,
+) -> ScipAttempt:
+    """The optional SCIP enrichment boundary (spec TSI-04 stage 3). Every
+    failure mode listed in the spec — absent executables, incompatible
+    tool versions, language build failures, converter failure — returns a
+    `failed`/`unavailable` ScipAttempt instead of raising: the baseline
+    publishes regardless, and the run records exit-0 `degraded`
+    (narrowed FALL-04, spec §12). Only unexpected Jarvis programming
+    errors propagate."""
     try:
-        for package in graph_store.list_packages(repo=slug):
-            graph_store.clear_outgoing_edges(package.id)
+        check_scip_version()
+        if language == "swift":
+            check_scip_swift_version()
+    except IndexingError as exc:
+        # Absent or too-old tooling: `unavailable` — a setup problem, not
+        # a build failure.
+        return _attempt_from_exception(exc, "unavailable")
+
+    indexer_cmd = list(_INDEXER_BY_LANGUAGE[language])
+    if language == "swift":
+        # Cache outside the repo tree keeps scip-swift's build products
+        # out of the working copy and out of
+        # ~/Library/Developer/Xcode/DerivedData.
+        indexer_cmd = _swift_indexer_cmd(
+            indexer_cmd, repo_path, scheme, config.swift_cache_dir(slug)
+        )
+
+    scip_path = scratch / "index.scip"
+    db_path = scratch / "index.db"
+    try:
+        _run([*indexer_cmd, "--output", str(scip_path)], cwd=repo_path,
+             step=f"{indexer_cmd[0]} index",
+             env=_java_indexer_env() if language == "java" else None)
+        _run(
+            ["scip", "expt-convert", "--output", str(db_path), str(scip_path)],
+            cwd=repo_path,
+            step="scip expt-convert",
+        )
+    except MissingBinaryError as exc:
+        return _attempt_from_exception(exc, "unavailable")
+    except IndexingError as exc:
+        text = str(exc)
+        if language == "java" and _bash_shim_failure(text):
+            # The remedy IS the fix; ride it on the recorded stage failure.
+            return _attempt_from_text(f"{_BASH_SHIM_REMEDY}\n\n{text}", "failed")
+        return _attempt_from_text(text, "failed")
+    # Empty/invalid converter output is rejected as an indexing error,
+    # not accepted as an available snapshot the reader would crash on
+    # (spec TSI-04: known optional SCIP failures include empty/invalid
+    # indexer output).
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='documents'"
+        ).fetchone()
     finally:
-        graph_store.close()
+        conn.close()
+    if row is None or row[0] == 0:
+        return _attempt_from_text(
+            "scip expt-convert produced no SCIP documents table — "
+            "the indexer output was empty or invalid",
+            "failed",
+        )
+    return ScipAttempt(state="available", db_path=db_path)
 
-    index_dir = config.index_dir(slug, root)
-    if index_dir.exists():
-        shutil.rmtree(index_dir)
+
+def _attempt_from_exception(exc: Exception, state: str) -> ScipAttempt:
+    return _attempt_from_text(str(exc), state, exc.__class__.__name__)
 
 
-def _publish_search_only(repo_path: Path, slug: str, root: Path | None,
-                         semantic_include: tuple[str, ...]) -> tuple[bool, int]:
-    """Zoekt + semantic only: no SCIP indexer, no `scip expt-convert`, no graph
-    population, and deliberately no `current` pointer. Without a pointer,
-    `read_pointer` raises IndexNotFoundError and every navigation tool fails
-    safely — server.py turns that into an explanation.
-
-    Publishes zoekt first and retires any previously published SCIP index
-    for this repo (see `_retire_scip_artifacts`) only AFTER the zoekt
-    publish provably succeeded — a zoekt failure must leave an existing
-    index untouched, so a failed run never destroys a good one. Retiring
-    at all matters because this function is reachable not just from an
-    explicit `--search-only` but from the automatic signature-based
-    fallback and the Phase 3 degraded publish, both of which can trigger
-    on a repo that indexed fine before (e.g. a Kotlin version bump hitting
-    the ABI-mismatch signature on reindex). A failure in that retire step
-    raises `SearchPublishedButIncomplete`, so callers can tell a partial
-    publish (search live, the previous navigation index untouched) from a
-    zoekt-step failure that published nothing.
-
-    Returns whether the semantic stage succeeded (matching
-    `_run_semantic_stage`'s contract) alongside the git-tracked file count;
-    the caller records both on the registry row."""
-    _pin_zoekt_repo_name(repo_path, slug)
-    zoekt_dir = config.data_dir(root) / ".zoekt"
-    zoekt_dir.mkdir(parents=True, exist_ok=True)
-    tracked = _tracked_blob_count(repo_path)
-    result = _run(_zoekt_index_cmd(zoekt_dir, repo_path), cwd=repo_path,
-                  step="zoekt-git-index")
-    _warn_on_coverage_shortfall(slug, tracked, result.stderr)
-    _sweep_zoekt_tmp_orphans(slug, root)
-    # The zoekt shards are live from here on, so a retire failure is a
-    # PARTIAL publish (search on disk, previous SCIP index untouched), not
-    # "nothing published" — the marker lets the degrade handler say which
-    # one happened (WR-02).
-    try:
-        _retire_scip_artifacts(slug, root)
-    except Exception as exc:
-        raise SearchPublishedButIncomplete(str(exc)) from exc
-    semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
-    print(
-        f"note: {slug} published search-only — searchCode and semanticSearch work, "
-        "navigation tools do not (no SCIP index).",
-        file=sys.stderr,
+def _attempt_from_text(text: str, state: str, fallback_reason: str | None = None) -> ScipAttempt:
+    """One-line classified reason (D-03) plus the complete text (D-02),
+    truncation display-only — the stage fields persist unbounded."""
+    reason = next(
+        (line for line in text.splitlines() if line.strip()),
+        fallback_reason or state,
     )
-    return semantic_ok, tracked
+    return ScipAttempt(state=state, reason=reason, stderr=text)
+
+
+def _open_previous_snapshot(slug: str, root: Path | None) -> sqlite3.Connection | None:
+    """Read-only connection to the currently published navigation snapshot,
+    for `build_syntax_index`'s incremental reuse; None when nothing is
+    published. A legacy (pre-baseline) db opens fine — the builder simply
+    finds no `syntax_files` table and extracts from scratch, never
+    mutating the published file."""
+    index_dir = config.index_dir(slug, root)
+    pointer = index_dir / "current"
+    if not pointer.is_file():
+        return None
+    try:
+        name = pointer.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not name:
+        return None
+    db_path = index_dir / name
+    if not db_path.is_file():
+        return None
+    return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
 
 def _reject_duplicate_slug_for_path(registry: Registry, slug: str, repo_path: Path) -> None:
@@ -966,28 +1035,56 @@ def _record_failure_best_effort(
 def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None,
     scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
-    language: str | None = None, search_only: bool | None = None,
-    fallback_search_only: bool | None = None,
+    language: str | None = None, scip: bool | None = None,
+    watch: bool = False,
 ) -> str:
-    """Runs the full pipeline for one repo; returns the slug it was
-    published under. Registry status is `indexing` while running, `indexed`
-    on success, `failed` (with the exception's message) on any step's
-    failure, or `PARTIAL_STATUS` ("partial") on success when
-    `index_has_navigation_data()` finds symbols published but `chunks` and
-    `mentions` both empty.
+    """Runs the staged pipeline for one repo (spec TSI-04 §5 order) and
+    returns the slug it was published under.
+
+    Stages and failure boundaries:
+
+    1. Validate git input, slug/path ownership, and persisted
+       configuration. SCIP tooling is deliberately NOT validated here — it
+       is optional enrichment (narrowed FALL-04, spec §12).
+    2. Capture tracked input, extract or reuse syntax declarations, and
+       build a scratch syntax snapshot.
+    3. Optionally attempt SCIP when enabled and supported, subject only to
+       the watch suppression predicate (`_scip_suppressed`). Any expected
+       failure degrades to exit-0 `degraded`; the baseline still publishes.
+    4. Build Zoekt — its failure fails the run (nothing publishes).
+    5. Optional semantic stage with its existing warning/nonfatal behavior.
+    6. `validate_sources` + graph edge update. Graph/SQLite failures are
+       storage failures (hard), never permission to claim degradation. A
+       generation without usable SCIP data clears every outgoing edge the
+       repo's packages own, leaving package identities intact.
+    7. Publish via the scratch build -> unique final names -> write-temp +
+       `os.replace` pointer flip; then record the final registry state;
+       then retire superseded snapshots — strictly in that order, so a
+       crash can never orphan the cleanup or destroy a live snapshot.
+       Registry failure after the pointer flip raises nonzero and reports
+       that the navigation snapshot is already live; never a degradation.
+
+    Registry status vocabulary (spec TSI-06): `indexing` while running,
+    `indexed` (baseline complete, SCIP usable/disabled/unsupported),
+    `partial` (published with documented syntax/SCIP extraction gaps),
+    `degraded` (published but enabled SCIP failed/unavailable/suppressed),
+    `failed` (required stage/storage/publication/bookkeeping failure).
 
     An explicit `language` (or one persisted from an earlier `--language`)
-    bypasses `detect_language()` entirely -- an override means "do not
-    guess", not "guess then correct". The registry's `language` column
-    still records the effective language, so `list`/`status` show what was
-    actually indexed.
+    selects only the SCIP enrichment language — an override means "do not
+    guess", not "guess then correct" — and never restricts the syntax
+    baseline, which classifies every tracked file by its own extension. A
+    repo with no SCIP-indexable language still publishes its baseline with
+    `scip_state="unsupported"` (spec TSI-07); an invalid PERSISTED
+    override remains a user-input error.
 
-    `zoekt-git-index` runs BEFORE the pointer swap: if it fails, no repo was
-    ever left half-published — the previous version (if any) is still the
-    live `current` pointer, matching the `failed` status. Only once both
-    the SCIP index and the Zoekt shard are ready does `_publish_atomically`
-    flip the pointer (old files are only deleted after the new pointer is
-    live)."""
+    `scip=None` means "use the persisted choice, defaulting to enabled for
+    a new repo"; an explicit value updates it (spec TSI-07). `watch=True`
+    marks a debounced watch caller so the suppression predicate may skip
+    only the SCIP stage; explicit index/reindex calls always retry.
+    """
+    from jarvis.syntax import ParserPool
+
     repo_path = repo_path.resolve()
     slug = config.repo_slug(slug or repo_path.name)
     sha = _git_head(repo_path)
@@ -1000,27 +1097,22 @@ def index_repo(
         raise
     # After the duplicate-slug gate, not before: rejecting a request for a
     # repo path already registered under another slug shouldn't depend on
-    # `scip` being installed at all -- there's no point checking a tool
-    # version for a call that's about to be refused anyway.
-    # D-05: every failure from here until the run's first upsert predates
-    # any registry write, so without this wrap a hard failure would leave
-    # no row at all -- nothing could explain it and `jarvis reindex
-    # <slug>` would report "no such repo". `_git_head` above stays outside
-    # deliberately: it runs before the Registry exists, and a repo with no
-    # commits is a malformed request, not a failed index run.
+    # any SCIP tooling being installed -- there is no SCIP requirement at
+    # all before the optional stage now (spec TSI-04 §5 stage 1).
+    # D-05 (retained): every failure from here until the run's first upsert
+    # predates any registry write, so without this wrap a hard failure
+    # would leave no row at all -- nothing could explain it and `jarvis
+    # reindex <slug>` would report "no such repo". `_git_head` above stays
+    # outside deliberately: it runs before the Registry exists, and a repo
+    # with no commits is a malformed request, not a failed index run.
     resolved_language: str | None = None
+    # The predicate's condition 4 compares the EXPLICIT caller values --
+    # a watch run that never passed --language/--scheme must not look
+    # like a change just because resolution filled the effective values
+    # in (spec TSI-07).
+    explicit_language = language
+    explicit_scheme = scheme
     try:
-        check_scip_version()
-        # Resolved before language detection (not after, alongside scheme/
-        # semantic_include) because the except branch below reads it: a
-        # `jarvis reindex`/`watch` of a persisted search-only repo never
-        # re-passes `--search-only`, so this must already reflect the
-        # persisted value by the time detect_language() can raise.
-        search_only = _resolve_search_only(registry, slug, search_only)
-        # Resolved here (not at the degrade site) so the flag is settled
-        # before any pipeline step can raise, and per-run env reads happen
-        # exactly once (config owns the env tier).
-        fallback_enabled = _resolve_fallback(registry, slug, fallback_search_only)
         language_override = _resolve_language(registry, slug, language)
         if language_override is not None:
             if language_override not in _INDEXER_BY_LANGUAGE:
@@ -1028,33 +1120,29 @@ def index_repo(
                     f"{slug!r} has a persisted language override {language_override!r} that is no "
                     f"longer supported (expected one of {sorted(_INDEXER_BY_LANGUAGE)})"
                 )
-            language, indexer_cmd = language_override, _INDEXER_BY_LANGUAGE[language_override]
+            language = language_override
         else:
             try:
-                language, indexer_cmd = detect_language(repo_path)
+                language, _ = detect_language(repo_path)
             except UnsupportedLanguageError:
-                if not search_only:
-                    raise
-                language, indexer_cmd = UNKNOWN_LANGUAGE, []
+                # No SCIP-indexable language: the syntax baseline still
+                # covers every supported extension, so the run publishes
+                # with scip_state="unsupported" instead of failing (spec
+                # TSI-07). UNKNOWN_LANGUAGE persists because
+                # registry.language is NOT NULL.
+                language = UNKNOWN_LANGUAGE
         resolved_language = language
         scheme = _resolve_scheme(registry, slug, scheme)
         semantic_include = _resolve_semantic_include(registry, slug, semantic_include)
-
-        if language == "swift" and not search_only:
-            # Swift-only floor check (D-04): raising here flows through the
-            # pre-pipeline failure wrap above, so the run is persisted as a
-            # failed_hard row with the cause -- no new wiring needed.
-            # Search-only runs never invoke the language indexer, and
-            # setup.sh skips scip-swift entirely off darwin/arm64, so
-            # probing here would break --search-only Swift repos on Linux
-            # hosts (and reindex of a persisted search-only Swift repo).
-            check_scip_swift_version()
-            # Cache outside the repo tree keeps scip-swift's build
-            # products out of the working copy and out of
-            # ~/Library/Developer/Xcode/DerivedData.
-            indexer_cmd = _swift_indexer_cmd(
-                indexer_cmd, repo_path, scheme, config.swift_cache_dir(slug)
-            )
+        scip_enabled = _resolve_scip_enabled(registry, slug, scip)
+        existing = registry.get(slug)
+        # Read BEFORE the transitional upsert: the predicate consults the
+        # prior stage failure record, and `indexing` must not disturb it.
+        suppressed = _scip_suppressed(
+            existing, watch=watch, scip_enabled=scip_enabled,
+            explicit_scip=scip, language=explicit_language,
+            scheme=explicit_scheme, head=sha,
+        )
     except Exception as exc:
         # `resolved_language` is None until resolution completes -- the
         # honest record for a run that died before establishing one (D-06:
@@ -1069,104 +1157,80 @@ def index_repo(
         registry.close()
         raise
 
-    if search_only:
-        registry.upsert(slug, str(repo_path), language, None, "indexing",
-                        scheme_override=scheme, semantic_include=semantic_include,
-                        language_override=language_override, search_only=True)
-        # Persist the explicit CLI flag the moment the row exists: the two
-        # branches diverge before their first upsert, so both need the
-        # write. Only the CLI value (never the resolved bool) is persisted
-        # — see _resolve_fallback. Pre-pipeline failures intentionally
-        # leave it unpersisted, matching --scheme/--language semantics.
-        if fallback_search_only is not None:
-            registry.set_fallback_enabled(slug, fallback_search_only)
-        try:
-            semantic_ok, tracked = _publish_search_only(repo_path, slug, root, semantic_include)
-            registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
-                            scheme_override=scheme, semantic_include=semantic_include,
-                            language_override=language_override, search_only=True,
-                            status_origin=ORIGIN_MANUAL)
-            registry.mark_tracked_files(slug, tracked)
-            if semantic_ok:
-                registry.mark_semantic_indexed(slug)
-        except Exception as exc:
-            # Full failure record, not a bare status flip: a search-only run
-            # whose own publish failed is still a failed run the status
-            # surfaces must explain and `reindex` must find (D-05).
-            text = str(exc)
-            reason = next((line for line in text.splitlines() if line.strip()),
-                          exc.__class__.__name__)
-            _record_failure_best_effort(registry, slug, repo_path, language,
-                                        reason, text)
-            raise IndexingError(str(exc)) from exc
-        finally:
-            registry.close()
-        return slug
+    scip_supported = resolved_language in _INDEXER_BY_LANGUAGE
+    attempt_scip = scip_enabled and scip_supported and not suppressed
 
-    registry.upsert(slug, str(repo_path), language, None, "indexing", scheme_override=scheme,
-                    semantic_include=semantic_include, language_override=language_override)
-    # Same explicit-only persistence as the search-only branch above — the
-    # branches diverge before their first upsert, so both sites are needed.
-    if fallback_search_only is not None:
-        registry.set_fallback_enabled(slug, fallback_search_only)
+    # Transitional write: flips the row to `indexing` and persists the
+    # resolved enablement, while `scip_stage=None` leaves any prior stage
+    # failure record untouched for the decision below to read (spec
+    # TSI-06). Like --scheme/--language, an explicit enablement choice is
+    # persisted the moment the row exists, pre-pipeline failures included.
+    registry.upsert(slug, str(repo_path), resolved_language, None, "indexing",
+                    scheme_override=scheme, semantic_include=semantic_include,
+                    language_override=language_override, scip_enabled=scip_enabled)
 
-    # Flips to True the moment `_publish_atomically` makes the new index
-    # live. Everything after that point in the try below is registry
-    # bookkeeping, not indexing, and the degrade gate reads this flag to
-    # refuse those failures -- the index is already published, so degrading
-    # would destroy it.
+    # Set the moment `_publish_atomically` flips the pointer. Everything
+    # after that is registry bookkeeping and cleanup, never a degradation
+    # path (spec TSI-04 §5 stage 7; WR-02 retained).
     published = False
-
+    versioned_name: str | None = None
     try:
-        with tempfile.TemporaryDirectory(prefix="jarvis-index-") as scratch:
-            scip_path = Path(scratch) / "index.scip"
-            db_path = Path(scratch) / "index.db"
+        with tempfile.TemporaryDirectory(prefix="jarvis-index-") as scratch_dir:
+            scratch = Path(scratch_dir)
 
+            # -- Stage 2: capture + syntax baseline ----------------------
+            manifest = capture_sources(repo_path, scratch)
+            syntax_db = scratch / "syntax.db"
+            previous = _open_previous_snapshot(slug, root)
+            pool = ParserPool()
+            prepared_chunks: dict = {}
             try:
-                _run([*indexer_cmd, "--output", str(scip_path)], cwd=repo_path,
-                     step=f"{indexer_cmd[0]} index",
-                     env=_java_indexer_env() if language == "java" else None)
-            except IndexingError as exc:
-                if language == "java" and _bash_shim_failure(str(exc)):
-                    raise IndexingError(f"{_BASH_SHIM_REMEDY}\n\n{exc}") from exc
-                reason = _search_only_reason(str(exc))
-                if reason is None:
-                    raise
-                print(
-                    f"note: {slug} cannot be SCIP-indexed — {reason}. "
-                    "Falling back to search-only; this is remembered, so reindex/watch "
-                    "will not repeat the build.",
-                    file=sys.stderr,
+                sem_work = _prepare_semantic_stage(
+                    repo_path, slug, root, semantic_include, manifest)
+                parse_for = frozenset()
+                if sem_work is not None:
+                    from jarvis import semantic as _semantic
+                    parse_for = _semantic.semantic_parse_paths(sem_work)
+
+                def _collect_chunks(captured, data, tree) -> None:
+                    # Shared-parse chunk capture for the semantic stage
+                    # (spec TSI-09): chunker reuses this exact tree instead
+                    # of reparsing. A stale entry is discarded by
+                    # `_finish_semantic_stage`'s hash check, observably.
+                    from jarvis import chunker as _chunker
+
+                    prepared_chunks[captured.file_path] = _chunker.chunk_file(
+                        captured.file_path,
+                        data.decode("utf-8", errors="replace"),
+                        captured.file_hash or "",
+                        captured.language or "",
+                        pool=pool, tree=tree,
+                    )
+
+                build_report = build_syntax_index(
+                    syntax_db, manifest, pool=pool, previous=previous,
+                    parse_for=parse_for,
+                    on_parsed=_collect_chunks if sem_work is not None else None,
                 )
-                semantic_ok, tracked = _publish_search_only(repo_path, slug, root, semantic_include)
-                registry.upsert(slug, str(repo_path), language, sha, SEARCH_ONLY_STATUS,
-                                scheme_override=scheme, semantic_include=semantic_include,
-                                language_override=language_override, search_only=True,
-                                status_origin=ORIGIN_SIGNATURE, status_reason=reason)
-                registry.mark_tracked_files(slug, tracked)
-                if semantic_ok:
-                    registry.mark_semantic_indexed(slug)
-                return slug
-            _run(
-                ["scip", "expt-convert", "--output", str(db_path), str(scip_path)],
-                cwd=repo_path,
-                step="scip expt-convert",
+            finally:
+                if previous is not None:
+                    previous.close()
+            # Unsupported extensions alone do not make a run partial (spec
+            # TSI-06); a supported file that was size-skipped, undecodable,
+            # or only partially parsed does.
+            syntax_gap = bool(
+                build_report.counts.failed
+                or build_report.counts.partial
+                or build_report.counts.skipped
             )
 
-            # Package graph lives in registry.db (a single RW database),
-            # never in index.db — keeps the published SCIP index immutable.
-            # Reads the just-built db_path directly, before it's even
-            # copied to its published location, so a graph-population
-            # failure is caught before anything is published.
-            graph_store = GraphStore(config.data_dir(root) / "registry.db")
-            index_conn = sqlite3.connect(db_path)
-            try:
-                populate_graph_for_repo(graph_store, slug, index_conn)
-                has_nav = index_has_navigation_data(index_conn)
-            finally:
-                index_conn.close()
-                graph_store.close()
+            # -- Stage 3: optional SCIP enrichment -----------------------
+            attempt: ScipAttempt | None = None
+            if attempt_scip:
+                attempt = _attempt_scip(repo_path, resolved_language, scheme,
+                                        slug, scratch)
 
+            # -- Stage 4: Zoekt (required; failure fails the run) --------
             zoekt_dir = config.data_dir(root) / ".zoekt"
             zoekt_dir.mkdir(parents=True, exist_ok=True)
             _pin_zoekt_repo_name(repo_path, slug)
@@ -1176,28 +1240,167 @@ def index_repo(
             _warn_on_coverage_shortfall(slug, tracked, zoekt_result.stderr)
             _sweep_zoekt_tmp_orphans(slug, root)
 
-            semantic_ok = _run_semantic_stage(repo_path, slug, root, semantic_include)
+            # -- Stage 5: optional semantic finish (nonfatal) ------------
+            semantic_ok = False
+            if sem_work is not None:
+                semantic_ok = _finish_semantic_stage(sem_work, prepared_chunks, pool)
 
+            # -- Stage 6: revalidate sources + graph edges ---------------
+            # Storage failures here are HARD failures (spec TSI-04: graph/
+            # SQLite failures are never permission to claim degradation),
+            # and the work runs before navigation publication (WR-02).
+            validate_sources(repo_path, manifest)
+
+            generation = uuid.uuid4().hex
+            versioned_name = f"index-{sha}-{generation}.db"
+            published_at = datetime.now(UTC).isoformat()
+
+            if attempt is not None and attempt.db_path is not None:
+                # Genuine converter-produced SCIP tables, preserved
+                # unchanged alongside the Jarvis-owned syntax rows. Old
+                # SCIP data is never copied forward into a generation that
+                # has none.
+                final_db = attempt.db_path
+                conn = sqlite3.connect(final_db)
+                try:
+                    copy_syntax_tables(syntax_db, conn)
+                    facts = finalize_snapshot(
+                        conn, generation=generation, commit_sha=sha,
+                        published_at=published_at,
+                        source_hash=manifest.source_hash,
+                        scip_state=attempt.state,
+                    )
+                    has_nav = index_has_navigation_data(conn)
+                finally:
+                    conn.close()
+            else:
+                final_db = syntax_db
+                if attempt is not None:
+                    # The attempt failed/unavailable: the singleton records
+                    # why this generation carries no SCIP data.
+                    singleton_state = attempt.state
+                elif not scip_enabled:
+                    singleton_state = "disabled"
+                elif suppressed and existing is not None and existing.scip_state:
+                    # Suppressed watch run: mirror the preserved stage
+                    # state — it is why this generation has no SCIP data.
+                    singleton_state = existing.scip_state
+                else:
+                    singleton_state = "unsupported"
+                conn = sqlite3.connect(final_db)
+                try:
+                    facts = finalize_snapshot(
+                        conn, generation=generation, commit_sha=sha,
+                        published_at=published_at,
+                        source_hash=manifest.source_hash,
+                        scip_state=singleton_state,
+                    )
+                finally:
+                    conn.close()
+                has_nav = False
+
+            graph_store = GraphStore(config.data_dir(root) / "registry.db")
+            try:
+                if attempt is not None and attempt.db_path is not None:
+                    index_conn = sqlite3.connect(final_db)
+                    try:
+                        populate_graph_for_repo(graph_store, slug, index_conn)
+                    finally:
+                        index_conn.close()
+                else:
+                    # SCIP-less generation: rebuild-not-accumulate means the
+                    # repo's own outgoing edges are cleared, but package
+                    # identities other repos resolve against survive, and
+                    # nothing is synthesized from Tree-sitter (spec TSI-04).
+                    clear_graph_edges_for_repo(graph_store, slug)
+            finally:
+                graph_store.close()
+
+            # -- Stage 7: publish (scratch build -> unique names -> flip) -
             target_dir = config.index_dir(slug, root)
             target_dir.mkdir(parents=True, exist_ok=True)
-            versioned_name = f"index-{sha}.db"
-            shutil.copy(db_path, target_dir / versioned_name)
-            (target_dir / f"index-{sha}.metadata.json").write_text(
-                json.dumps({"commit_sha": sha, "published_at": datetime.now(UTC).isoformat()}), encoding="utf-8"
+            shutil.copy(final_db, target_dir / versioned_name)
+            (target_dir / _metadata_name(versioned_name)).write_text(
+                json.dumps({
+                    "project": config.PROJECT,
+                    "repo": slug,
+                    "branch": config.BRANCH,
+                    "commit_sha": sha,
+                    "published_at": published_at,
+                    "generation": generation,
+                    "source_hash": manifest.source_hash,
+                }),
+                encoding="utf-8",
             )
-            _publish_atomically(target_dir, versioned_name, sha)
-            # The pointer is live from here on; the remaining statements in
-            # this try are registry bookkeeping, not indexing. `published`
-            # keeps the degrade gate out of any failure they raise.
+            _publish_atomically(target_dir, versioned_name)
             published = True
 
-        final_status = "indexed" if has_nav else PARTIAL_STATUS
-        registry.upsert(slug, str(repo_path), language, sha, final_status, scheme_override=scheme,
-                        semantic_include=semantic_include, language_override=language_override)
+        # Terminal stage decision (spec TSI-06 vocabulary). An explicit
+        # ScipStageFields is the ONLY writer of the stage columns, so a
+        # successful baseline bookkeeping can never erase an active SCIP
+        # failure (narrowed D-04): successful enrichment clears its own
+        # fields; a suppressed run passes None and preserves them.
+        if attempt is not None and attempt.state == "available":
+            stage = ScipStageFields(state="available")
+        elif attempt is not None:
+            stage = ScipStageFields(
+                state=attempt.state, failure_reason=attempt.reason,
+                failure_stderr=attempt.stderr, failed_at_sha=sha,
+            )
+        elif not scip_enabled:
+            stage = ScipStageFields(state="disabled")
+        elif not scip_supported:
+            stage = ScipStageFields(state="unsupported")
+        else:
+            # Suppressed: preserve the last failure fields and state.
+            stage = None
+
+        if attempt is not None and attempt.state in ("failed", "unavailable"):
+            final_status = DEGRADED_STATUS
+        elif suppressed:
+            final_status = DEGRADED_STATUS
+        elif syntax_gap or (attempt is not None and not has_nav):
+            final_status = PARTIAL_STATUS
+        else:
+            final_status = "indexed"
+
+        # Exit-0 degraded mirrors the concise stage cause into
+        # status_reason so list/status/last_index_run stay informative;
+        # full SCIP stderr rides the stage field (spec TSI-06). Hard run
+        # failures describe themselves through record_failure instead.
+        degraded_reason = None
+        if final_status == DEGRADED_STATUS:
+            if attempt is not None:
+                degraded_reason = attempt.reason
+            elif existing is not None:
+                degraded_reason = existing.scip_failure_reason
+
+        registry.upsert(slug, str(repo_path), resolved_language, sha, final_status,
+                        scheme_override=scheme, semantic_include=semantic_include,
+                        language_override=language_override,
+                        status_reason=degraded_reason,
+                        scip_enabled=scip_enabled, scip_stage=stage)
         registry.mark_tracked_files(slug, tracked)
         if semantic_ok:
             registry.mark_semantic_indexed(slug)
-        if not has_nav:
+
+        if suppressed and existing is not None:
+            print(
+                f"note: {slug}: SCIP skipped — the previous attempt "
+                f"({existing.scip_state}) failed at this commit "
+                f"({existing.scip_failure_reason}). Syntax and search were "
+                "refreshed; force a SCIP retry with: "
+                f"jarvis index {repo_path} --scip",
+                file=sys.stderr,
+            )
+        elif attempt is not None and attempt.state != "available":
+            print(
+                f"warning: {slug}: SCIP enrichment {attempt.state} — "
+                f"{attempt.reason}. The syntax baseline and search were "
+                "still published (exit-0 degraded).",
+                file=sys.stderr,
+            )
+        if attempt is not None and attempt.state == "available" and not has_nav:
             print(
                 f"warning: {slug} published with symbols but no navigable positions "
                 "(chunks/mentions empty) — per-file navigation will return no results. "
@@ -1206,108 +1409,41 @@ def index_repo(
             )
     except Exception as exc:
         text = str(exc)
-        # One-line classified reason (D-03): the carrier's first non-empty
-        # line is "{step} failed ({cmd})". The complete text is persisted
-        # verbatim and unbounded (D-02) -- truncation is display-only.
         reason = next((line for line in text.splitlines() if line.strip()),
                       exc.__class__.__name__)
-        # Degrade gate (FALL-01/FALL-04): post-build-start failures with the
-        # opt-in fallback resolved on publish search-only instead of leaving
-        # the repo with nothing. Missing binaries and bash-shim failures are
-        # excluded -- environment misconfiguration must stay a loud hard
-        # failure, never laundered into a published index. Pre-pipeline
-        # failures never reach this handler at all (they raise inside the
-        # wrap above). Runs whose pointer already flipped (`published`) are
-        # excluded too: everything after `_publish_atomically` is registry
-        # bookkeeping, and a failure there (locked registry.db from a
-        # concurrent watch reindex, disk-full) must fall through to the
-        # hard-failure record below -- the index IS live, so degrading would
-        # rmtree a just-published good index and persist the sqlite error as
-        # the indexer failure.
-        if (not published
-                and fallback_enabled
-                and not isinstance(exc, MissingBinaryError)
-                and not _bash_shim_failure(text)):
-            try:
-                semantic_ok, tracked = _publish_search_only(
-                    repo_path, slug, root, semantic_include)
-            except SearchPublishedButIncomplete as pexc:
-                # Zoekt shards ARE live; what failed is retiring the prior
-                # SCIP artifacts (ordered last inside _retire_scip_artifacts,
-                # so the previous navigation index still stands). "Nothing
-                # published" would be false. State what landed on stderr AND
-                # in the row's status_stderr, then fall through to the
-                # hard-failure record: a failed degraded publish stays a
-                # hard failure (locked constraint) -- never a further
-                # degrade, never an exit 0.
-                retire_text = str(pexc)
-                retire_reason = next(
-                    (line for line in retire_text.splitlines() if line.strip()),
-                    pexc.__class__.__name__)
-                print(
-                    f"warning: fallback publish did not complete for {slug} — "
-                    f"search shards ARE published, but retiring the previous "
-                    f"SCIP index failed ({retire_reason}); the previous "
-                    "navigation index is untouched. Recording the original "
-                    "failure.",
-                    file=sys.stderr,
-                )
-                text = (
-                    f"{text}\n— degraded publish did not complete —\n"
-                    "search shards ARE published; retiring the previous SCIP "
-                    f"index failed:\n{retire_text}\n"
-                    "the previous navigation index is untouched"
-                )
-            except Exception:
-                # The degraded publish failed at-or-before its zoekt step:
-                # nothing was published, so the fallback promise is void --
-                # fall through to the ordinary hard-failure record below.
-                print(
-                    f"warning: fallback publish failed for {slug} — nothing "
-                    "published; recording the original failure.",
-                    file=sys.stderr,
-                )
-            else:
-                try:
-                    registry.upsert(slug, str(repo_path), language, sha, DEGRADED_STATUS,
-                                    scheme_override=scheme, semantic_include=semantic_include,
-                                    language_override=language_override,
-                                    status_origin=ORIGIN_FALLBACK, status_reason=reason,
-                                    status_stderr=text)
-                    registry.mark_tracked_files(slug, tracked)
-                    if semantic_ok:
-                        registry.mark_semantic_indexed(slug)
-                except Exception as bkexc:
-                    # Search-only IS on disk by this point (zoekt shards
-                    # written, any retired SCIP index gone), so what failed
-                    # is the status write, not the publish: claiming "nothing
-                    # published" would be false, and exiting 0 would strand
-                    # the row at 'indexing' while the run looks fine. Report
-                    # what landed, record the bookkeeping failure -- the
-                    # run's proximate cause -- and fail loudly. The
-                    # search-only index survives either way.
-                    bk_text = str(bkexc)
-                    bk_reason = next((line for line in bk_text.splitlines() if line.strip()),
-                                     bkexc.__class__.__name__)
-                    print(
-                        f"warning: {slug} degraded to search-only — {reason} "
-                        "(search-only IS published), but recording the "
-                        f"degraded status failed — {bk_reason}.",
-                        file=sys.stderr,
-                    )
-                    _record_failure_best_effort(registry, slug, repo_path,
-                                                language, bk_reason, bk_text)
-                    raise IndexingError(str(bkexc)) from bkexc
-                print(
-                    f"warning: {slug} degraded to search-only — {reason}. "
-                    "Navigation tools are unavailable; the next reindex retries "
-                    "the full build.",
-                    file=sys.stderr,
-                )
-                return slug
-        _record_failure_best_effort(registry, slug, repo_path, language,
+        if published:
+            # The pointer already flipped: the navigation snapshot IS live.
+            # Never a degradation, never retirement (spec TSI-04 §5 stage
+            # 7) — record the bookkeeping failure and exit nonzero saying
+            # exactly what landed. Superseded generations are NOT deleted
+            # yet (cleanup runs strictly after the registry write), so the
+            # next successful run retires them.
+            note = (
+                f"{reason} — the navigation snapshot is already live "
+                f"({versioned_name}); recording its registry state failed"
+            )
+            _record_failure_best_effort(registry, slug, repo_path,
+                                        resolved_language, note, text)
+            raise IndexingError(note) from exc
+        _record_failure_best_effort(registry, slug, repo_path, resolved_language,
                                     reason, text)
         raise IndexingError(str(exc)) from exc
+
+    # Cleanup strictly AFTER the registry write (spec TSI-04): a crash
+    # before this line leaves superseded generations on disk with the new
+    # snapshot live AND recorded — recoverable, auditable, and cleaned by
+    # the next successful run. A cleanup failure cannot un-publish or
+    # un-record anything, so it warns instead of failing the run.
+    assert versioned_name is not None
+    try:
+        _retire_superseded_snapshots(slug, root, keep=versioned_name)
+    except Exception as cleanup_exc:
+        print(
+            f"warning: retiring superseded snapshots for {slug} failed — "
+            f"{cleanup_exc}. The new snapshot is live and recorded; the "
+            "next successful index cleans them up.",
+            file=sys.stderr,
+        )
     finally:
         registry.close()
 
@@ -1321,8 +1457,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
             Path(args.path), slug=args.slug, scheme=getattr(args, "scheme", None),
             semantic_include=tuple(raw_include) if raw_include is not None else None,
             language=getattr(args, "language", None),
-            search_only=getattr(args, "search_only", None),
-            fallback_search_only=getattr(args, "fallback_search_only", None),
+            scip=getattr(args, "scip", None),
         )
     except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1395,12 +1530,12 @@ def _cmd_list(args: argparse.Namespace) -> int:
             # rows gain a 6th field carrying the reason one-liner —
             # degraded joins the ◐ family (search still answers) with the
             # failure cause riding that reason field. `partial` is a
-            # success variant and stays in the ✓ family.
+            # success variant and stays in the ✓ family. The historical
+            # `search-only` status (removed by spec §12) keeps rendering ◐
+            # so legacy rows never print a misleading ✓.
             if repo.status == "failed":
                 marker = "✗"
-            elif repo.status == SEARCH_ONLY_STATUS:
-                marker = "◐"
-            elif repo.status == DEGRADED_STATUS:
+            elif repo.status in (DEGRADED_STATUS, SEARCH_ONLY_STATUS):
                 marker = "◐"
             else:
                 marker = "✓"
@@ -1430,6 +1565,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
         return 1
     print(f"slug: {repo.slug}\npath: {repo.path}\nlanguage: {repo.language}\nstatus: {repo.status}")
     print(f"commit: {repo.commit_sha or '-'}\nlast_indexed: {repo.last_indexed.isoformat()}")
+    # SCIP stage state (spec TSI-06): the row's persisted decision, kept
+    # separate from the overall status line above.
+    print(f"scipEnabled: {'true' if repo.scip_enabled else 'false'}")
+    print(f"scipState: {repo.scip_state or 'unknown'}")
+    if repo.scip_failure_reason:
+        print(f"scipFailure: {repo.scip_failure_reason}")
+    _print_syntax_counts(slug)
     semantic = repo.semantic_indexed_at.isoformat() if repo.semantic_indexed_at else "-"
     print(f"semantic: {semantic}")
     recovery = recovery_for(repo)
@@ -1451,6 +1593,30 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_syntax_counts(slug: str) -> None:
+    """Best-effort syntax extraction counts from the published snapshot's
+    `jarvis_snapshot` singleton (spec TSI-06 `capabilities.syntax`).
+    Never raises, never loads a grammar, never spawns a subprocess: any
+    failure — no pointer, legacy snapshot, unreadable db — silently skips
+    the block, matching the null-plus-reason status convention."""
+    try:
+        from jarvis import syntax_index
+
+        cache = config.new_connection_cache()
+        try:
+            conn, _ = config.get_connection(cache, slug)
+            counts = syntax_index.read_snapshot_facts(conn).syntax_counts
+        finally:
+            cache.close_all()
+    except Exception:
+        return
+    print(
+        f"syntax: parsed={counts.parsed} partial={counts.partial} "
+        f"failed={counts.failed} skipped={counts.skipped} "
+        f"unsupported={counts.unsupported}"
+    )
+
+
 def _cmd_reindex(args: argparse.Namespace) -> int:
     try:
         slug = config.repo_slug(args.slug)
@@ -1469,6 +1635,7 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
         path=repo.path, slug=repo.slug, scheme=repo.scheme_override,
         semantic_include=list(repo.semantic_include),
         language=repo.language_override,
+        scip=getattr(args, "scip", None),
     ))
 
 
@@ -1546,6 +1713,19 @@ def _cmd_forget(args: argparse.Namespace) -> int:
         return 1
     if entry is not None:
         _unpin_zoekt_repo_name(Path(entry.path))
+    # Package-edge teardown (spec TSI-08: refresh forget for all new
+    # artifacts while preserving Zoekt unpinning and package-edge
+    # teardown): every package this repo owned and every edge touching it
+    # dies with the registration. Other repos' identity rows survive —
+    # an edge pointing into a forgotten repo's packages would otherwise
+    # dangle. This closes the evidence-found gap where forget left the
+    # graph rows behind and blastRadius kept answering for a forgotten
+    # repo.
+    graph_store = GraphStore(config.data_dir() / "registry.db")
+    try:
+        graph_store.forget_repo(slug)
+    finally:
+        graph_store.close()
     index_dir = config.index_dir(slug)
     if index_dir.exists():
         shutil.rmtree(index_dir)
@@ -1586,20 +1766,16 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     def _reindex() -> None:
         print(f"[watch] change detected, reindexing {slug} ...")
         try:
-            # FALL-05 anti-treadmill: a persistently-failing degraded repo
-            # is not rebuilt on every debounced save at an unchanged sha —
-            # only a source change (new sha) or an explicit `jarvis index`
-            # (which never consults this) re-triggers the full build.
-            if not _watch_skip_check(repo_path, slug):
-                print(
-                    f"[watch] {slug} still degraded at the same commit — "
-                    "skipping full-build retry",
-                    file=sys.stderr,
-                )
-                return
+            # Spec TSI-07: the SCIP-only suppression lives INSIDE
+            # index_repo (via watch=True), replacing FALL-05's whole-run
+            # skip. Every debounced event still runs the syntax baseline,
+            # the optional semantic stage, and publication — only a
+            # known-failing SCIP attempt at an unchanged commit is
+            # skipped, with a diagnostic naming the retry command.
+            # Debounce semantics are unchanged; watch.py stays pure.
             index_repo(
                 repo_path, slug=slug, scheme=args.scheme, language=args.language,
-                fallback_search_only=getattr(args, "fallback_search_only", None),
+                scip=getattr(args, "scip", None), watch=True,
             )
             print(f"[watch] {slug} reindexed")
         except Exception as exc:
@@ -1643,6 +1819,58 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+
+_REMOVED_OPTIONS: dict[str, str] = {
+    # Superseded by reversible --scip/--no-scip and the always-on syntax
+    # baseline (spec TSI-07/TSI-08, §12). Rejected with the replacement —
+    # never silently mapped — so a stale script fails loudly instead of
+    # quietly changing meaning.
+    "--search-only": (
+        "--no-scip (the syntax baseline is always indexed; SCIP is optional enrichment)"
+    ),
+    "--fallback-search-only": "--scip (SCIP failures degrade to exit-0 degraded automatically)",
+    "--no-fallback-search-only": "--scip (SCIP retries automatically on the next explicit run)",
+}
+
+
+def _add_scip_flag(parser: argparse.ArgumentParser) -> None:
+    """The mutually exclusive `--scip` / `--no-scip` pair (spec TSI-07).
+    One tri-state dest: omitted = use the persisted choice, defaulting to
+    enabled for a new repo; explicit = update the persisted choice."""
+    parser.add_argument(
+        "--scip",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        dest="scip",
+        help="attempt SCIP enrichment (default: the persisted choice, "
+             "enabled for a new repo; a failing SCIP attempt degrades to "
+             "exit-0 degraded — the syntax baseline always publishes)",
+    )
+
+
+def _reject_removed_options(argv: list[str]) -> None:
+    for arg in argv:
+        if arg.split("=", 1)[0] in _REMOVED_OPTIONS:
+            flag = arg.split("=", 1)[0]
+            print(
+                f"error: {flag} was removed — use {_REMOVED_OPTIONS[flag]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
+
+def _warn_removed_env() -> None:
+    """JARVIS_FALLBACK_SEARCH_ONLY no longer controls anything (spec
+    §12): say so once per invocation rather than silently ignoring a
+    variable a user's shell profile may still export."""
+    if os.environ.get("JARVIS_FALLBACK_SEARCH_ONLY") is not None:
+        print(
+            "note: JARVIS_FALLBACK_SEARCH_ONLY is no longer read — "
+            "use --scip/--no-scip (persisted per repo) instead",
+            file=sys.stderr,
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jarvis")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1663,24 +1891,11 @@ def build_parser() -> argparse.ArgumentParser:
     index_parser.add_argument(
         "--language",
         choices=sorted(_INDEXER_BY_LANGUAGE),
-        help="force the indexer language instead of detecting it from git-tracked files "
-             "(persisted and reused by reindex/watch)",
+        help="select the SCIP enrichment language instead of detecting it "
+             "from git-tracked files (never restricts syntax coverage; "
+             "persisted and reused by reindex/watch)",
     )
-    index_parser.add_argument(
-        "--search-only",
-        action="store_true",
-        default=None,
-        help="skip SCIP indexing and publish only Zoekt + semantic search "
-             "(persisted and reused by reindex/watch)",
-    )
-    index_parser.add_argument(
-        "--fallback-search-only",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="on a post-build-start indexer failure, publish search-only and "
-             "retry the full build on the next reindex (persisted per-repo; "
-             "JARVIS_FALLBACK_SEARCH_ONLY sets the global default)",
-    )
+    _add_scip_flag(index_parser)
     index_parser.set_defaults(func=_cmd_index)
     # SEMA-02 structural gate: only `jarvis index` offers — reindex's
     # synthetic Namespace, watch's index_repo call, and MCP paths all
@@ -1696,6 +1911,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     reindex_parser = subparsers.add_parser("reindex", help="re-run indexing for a registered repo")
     reindex_parser.add_argument("slug")
+    _add_scip_flag(reindex_parser)
     reindex_parser.set_defaults(func=_cmd_reindex)
 
     forget_parser = subparsers.add_parser("forget", help="remove a repo's registration and published index")
@@ -1706,31 +1922,24 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("path", help="path to the repo to watch")
     watch_parser.add_argument("--slug", help="override the auto-derived slug")
     watch_parser.add_argument(
-        "--scheme", help="Xcode scheme to build (Swift repos using xcodebuild with more than one scheme)"
-    )
-    watch_parser.add_argument("--debounce", type=float, default=5.0, help="quiet-period seconds (default: 5.0)")
-    watch_parser.add_argument(
         "--language",
         choices=sorted(_INDEXER_BY_LANGUAGE),
-        help="force the indexer language instead of detecting it from git-tracked files "
-             "(persisted and reused by reindex/watch)",
+        help="select the SCIP enrichment language instead of detecting it "
+             "from git-tracked files (never restricts syntax coverage; "
+             "persisted and reused by reindex/watch)",
     )
-    watch_parser.add_argument(
-        "--fallback-search-only",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="on a post-build-start indexer failure, publish search-only and "
-             "retry the full build on the next reindex (persisted per-repo; "
-             "JARVIS_FALLBACK_SEARCH_ONLY sets the global default)",
-    )
+    _add_scip_flag(watch_parser)
     watch_parser.set_defaults(func=_cmd_watch)
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
+    effective = sys.argv[1:] if argv is None else list(argv)
+    _reject_removed_options(effective)
+    _warn_removed_env()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(effective)
     sys.exit(args.func(args))
 
 

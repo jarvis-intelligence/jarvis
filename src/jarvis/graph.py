@@ -43,6 +43,7 @@ __all__ = [
     "PopulationSummary",
     "SeedPackageNotFoundError",
     "blast_radius",
+    "clear_graph_edges_for_repo",
     "extract_package_names",
     "package_display_name",
     "populate_graph_for_repo",
@@ -247,16 +248,40 @@ class GraphStore:
         self._conn.commit()
         return True
 
-    def clear_outgoing_edges(self, package_id: str) -> None:
+    def clear_outgoing_edges(self, package_id: str) -> int:
         """Deletes every edge where `package_id` is the dependent side
         (`from_package_id`). Called before repopulating a repo's edges so a
         removed dependency's edge is retracted rather than left as a stale
         artifact of an earlier index run — never touches edges where
         `package_id` is the DEPENDENCY side (`to_package_id`), since those
         belong to some other repo's own population run and are corrected
-        by that repo's own next reindex, not this one's."""
-        self._conn.execute("DELETE FROM edges WHERE from_package_id = ?", (package_id,))
+        by that repo's own next reindex, not this one's. Returns how many
+        edge rows were deleted."""
+        cursor = self._conn.execute(
+            "DELETE FROM edges WHERE from_package_id = ?", (package_id,)
+        )
         self._conn.commit()
+        return cursor.rowcount
+
+    def forget_repo(self, repo: str) -> int:
+        """Remove every package owned by `repo` together with every edge
+        touching it in either direction (spec TSI-08: `forget` teardown).
+        Edges are deleted first so the package removal can never leave a
+        dangling reference; other repos' package identity rows are
+        untouched — an edge some other repo's population run recorded INTO
+        this repo's packages is stale the moment those packages die, and
+        that repo's own next reindex rebuilds it or drops it."""
+        package_ids = [p.id for p in self.list_packages(repo=repo)]
+        for package_id in package_ids:
+            self._conn.execute(
+                "DELETE FROM edges WHERE from_package_id = ? OR to_package_id = ?",
+                (package_id, package_id),
+            )
+        self._conn.executemany(
+            "DELETE FROM packages WHERE id = ?", [(p,) for p in package_ids]
+        )
+        self._conn.commit()
+        return len(package_ids)
 
     def get_dependents(self, package_id: str) -> list[Package]:
         """Packages that directly depend on `package_id` (incoming edges) —
@@ -318,6 +343,22 @@ def populate_graph_for_repo(store: GraphStore, repo: str, conn: sqlite3.Connecti
         edges_created=edges_created,
         unresolved_external_names=unresolved_external_names,
     )
+
+def clear_graph_edges_for_repo(store: GraphStore, repo: str) -> int:
+    """Clear every outgoing edge from packages owned by `repo` while leaving
+    the package identity rows themselves in place (spec TSI-04: when a new
+    generation carries no usable SCIP package data — a syntax-only
+    publication — the repo's previously recorded dependency edges are
+    cleared rather than carried forward, but identities other repositories
+    resolve against survive; no edges are synthesized from Tree-sitter).
+
+    The graph-side counterpart of `populate_graph_for_repo`'s
+    rebuild-not-accumulate preamble, for the generation shape where there
+    is no SCIP index.db to re-extract from."""
+    removed = 0
+    for package in store.list_packages(repo=repo):
+        removed += store.clear_outgoing_edges(package.id)
+    return removed
 
 
 def _freshness_snapshot() -> FreshnessSnapshot:

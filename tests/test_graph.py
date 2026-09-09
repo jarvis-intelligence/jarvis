@@ -16,6 +16,7 @@ from jarvis.graph import (
     GraphStore,
     SeedPackageNotFoundError,
     blast_radius,
+    clear_graph_edges_for_repo,
     extract_package_names,
     populate_graph_for_repo,
 )
@@ -239,3 +240,56 @@ def test_graph_store_persists_across_reopen(tmp_path: Path):
         assert pkg.id == pkg_id
     finally:
         s2.close()
+
+
+# --- TSI-04/TSI-08: SCIP-less generations and forget teardown ---------------
+
+
+def test_clear_graph_edges_for_repo_removes_outgoing_but_keeps_identities(store: GraphStore):
+    """A syntax-only generation carries no SCIP package data, so every
+    outgoing edge this repo's packages owned is cleared (rebuild-not-
+    accumulate without a re-extraction) — while the package identity rows
+    themselves survive, because another repository's population run may
+    have recorded an edge INTO them (spec TSI-04; no edges are synthesized
+    from Tree-sitter)."""
+    a = store.upsert_package(repo="mine", name="npm:mine-a")
+    b = store.upsert_package(repo="mine", name="npm:mine-b")
+    dep = store.upsert_package(repo="dep-repo", name="npm:dep")
+    # mine -> dep (outgoing; must die) and dep -> mine-b (incoming; must stay).
+    assert store.add_edge(from_package_id=a, to_package_id=dep)
+    assert store.add_edge(from_package_id=dep, to_package_id=b)
+
+    removed = clear_graph_edges_for_repo(store, "mine")
+
+    assert removed == 1
+    assert store.get_dependents(dep) == []  # outgoing edge cleared
+    assert store.get_package_by_key("mine", "npm:mine-a") is not None
+    assert store.get_package_by_key("mine", "npm:mine-b") is not None
+    assert store.get_dependents(b)  # identity survives for other repos
+
+
+def test_clear_graph_edges_for_repo_is_safe_for_an_unknown_repo(store: GraphStore):
+    assert clear_graph_edges_for_repo(store, "never-indexed") == 0
+
+
+def test_forget_repo_removes_packages_and_touching_edges_only(store: GraphStore):
+    """Spec TSI-08: forget teardown drops the repo's packages together with
+    every edge touching them in either direction, preserving other repos'
+    identity rows (spec §9: preserve Zoekt unpinning and package-edge
+    teardown)."""
+    a = store.upsert_package(repo="mine", name="npm:mine-a")
+    other = store.upsert_package(repo="other-repo", name="npm:other")
+    other_dep = store.upsert_package(repo="other-repo", name="npm:other-dep")
+    store.add_edge(from_package_id=a, to_package_id=other_dep)   # mine -> other
+    store.add_edge(from_package_id=other, to_package_id=a)       # other -> mine
+    store.add_edge(from_package_id=other, to_package_id=other_dep)  # untouched
+
+    removed = store.forget_repo("mine")
+
+    assert removed == 1
+    assert store.get_package_by_key("mine", "npm:mine-a") is None
+    assert store.get_package_by_key("other-repo", "npm:other") is not None
+    assert store.get_package_by_key("other-repo", "npm:other-dep") is not None
+    # The only edge left is other -> other_dep; nothing dangles into "mine".
+    dependents = store.get_dependents(other_dep)
+    assert [p.repo for p in dependents] == ["other-repo"]
