@@ -219,6 +219,16 @@ def test_package_header_scopes_every_following_sibling():
     assert names == {"p", "p.a", "p.b"}
 
 
+def test_java_package_header_scopes_every_following_sibling():
+    raw = b"package com.example;\nclass Box {}\nclass Bar {}\n"
+    result = extract_file("A.java", raw, "java", pool=ParserPool())
+    names = {s.qualified_name for s in result.symbols}
+    assert names == {"com.example", "com.example.Box", "com.example.Bar"}
+    by_name = {s.qualified_name: s for s in result.symbols}
+    assert by_name["com.example.Box"].parent_symbol == by_name["com.example"].symbol
+    assert by_name["com.example.Bar"].parent_symbol == by_name["com.example"].symbol
+
+
 def test_quoted_and_operator_names_preserve_source_spelling():
     raw = b'const obj = { "my-key": () => 1 };'
     result = extract_file("q.js", raw, "javascript", pool=ParserPool())
@@ -253,6 +263,27 @@ def test_extension_and_impl_contexts_qualify_without_a_duplicate_type_row():
     rust_names = {s.qualified_name for s in rust_result.symbols}
     assert rust_names == {"Box", "Box.run"}
 
+    ruby_raw = b"class Box\n  class << self\n    def make; end\n  end\nend\n"
+    ruby_result = extract_file("singleton.rb", ruby_raw, "ruby", pool=ParserPool())
+    ruby_names = {s.qualified_name for s in ruby_result.symbols}
+    assert ruby_names == {"Box", "Box.make"}
+    assert sum(1 for s in ruby_result.symbols if s.qualified_name == "Box") == 1
+    ruby_by_name = {s.qualified_name: s for s in ruby_result.symbols}
+    assert ruby_by_name["Box.make"].parent_symbol == ruby_by_name["Box"].symbol
+
+
+def test_go_receiver_supplies_qualification_without_a_duplicate_type_row():
+    raw = b"package p\ntype Box struct{}\nfunc (b *Box) Run() {}\n"
+    result = extract_file("recv.go", raw, "go", pool=ParserPool())
+    names = {s.qualified_name for s in result.symbols}
+    assert names == {"p", "p.Box", "p.Box.Run"}
+    assert sum(1 for s in result.symbols if s.qualified_name == "p.Box") == 1
+    by_name = {s.qualified_name: s for s in result.symbols}
+    # The receiver spells "Box." into the qualified name, but Run's actual
+    # parent is the package -- never a link to the separate Box type row.
+    assert by_name["p.Box.Run"].parent_symbol == by_name["p"].symbol
+    assert by_name["p.Box.Run"].parent_symbol != by_name["p.Box"].symbol
+
 
 def test_dual_name_function_expression_records_both_names_at_distinct_spans():
     raw = b"const publicName = function internalName() {};"
@@ -269,6 +300,35 @@ def test_sql_create_procedure_is_partial_coverage_with_no_invented_symbol():
     names = {s.qualified_name for s in result.symbols}
     assert names == {"s"}
     assert result.state == "partial"
+
+
+def test_csharp_using_alias_is_a_term_and_plain_using_import_is_not_a_symbol():
+    raw = b"using Alias = Some.Namespace.Type;"
+    result = extract_file("alias.cs", raw, "csharp", pool=ParserPool())
+    assert len(result.symbols) == 1
+    symbol = result.symbols[0]
+    assert symbol.name == "Alias"
+    assert symbol.kind == DescriptorKind.TERM
+    assert raw[symbol.selection.start_byte:symbol.selection.end_byte] == b"Alias"
+
+    import_raw = b"using Some.Namespace;"
+    import_result = extract_file("import.cs", import_raw, "csharp", pool=ParserPool())
+    assert import_result.symbols == ()
+
+
+def test_php_semicolon_namespace_header_scopes_following_siblings():
+    braced_raw = b"<?php namespace N { function f() {} }"
+    braced_result = extract_file("braced.php", braced_raw, "php", pool=ParserPool())
+    braced_names = {s.qualified_name for s in braced_result.symbols}
+
+    semicolon_raw = b"<?php namespace N;\nfunction f() {}\n"
+    semicolon_result = extract_file("semicolon.php", semicolon_raw, "php", pool=ParserPool())
+    semicolon_names = {s.qualified_name for s in semicolon_result.symbols}
+
+    assert semicolon_names == braced_names == {"N", "N.f"}
+    by_name = {s.qualified_name: s for s in semicolon_result.symbols}
+    assert by_name["N.f"].parent_symbol == by_name["N"].symbol
+
 
 
 def test_language_for_path_resolves_the_full_extension_table():
