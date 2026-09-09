@@ -1142,7 +1142,6 @@ def test_index_repo_builds_semantic_index_and_searches(tmp_path: Path, monkeypat
     hours on first download; the pipeline under test is identical either way.
     """
     pytest.importorskip("lancedb")
-    pytest.importorskip("tree_sitter_language_pack")
     pytest.importorskip("sentence_transformers")
 
     monkeypatch.setenv("JARVIS_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
