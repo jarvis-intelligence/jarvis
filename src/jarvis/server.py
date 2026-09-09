@@ -15,10 +15,10 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from jarvis import config
+from jarvis import config, syntax, syntax_index
 from jarvis.graph import GraphStore, blast_radius
 from jarvis.index_reader import IndexNotFoundError
-from jarvis.query import FreshnessSnapshot, QueryService
+from jarvis.query import CapabilityUnavailableError, FreshnessSnapshot, QueryService
 from jarvis.registry import DEGRADED_STATUS, SEARCH_ONLY_STATUS, RegisteredRepo, origin_of, recovery_for
 from jarvis.search import ZoektLifecycle, search_zoekt, zoekt_repo_documents
 from jarvis.symbols import AmbiguousSymbolError
@@ -212,6 +212,61 @@ def _capability_fields(repo: str, indexed: bool, freshness: FreshnessSnapshot | 
         search_available = zoekt_dir.is_dir() and any(zoekt_dir.glob(f"{repo}_v*.zoekt"))
         semantic_available = entry is not None and entry.semantic_indexed_at is not None
 
+        # Task 5 (spec TSI-06 "Live capabilities"): per-tool provider
+        # availability plus syntax extraction counts, derived from the
+        # already-cached connection/facts — no subprocess, no Zoekt spawn,
+        # no grammar load, so this never violates the "never raises"/
+        # "never spawns" status contract.
+        facts = None
+        has_syntax = False
+        if indexed:
+            try:
+                conn = _service().connection(repo)
+                facts = syntax_index.read_snapshot_facts(conn)
+                has_syntax = syntax_index.has_syntax_tables(conn)
+            except Exception:
+                facts = None
+                has_syntax = False
+
+        def _tool_capability(providers: list[str], capability_label: str) -> dict[str, Any]:
+            available = indexed and bool(providers)
+            if available:
+                reason = None
+                recovery = None
+            elif not indexed:
+                reason = nav_reason or "no published index"
+                recovery = nav_recovery
+            else:
+                reason = f"no {capability_label} data in this snapshot"
+                recovery = f"jarvis reindex {repo} --scip"
+            return {"available": available, "providers": providers, "reason": reason, "recovery": recovery}
+
+        syntax_providers = ["tree-sitter"] if has_syntax else []
+        doc_providers = (["scip"] if facts is not None and facts.scip_outlines else []) + syntax_providers
+        def_providers = (["scip"] if facts is not None and facts.scip_definitions else []) + syntax_providers
+        ref_providers = ["scip"] if facts is not None and facts.scip_references else []
+        call_providers = ["scip"] if facts is not None and facts.scip_calls else []
+        type_providers = ["scip"] if facts is not None and facts.scip_types else []
+
+        tools_capability = {
+            "documentSymbols": _tool_capability(doc_providers, "SCIP outline or syntax"),
+            "goToDefinition": _tool_capability(def_providers, "SCIP definition or syntax"),
+            "findReferences": _tool_capability(ref_providers, "SCIP occurrence"),
+            "callHierarchy": _tool_capability(call_providers, "SCIP call-edge"),
+            "typeHierarchy": _tool_capability(type_providers, "SCIP relationship"),
+        }
+
+        counts = facts.syntax_counts if facts is not None else None
+        syntax_capability = {
+            "available": has_syntax,
+            "parsed": counts.parsed if counts is not None else 0,
+            "partial": counts.partial if counts is not None else 0,
+            "failed": counts.failed if counts is not None else 0,
+            "skipped": counts.skipped if counts is not None else 0,
+            "unsupported": counts.unsupported if counts is not None else 0,
+            "extractionIdentity": str(syntax.SYNTAX_EXTRACTOR_VERSION) if has_syntax else None,
+        }
+
         return {
             "last_index_run": last_index_run,
             "capabilities": {
@@ -228,6 +283,8 @@ def _capability_fields(repo: str, indexed: bool, freshness: FreshnessSnapshot | 
                         else "semantic index not built for this repo (requires the `semantic` extra)"
                     ),
                 },
+                "tools": tools_capability,
+                "syntax": syntax_capability,
             },
         }
     except Exception as exc:
@@ -244,7 +301,23 @@ def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
     and `recovery` (derived command) as structured keys alongside the prose
     `error` string — additive, so prose-only clients keep working. Keys
     appear only when a row with an origin exists; `status_stderr` never
-    enters a payload (it can be megabytes)."""
+    enters a payload (it can be megabytes).
+
+    Task 5 (spec TSI-05): `CapabilityUnavailableError` — a SCIP-only tool
+    with no usable capability in this snapshot, or an opaque `syntax:`
+    identifier passed to one — renders `requiredCapability`/`reason`/
+    `recovery` alongside the established `error` string, never an empty
+    array that would imply an exhaustive search."""
+    if isinstance(exc, CapabilityUnavailableError):
+        payload: dict[str, Any] = {
+            "error": str(exc),
+            "requiredCapability": exc.capability,
+            "reason": exc.reason,
+            "recovery": exc.recovery,
+        }
+        if exc.freshness is not None:
+            payload.update(_freshness_fields(exc.freshness))
+        return payload
     if isinstance(exc, IndexNotFoundError):
         entry = _registry_entry(repo)
         if entry is not None and entry.status == SEARCH_ONLY_STATUS:
@@ -269,6 +342,12 @@ def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
         return payload
     if isinstance(exc, AmbiguousSymbolError):
         hint = exc.candidates[0].dotted_path if exc.candidates else exc.query
+        candidates_payload = []
+        for c in exc.candidates:
+            entry_payload = {"symbol": c.symbol, "dottedPath": c.dotted_path, "kind": str(c.kind), "source": c.source}
+            if c.location is not None:
+                entry_payload["location"] = _json_safe(asdict(c.location))
+            candidates_payload.append(entry_payload)
         return {
             "error": (
                 f"{exc.query!r} is ambiguous in {repo} ({exc.total} matches). "
@@ -276,10 +355,7 @@ def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
             ),
             # A structured list, not prose inside `error`, so the caller can
             # act on it without parsing English.
-            "candidates": [
-                {"symbol": c.symbol, "dottedPath": c.dotted_path, "kind": str(c.kind)}
-                for c in exc.candidates
-            ],
+            "candidates": candidates_payload,
             "candidateTotal": exc.total,
         }
     return {"error": str(exc)}
@@ -293,23 +369,38 @@ def _resolved_fields(symbol: str, resolved: str) -> dict[str, Any]:
 
 @mcp.tool(name="documentSymbols")
 def document_symbols(repo: str, path: str) -> dict[str, Any]:
-    """List every top-level symbol (with its range) defined in `path` within `repo`."""
+    """List every symbol (with its range) defined in `path` within `repo`.
+    Served by the file's SCIP outline when usable, otherwise by real
+    Tree-sitter syntax declarations from the same snapshot — routing is
+    automatic and per-file. A syntax-served response carries a `coverage`
+    object describing that file's parse outcome."""
     try:
-        entries, freshness = _service().get_document_symbols(repo, path)
+        result = _service().get_document_symbols(repo, path)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return _error_payload(repo, exc)
-    return {"path": path, "symbols": [_json_safe(asdict(e)) for e in entries], **_freshness_fields(freshness)}
+    coverage_field = {"coverage": _json_safe(asdict(result.coverage))} if result.coverage is not None else {}
+    if result.error is not None:
+        return {"error": result.error, "path": path, **coverage_field, **_freshness_fields(result.freshness)}
+    return {
+        "path": path,
+        "symbols": [_json_safe(asdict(e)) for e in result.entries],
+        **coverage_field,
+        **_freshness_fields(result.freshness),
+    }
 
 
 @mcp.tool(name="goToDefinition")
 def go_to_definition(repo: str, symbol: str) -> dict[str, Any]:
-    """Resolve `symbol`'s definition location(s) within `repo`. `symbol` may
-    be a bare name (`Greeter`), a qualified name (`Greeter.greet`), or a full
-    SCIP symbol string."""
+    """Resolve `symbol`'s definition location(s) within `repo`. `symbol`
+    may be a bare name (`Greeter`), a qualified name (`Greeter.greet`), a
+    full SCIP symbol string, or an opaque `syntax:` identifier returned by
+    a prior call. A full SCIP identifier resolves only through SCIP; a
+    `syntax:` identifier resolves only through its exact declaration; a
+    bare/qualified name searches both SCIP definitions and syntax
+    declarations from files without usable SCIP definition coverage."""
     try:
-        resolved = _service().resolve_symbol(repo, symbol)
-        locations, freshness = _service().get_definitions(repo, resolved)
+        resolved, locations, freshness = _service().resolve_definition(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return _error_payload(repo, exc)
@@ -323,12 +414,15 @@ def go_to_definition(repo: str, symbol: str) -> dict[str, Any]:
 
 @mcp.tool(name="findReferences")
 def find_references(repo: str, symbol: str) -> dict[str, Any]:
-    """Every occurrence of `symbol` within `repo`, definition sites included.
-    `symbol` may be a bare name (`Greeter`), a qualified name
-    (`Greeter.greet`), or a full SCIP symbol string."""
+    """Every occurrence of `symbol` within `repo`, definition sites
+    included. `symbol` may be a bare name (`Greeter`), a qualified name
+    (`Greeter.greet`), or a full SCIP symbol string. SCIP-only: requires
+    real SCIP occurrence data and rejects an opaque `syntax:` identifier
+    with a capability error, even when other files have SCIP coverage —
+    it never implements lexical references or treats a syntax name match
+    as a reference."""
     try:
-        resolved = _service().resolve_symbol(repo, symbol)
-        locations, freshness = _service().find_references(repo, resolved)
+        resolved, locations, freshness = _service().find_references(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return _error_payload(repo, exc)
@@ -344,10 +438,12 @@ def find_references(repo: str, symbol: str) -> dict[str, Any]:
 def call_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
     """Single-level incoming/outgoing call hierarchy for `symbol` within
     `repo`. `symbol` may be a bare name (`Greeter`), a qualified name
-    (`Greeter.greet`), or a full SCIP symbol string."""
+    (`Greeter.greet`), or a full SCIP symbol string. SCIP-only: requires
+    real SCIP occurrence/enclosing-range data and rejects an opaque
+    `syntax:` identifier with a capability error — call edges are never
+    derived from syntax."""
     try:
-        resolved = _service().resolve_symbol(repo, symbol)
-        incoming, outgoing, freshness = _service().call_hierarchy(repo, resolved)
+        resolved, incoming, outgoing, freshness = _service().call_hierarchy(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return _error_payload(repo, exc)
@@ -364,34 +460,20 @@ def call_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
 def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
     """Single-level super/subtypes for `symbol` within `repo`. `symbol` may
     be a bare name (`Greeter`), a qualified name (`Greeter.greet`), or a full
-    SCIP symbol string.
+    SCIP symbol string. SCIP-only: requires real SCIP relationship data and
+    rejects an opaque `syntax:` identifier with a capability error — type
+    edges are never derived from syntax.
 
-    Returns an explicit error when the index carries no relationship data —
-    unpatched `scip expt-convert` (upstream through v0.9.0) does not populate
-    `global_symbols.relationships`, so an empty result would wrongly imply
-    the symbol has no supertypes. Reindexing with the fork build setup.sh
-    installs makes this self-heal."""
+    Returns an explicit capability error when the index carries no
+    relationship data — unpatched `scip expt-convert` (upstream through
+    v0.9.0) does not populate `global_symbols.relationships`, so an empty
+    result would wrongly imply the symbol has no supertypes. Reindexing
+    with the fork build setup.sh installs makes this self-heal."""
     try:
-        resolved = symbol
-        supertypes, subtypes, freshness, available = _service().type_hierarchy(repo, symbol)
-        if available:
-            resolved = _service().resolve_symbol(repo, symbol)
+        resolved, supertypes, subtypes, freshness = _service().type_hierarchy(repo, symbol)
     except Exception as exc:
         # Broad on purpose — keeps every tool's error shape the same {"error": ...} dict.
         return _error_payload(repo, exc)
-    if not available:
-        return {
-            "error": (
-                "typeHierarchy unavailable for this index: no symbol carries relationship "
-                "data. This index was built with an unpatched `scip` (upstream through "
-                "v0.9.0 never populates global_symbols.relationships — scip#464). "
-                "setup.sh now installs a fixed build: re-run setup.sh, then "
-                "`jarvis reindex <slug>`. Do not read this as 'this type has no "
-                "supertypes' — it is missing data, not an empty hierarchy."
-            ),
-            "symbol": symbol,
-            **_freshness_fields(freshness),
-        }
     return {
         "symbol": symbol,
         **_resolved_fields(symbol, resolved),

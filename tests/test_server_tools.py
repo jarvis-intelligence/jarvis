@@ -17,6 +17,7 @@ from jarvis.index_reader import IndexNotFoundError
 from jarvis.search import ZoektLifecycle
 from jarvis.symbols import AmbiguousSymbolError, Candidate, DescriptorKind
 from tests.fixtures.synthetic_index import CLASS_SYMBOL, DOC_GREETER, METHOD_SYMBOL, build_published_index
+from tests.test_query import build_combined_snapshot, build_syntax_only_snapshot
 
 REPO = "toy-repo"
 
@@ -84,10 +85,9 @@ async def test_unexpected_exception_still_returns_structured_error_payload(monke
     def _boom(*args, **kwargs):
         raise RuntimeError("boom")
 
-    # goToDefinition resolves the symbol before calling get_definitions, so
-    # the raising call must be resolve_symbol to exercise the same
-    # generic-exception path this test targets.
-    monkeypatch.setattr(server.QueryService, "resolve_symbol", _boom)
+    # goToDefinition routes through resolve_definition (Task 5), the sole
+    # call site that does resolution + lookup for that tool.
+    monkeypatch.setattr(server.QueryService, "resolve_definition", _boom)
     async with create_connected_server_and_client_session(server.mcp) as client:
         result = await client.call_tool("goToDefinition", {"repo": REPO, "symbol": "x"})
         assert result.isError is not True
@@ -111,10 +111,9 @@ async def test_ambiguous_symbol_error_reaches_client_as_candidates_payload(monke
     def _ambiguous(*args, **kwargs):
         raise AmbiguousSymbolError("dup", candidates, 2)
 
-    # goToDefinition resolves the symbol via resolve_symbol before calling
-    # get_definitions -- see server.py's go_to_definition -- so that is the
-    # call site to raise from to exercise the real wiring end to end.
-    monkeypatch.setattr(server.QueryService, "resolve_symbol", _ambiguous)
+    # goToDefinition routes through resolve_definition (Task 5) -- that is
+    # the call site to raise from to exercise the real wiring end to end.
+    monkeypatch.setattr(server.QueryService, "resolve_definition", _ambiguous)
     async with create_connected_server_and_client_session(server.mcp) as client:
         result = await client.call_tool("goToDefinition", {"repo": REPO, "symbol": "dup"})
         assert result.isError is not True
@@ -122,8 +121,8 @@ async def test_ambiguous_symbol_error_reaches_client_as_candidates_payload(monke
 
     assert payload["candidateTotal"] == 2
     assert payload["candidates"] == [
-        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD"},
-        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD"},
+        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD", "source": "scip"},
+        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD", "source": "scip"},
     ]
     assert "definitions" not in payload
 
@@ -246,7 +245,13 @@ async def test_type_hierarchy_reports_unavailable_instead_of_empty(monkeypatch):
 
     def _unavailable(self, repo, symbol):
         _, metadata = query.get_connection(self._cache, repo)
-        return [], [], query._freshness_snapshot(metadata), False
+        raise query.CapabilityUnavailableError(
+            capability="typeHierarchy",
+            message="typeHierarchy unavailable for this index: no symbol carries relationships data.",
+            reason="no SCIP relationship data in this snapshot",
+            recovery=f"jarvis reindex {repo}",
+            freshness=query._freshness_snapshot(metadata),
+        )
 
     monkeypatch.setattr(server.QueryService, "type_hierarchy", _unavailable)
     async with create_connected_server_and_client_session(server.mcp) as client:
@@ -255,6 +260,7 @@ async def test_type_hierarchy_reports_unavailable_instead_of_empty(monkeypatch):
 
     assert "error" in payload, payload
     assert "relationships" in payload["error"].lower()
+    assert payload["requiredCapability"] == "typeHierarchy"
     assert "supertypes" not in payload
 
 
@@ -759,8 +765,8 @@ def test_error_payload_renders_ambiguous_candidates(tmp_path: Path, monkeypatch)
     payload = server._error_payload(REPO, AmbiguousSymbolError("dup", candidates, 7))
     assert payload["candidateTotal"] == 7
     assert payload["candidates"] == [
-        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD"},
-        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD"},
+        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD", "source": "scip"},
+        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD", "source": "scip"},
     ]
     assert "ambiguous" in payload["error"]
     assert "a.C.dup" in payload["error"]  # leads with the qualifier hint
@@ -917,3 +923,109 @@ def test_mcp_server_advertises_the_jarvis_name():
     from jarvis.server import mcp
 
     assert mcp.name == "jarvis"
+
+
+# ---------------------------------------------------------------------------
+# Per-file provider routing at the server/MCP boundary (Task 5, spec TSI-05)
+# ---------------------------------------------------------------------------
+
+
+def test_document_symbols_tool_reports_coverage_for_syntax_only_file(tmp_path: Path, monkeypatch):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    result = server.document_symbols(repo="combined-repo", path="toy/util.py")
+    assert "error" not in result
+    assert [s["displayName"] for s in result["symbols"]] == ["helper"]
+    assert result["symbols"][0]["source"] == "tree-sitter"
+    assert result["coverage"]["state"] == "complete"
+
+
+def test_document_symbols_tool_reports_error_and_coverage_for_unsupported_extension(
+    tmp_path: Path, monkeypatch
+):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    result = server.document_symbols(repo="combined-repo", path="toy/notes.txt")
+    assert "error" in result
+    assert result["coverage"]["state"] == "unsupported"
+    assert "symbols" not in result
+
+
+def test_go_to_definition_tool_routes_a_syntax_identifier(tmp_path: Path, monkeypatch):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    outline = server.document_symbols(repo="combined-repo", path="toy/util.py")
+    syntax_id = outline["symbols"][0]["symbol"]
+    result = server.go_to_definition(repo="combined-repo", symbol=syntax_id)
+    assert "error" not in result
+    assert "resolvedSymbol" not in result  # opaque id round-trips unchanged
+    assert result["definitions"][0]["source"] == "tree-sitter"
+    assert result["definitions"][0]["path"] == "toy/util.py"
+
+
+def test_find_references_tool_renders_required_capability_for_a_syntax_identifier(
+    tmp_path: Path, monkeypatch
+):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    outline = server.document_symbols(repo="combined-repo", path="toy/util.py")
+    syntax_id = outline["symbols"][0]["symbol"]
+    result = server.find_references(repo="combined-repo", symbol=syntax_id)
+    assert result["requiredCapability"] == "findReferences"
+    assert result["reason"]
+    assert result["recovery"]
+    assert "references" not in result
+
+
+def test_call_hierarchy_tool_renders_required_capability_when_scip_absent(tmp_path: Path, monkeypatch):
+    build_syntax_only_snapshot(tmp_path, config.PROJECT, "solo-repo", config.BRANCH)
+    result = server.call_hierarchy(repo="solo-repo", symbol="solo")
+    assert result["requiredCapability"] == "callHierarchy"
+    assert "incomingCalls" not in result
+    assert "outgoingCalls" not in result
+
+
+def test_get_index_status_reports_tool_and_syntax_capabilities_for_a_combined_snapshot(
+    tmp_path: Path, monkeypatch
+):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    result = server.get_index_status(repo="combined-repo")
+
+    tools = result["capabilities"]["tools"]
+    assert set(tools) == {"documentSymbols", "goToDefinition", "findReferences", "callHierarchy", "typeHierarchy"}
+    for name in ("documentSymbols", "goToDefinition", "findReferences", "callHierarchy", "typeHierarchy"):
+        assert tools[name]["available"] is True
+        assert "providers" in tools[name] and "reason" in tools[name] and "recovery" in tools[name]
+    assert "scip" in tools["documentSymbols"]["providers"]
+    assert "tree-sitter" in tools["documentSymbols"]["providers"]
+    assert tools["findReferences"]["providers"] == ["scip"]
+
+    syntax_capability = result["capabilities"]["syntax"]
+    assert syntax_capability["available"] is True
+    assert syntax_capability["parsed"] >= 1
+    assert syntax_capability["extractionIdentity"] is not None
+
+    assert result["generation"] == "gen-combined"
+
+
+def test_get_index_status_reports_missing_scip_tool_capabilities_for_a_syntax_only_snapshot(
+    tmp_path: Path, monkeypatch
+):
+    build_syntax_only_snapshot(tmp_path, config.PROJECT, "solo-repo", config.BRANCH)
+    result = server.get_index_status(repo="solo-repo")
+
+    tools = result["capabilities"]["tools"]
+    assert tools["findReferences"]["available"] is False
+    assert tools["findReferences"]["providers"] == []
+    assert tools["findReferences"]["reason"]
+    assert tools["documentSymbols"]["available"] is True
+    assert tools["documentSymbols"]["providers"] == ["tree-sitter"]
+
+    assert result["capabilities"]["syntax"]["available"] is True
+
+
+def test_get_index_status_existing_keys_unchanged_for_a_legacy_snapshot():
+    """A legacy snapshot (this file's autouse `REPO` fixture) has no
+    syntax tables at all -- `capabilities.tools`/`capabilities.syntax`
+    must degrade honestly (no syntax providers) without disturbing any
+    existing key."""
+    result = server.get_index_status(repo=REPO)
+    assert result["indexed"] is True
+    assert result["capabilities"]["tools"]["documentSymbols"]["providers"] == ["scip"]
+    assert result["capabilities"]["syntax"]["available"] is False

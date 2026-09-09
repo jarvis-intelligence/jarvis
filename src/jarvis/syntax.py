@@ -189,6 +189,7 @@ class Span:
 @dataclass(frozen=True)
 class SyntaxSymbol:
     symbol: str
+    file_path: str
     name: str
     qualified_name: str
     kind: DescriptorKind
@@ -1093,7 +1094,7 @@ def _walk_declarations(language: str, root: Node, source: bytes,
         )
         symbol_id = syntax_id(file_path, file_hash, selection, candidate.kind)
         symbols.append(SyntaxSymbol(
-            symbol=symbol_id, name=name, qualified_name=qualified_name, kind=candidate.kind,
+            symbol=symbol_id, file_path=file_path, name=name, qualified_name=qualified_name, kind=candidate.kind,
             parent_symbol=frame.parent_id, declaration=declaration, selection=selection,
         ))
 

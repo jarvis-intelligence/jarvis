@@ -35,6 +35,11 @@ class Range:
 class Location:
     path: str
     range: Range
+    # Additive (Task 5, spec TSI-05 "Additive result fields"): every
+    # declaration/definition entry now carries its provider. Defaults keep
+    # every pre-existing SCIP-only call site unchanged.
+    source: str = "scip"
+    positionEncoding: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,30 @@ class DocumentSymbolEntry:
     displayName: str | None
     kind: str | None
     range: Range
+    # Additive (Task 5): `source`/`positionEncoding`/`qualifiedName`/
+    # `parentSymbol` are always present; `selectionRange` is populated only
+    # for syntax-served outline entries -- `range` keeps its existing SCIP
+    # semantics (the enclosing/definition range) unchanged either way.
+    source: str = "scip"
+    selectionRange: Range | None = None
+    positionEncoding: str | None = None
+    qualifiedName: str | None = None
+    parentSymbol: str | None = None
+
+
+@dataclass(frozen=True)
+class Coverage:
+    """Per-file syntax coverage disclosed alongside a syntax-served
+    response (spec TSI-05 "Additive result fields"). Never attached to a
+    response served entirely by SCIP."""
+
+    state: str  # complete | partial | unsupported | not-indexed
+    reason: str | None
+    parsed: int
+    partial: int
+    failed: int
+    skipped: int
+    unsupported: int
 
 
 @dataclass(frozen=True)

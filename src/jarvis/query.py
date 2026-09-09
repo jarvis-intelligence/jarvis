@@ -33,6 +33,7 @@ from jarvis.config import get_connection
 from jarvis.index_reader import IndexConnectionCache, IndexMetadata, IndexNotFoundError
 from jarvis.models import (
     CallHierarchyEntry,
+    Coverage,
     DocumentSymbolEntry,
     Freshness,
     Location,
@@ -53,6 +54,7 @@ from jarvis.scip_decoder import (
 from jarvis import symbols
 
 __all__ = [
+    "CapabilityUnavailableError",
     "IndexNotFoundError",
     "OccurrenceDecodeError",
     "QueryService",
@@ -66,6 +68,10 @@ class FreshnessSnapshot:
     stale: bool
     freshness: Freshness
     checked_at: datetime
+    # Additive (Task 5, spec TSI-06 "Live capabilities"): the published
+    # generation id, reported separately from latest-run outcome so a
+    # caller can tell which immutable snapshot actually answered.
+    generation: str | None = None
 
 
 def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
@@ -77,6 +83,7 @@ def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
             stale=False,
             freshness=Freshness.UNKNOWN,
             checked_at=checked_at,
+            generation=None,
         )
 
     generated_at: datetime | None = None
@@ -92,6 +99,7 @@ def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
         stale=False,
         freshness=Freshness.FRESH if generated_at is not None else Freshness.UNKNOWN,
         checked_at=checked_at,
+        generation=metadata.generation,
     )
 
 
@@ -358,6 +366,192 @@ def relationship_data_present(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
+class CapabilityUnavailableError(Exception):
+    """A SCIP-only navigation tool (`findReferences`/`callHierarchy`/
+    `typeHierarchy`) has no usable capability in this snapshot, or was
+    asked to resolve an opaque `syntax:` identifier it structurally
+    cannot use (spec TSI-05 "Unavailable precise tools return the
+    established error shape plus requiredCapability/reason/recovery ...
+    They must not return an empty array that implies an exhaustive
+    search found no references or relationships.")."""
+
+    def __init__(
+        self, *, capability: str, message: str, reason: str, recovery: str,
+        freshness: FreshnessSnapshot | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.capability = capability
+        self.reason = reason
+        self.recovery = recovery
+        self.freshness = freshness
+
+
+@dataclass(frozen=True)
+class DocumentSymbolsResult:
+    """documentSymbols routing result (spec TSI-05). `entries` is `None`
+    exactly when `error` is set -- a per-file coverage gap is an expected,
+    common outcome carried alongside `coverage`, never a raised
+    exception (raising would lose the coverage detail the caller needs)."""
+
+    entries: list[DocumentSymbolEntry] | None
+    error: str | None
+    coverage: Coverage | None
+    freshness: FreshnessSnapshot
+
+
+def _span_to_range(span) -> Range:
+    return Range(
+        start=Position(line=span.start_line, character=span.start_character),
+        end=Position(line=span.end_line, character=span.end_character),
+    )
+
+
+def _syntax_location(sym, *, use_declaration: bool = False) -> Location:
+    """`sym`'s identifier location by default (spec TSI-05 "Return
+    identifier locations for syntax definitions"); `use_declaration=True`
+    for the rarer case that wants the whole declaration span instead."""
+    span = sym.declaration if use_declaration else sym.selection
+    return Location(path=sym.file_path, range=_span_to_range(span), source="tree-sitter", positionEncoding="utf-8")
+
+
+def _syntax_symbol_to_entry(sym) -> DocumentSymbolEntry:
+    return DocumentSymbolEntry(
+        symbol=sym.symbol,
+        displayName=sym.name,
+        kind=str(sym.kind),
+        range=_span_to_range(sym.declaration),
+        source="tree-sitter",
+        selectionRange=_span_to_range(sym.selection),
+        positionEncoding="utf-8",
+        qualifiedName=sym.qualified_name,
+        parentSymbol=sym.parent_symbol,
+    )
+
+
+def _coverage_from_facts(file_row, facts) -> Coverage:
+    """Combine one file's real parse state (or its absence entirely) with
+    the snapshot-wide syntax counts (spec TSI-05 "Additive result
+    fields" coverage object). `file_row is None` means the path was never
+    recorded in `syntax_files` at all -- untracked/uncaptured."""
+    counts = facts.syntax_counts
+    parsed = counts.parsed if counts else 0
+    partial = counts.partial if counts else 0
+    failed = counts.failed if counts else 0
+    skipped = counts.skipped if counts else 0
+    unsupported = counts.unsupported if counts else 0
+    if file_row is None:
+        return Coverage(
+            state="not-indexed", reason=None, parsed=parsed, partial=partial,
+            failed=failed, skipped=skipped, unsupported=unsupported,
+        )
+    state_map = {
+        "parsed": "complete", "partial": "partial", "skipped": "partial",
+        "failed": "partial", "unsupported": "unsupported",
+    }
+    return Coverage(
+        state=state_map.get(file_row.state, "partial"), reason=file_row.reason,
+        parsed=parsed, partial=partial, failed=failed, skipped=skipped, unsupported=unsupported,
+    )
+
+
+def _scip_document_symbols(conn: sqlite3.Connection, path: str) -> list[DocumentSymbolEntry]:
+    """Exactly today's SCIP-only outline query (spec TSI-05 "For a covered
+    file, SCIP remains authoritative for that operation; do not merge an
+    extra syntax outline into it")."""
+    outline_rows = conn.execute(
+        "SELECT s.symbol, s.display_name, s.kind, "
+        "r.start_line, r.start_char, r.end_line, r.end_char "
+        "FROM defn_enclosing_ranges r "
+        "JOIN global_symbols s ON s.id = r.symbol_id "
+        "JOIN documents d ON d.id = r.document_id "
+        "WHERE d.relative_path = ?",
+        (path,),
+    ).fetchall()
+
+    entries: dict[str, DocumentSymbolEntry] = {}
+    for symbol, display_name, kind, start_line, start_char, end_line, end_char in outline_rows:
+        entry_name, entry_kind = _display_and_kind(symbol, display_name, kind)
+        entries[symbol] = DocumentSymbolEntry(
+            symbol=symbol,
+            displayName=entry_name,
+            kind=entry_kind,
+            range=Range(
+                start=Position(line=start_line, character=start_char),
+                end=Position(line=end_line, character=end_char),
+            ),
+        )
+
+    chunk_rows = conn.execute(
+        "SELECT c.occurrences FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.relative_path = ?",
+        (path,),
+    ).fetchall()
+
+    for (blob,) in chunk_rows:
+        for occ in decode_occurrences(blob):
+            if occ.symbol.startswith("local ") or occ.symbol in entries or not occ.is_definition():
+                continue
+            display_name, kind = _symbol_display_and_kind(conn, occ.symbol)
+            entry_name, entry_kind = _display_and_kind(occ.symbol, display_name, kind)
+            start_line, start_char, end_line, end_char = scip_range_to_positions(occ.range)
+            entries[occ.symbol] = DocumentSymbolEntry(
+                symbol=occ.symbol,
+                displayName=entry_name,
+                kind=entry_kind,
+                range=Range(
+                    start=Position(line=start_line, character=start_char),
+                    end=Position(line=end_line, character=end_char),
+                ),
+            )
+
+    return sorted(entries.values(), key=lambda e: (e.range.start.line, e.range.start.character))
+
+
+def _genuine_scip_candidates(conn: sqlite3.Connection, query: str) -> list[symbols.Candidate]:
+    """Bare/qualified-name SCIP matches that actually have a real
+    definition location (spec TSI-05 "genuine SCIP definition
+    candidates") -- a `global_symbols` row with no definition occurrence
+    is not a promise `goToDefinition` can keep. Multiple locations for one
+    matched symbol group into a single candidate (first location in
+    deterministic order); never split into several candidates or used to
+    pick a winner among distinct declarations."""
+    matches = symbols.dotted_suffix_matches(symbols.name_map(conn), query, case_sensitive=True)
+    out: list[symbols.Candidate] = []
+    for match in matches:
+        locations = sorted(
+            (
+                _occurrence_to_location(path, occ)
+                for path, occ in _occurrences_for_symbol(conn, match.symbol, role_bit=SymbolRoles.DEFINITION)
+                if occ.is_definition()
+            ),
+            key=lambda loc: (loc.path, loc.range.start.line, loc.range.start.character),
+        )
+        if not locations:
+            continue
+        out.append(symbols.Candidate(
+            symbol=match.symbol, dotted_path=match.dotted_path, kind=match.kind,
+            source="scip", location=locations[0],
+        ))
+    return out
+
+
+def _syntax_candidates(conn: sqlite3.Connection, query: str) -> list[symbols.Candidate]:
+    """Syntax declarations matching `query` from files without usable SCIP
+    definition coverage (spec TSI-05 "syntax candidates from files
+    without usable SCIP definition coverage") -- disjoint from
+    `_genuine_scip_candidates` by construction, so no cross-provider
+    dedup is ever needed."""
+    from jarvis import syntax_index
+
+    matches = syntax_index.find_syntax_symbols(conn, query, uncovered_only=True)
+    return [
+        symbols.Candidate(
+            symbol=sym.symbol, dotted_path=sym.qualified_name, kind=sym.kind,
+            source="tree-sitter", location=_syntax_location(sym),
+        )
+        for sym in matches
+    ]
+
+
 class QueryService:
     """Implements the 5 SCIP nav tools + getIndexStatus against index.db."""
 
@@ -397,94 +591,220 @@ class QueryService:
         ]
         return locations, _freshness_snapshot(metadata)
 
-    def find_references(self, repo: str, symbol: str) -> tuple[list[Location], FreshnessSnapshot]:
-        """ALL occurrences of `symbol`, definition sites included — no role filter."""
+    def find_references(self, repo: str, symbol: str) -> tuple[str, list[Location], FreshnessSnapshot]:
+        """ALL occurrences of `symbol`, definition sites included — no role
+        filter. SCIP-only (spec TSI-05): requires real SCIP occurrence data
+        and never implements lexical references or treats a syntax name
+        match as a reference, even when other files in this snapshot have
+        SCIP coverage."""
+        from jarvis import syntax_index
+
         conn, metadata = get_connection(self._cache, repo)
-        symbol = self._resolved(conn, symbol)
-        locations = [
-            _occurrence_to_location(path, occ) for path, occ in _occurrences_for_symbol(conn, symbol, role_bit=None)
-        ]
-        return locations, _freshness_snapshot(metadata)
-
-    def get_document_symbols(
-        self, repo: str, path: str
-    ) -> tuple[list[DocumentSymbolEntry], FreshnessSnapshot]:
-        conn, metadata = get_connection(self._cache, repo)
-
-        outline_rows = conn.execute(
-            "SELECT s.symbol, s.display_name, s.kind, "
-            "r.start_line, r.start_char, r.end_line, r.end_char "
-            "FROM defn_enclosing_ranges r "
-            "JOIN global_symbols s ON s.id = r.symbol_id "
-            "JOIN documents d ON d.id = r.document_id "
-            "WHERE d.relative_path = ?",
-            (path,),
-        ).fetchall()
-
-        entries: dict[str, DocumentSymbolEntry] = {}
-        for symbol, display_name, kind, start_line, start_char, end_line, end_char in outline_rows:
-            entry_name, entry_kind = _display_and_kind(symbol, display_name, kind)
-            entries[symbol] = DocumentSymbolEntry(
-                symbol=symbol,
-                displayName=entry_name,
-                kind=entry_kind,
-                range=Range(
-                    start=Position(line=start_line, character=start_char),
-                    end=Position(line=end_line, character=end_char),
+        freshness = _freshness_snapshot(metadata)
+        if symbol.startswith("syntax:"):
+            raise CapabilityUnavailableError(
+                capability="findReferences",
+                message=(
+                    f"{symbol!r} is a syntax identifier: findReferences requires real SCIP "
+                    "occurrence data and never treats a syntax name match as a reference."
                 ),
+                reason="syntax identifiers carry no SCIP occurrence data",
+                recovery=f"jarvis reindex {repo} --scip",
+                freshness=freshness,
             )
+        facts = syntax_index.read_snapshot_facts(conn)
+        if not facts.scip_references:
+            raise CapabilityUnavailableError(
+                capability="findReferences",
+                message=f"findReferences is unavailable for {repo}: no SCIP occurrence data in this snapshot",
+                reason="no SCIP occurrence data in this snapshot",
+                recovery=f"jarvis reindex {repo} --scip",
+                freshness=freshness,
+            )
+        resolved = self._resolved(conn, symbol)
+        locations = [
+            _occurrence_to_location(path, occ) for path, occ in _occurrences_for_symbol(conn, resolved, role_bit=None)
+        ]
+        return resolved, locations, freshness
 
-        chunk_rows = conn.execute(
-            "SELECT c.occurrences FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.relative_path = ?",
-            (path,),
-        ).fetchall()
+    def get_document_symbols(self, repo: str, path: str) -> DocumentSymbolsResult:
+        """Route by per-file provider coverage (spec TSI-05): the file's
+        SCIP outline when usable, otherwise syntax declarations from the
+        same snapshot connection. A legacy snapshot with no syntax tables
+        at all is served exactly as before, unconditionally."""
+        from jarvis import syntax_index
 
-        for (blob,) in chunk_rows:
-            for occ in decode_occurrences(blob):
-                if occ.symbol.startswith("local ") or occ.symbol in entries or not occ.is_definition():
-                    continue
-                display_name, kind = _symbol_display_and_kind(conn, occ.symbol)
-                entry_name, entry_kind = _display_and_kind(occ.symbol, display_name, kind)
-                start_line, start_char, end_line, end_char = scip_range_to_positions(occ.range)
-                entries[occ.symbol] = DocumentSymbolEntry(
-                    symbol=occ.symbol,
-                    displayName=entry_name,
-                    kind=entry_kind,
-                    range=Range(
-                        start=Position(line=start_line, character=start_char),
-                        end=Position(line=end_line, character=end_char),
-                    ),
+        conn, metadata = get_connection(self._cache, repo)
+        freshness = _freshness_snapshot(metadata)
+
+        if not syntax_index.has_syntax_tables(conn):
+            entries = _scip_document_symbols(conn, path)
+            return DocumentSymbolsResult(entries=entries, error=None, coverage=None, freshness=freshness)
+
+        file_row = syntax_index.file_provider_coverage(conn, path)
+        if file_row is not None and file_row.scip_outline:
+            entries = _scip_document_symbols(conn, path)
+            return DocumentSymbolsResult(entries=entries, error=None, coverage=None, freshness=freshness)
+
+        facts = syntax_index.read_snapshot_facts(conn)
+        coverage = _coverage_from_facts(file_row, facts)
+
+        if file_row is None:
+            return DocumentSymbolsResult(
+                entries=None, error=f"{path!r} is not tracked in this snapshot",
+                coverage=coverage, freshness=freshness,
+            )
+        if file_row.state == "unsupported":
+            return DocumentSymbolsResult(
+                entries=None, error=f"{path!r} has no supported syntax grammar ({file_row.reason})",
+                coverage=coverage, freshness=freshness,
+            )
+        if file_row.state in ("skipped", "failed"):
+            return DocumentSymbolsResult(
+                entries=None, error=f"{path!r} could not be parsed: {file_row.reason}",
+                coverage=coverage, freshness=freshness,
+            )
+        syms = syntax_index.file_symbols(conn, path)
+        entries = [_syntax_symbol_to_entry(sym) for sym in syms]
+        return DocumentSymbolsResult(entries=entries, error=None, coverage=coverage, freshness=freshness)
+
+    def resolve_definition(self, repo: str, symbol: str) -> tuple[str, list[Location], FreshnessSnapshot]:
+        """Route goToDefinition by per-file provider coverage (spec
+        TSI-05): a full SCIP identifier resolves only through SCIP, an
+        opaque `syntax:` identifier only through its exact declaration,
+        and a bare/qualified name through the combined candidate rule —
+        genuine SCIP definition candidates plus syntax candidates from
+        files without usable SCIP definition coverage. One connection
+        acquisition serves resolution and location lookup together."""
+        from jarvis import syntax_index
+
+        conn, metadata = get_connection(self._cache, repo)
+        freshness = _freshness_snapshot(metadata)
+        has_syntax = syntax_index.has_syntax_tables(conn)
+
+        if symbol.startswith("syntax:"):
+            if not has_syntax:
+                raise symbols.SymbolNotFoundError(f"no symbol named {symbol!r} in this index")
+            sym = syntax_index.get_syntax_symbol(conn, symbol)
+            if sym is None:
+                raise symbols.SymbolNotFoundError(
+                    f"syntax identifier {symbol!r} no longer resolves in this snapshot "
+                    "— its declaration was changed or removed"
                 )
+            return symbol, [_syntax_location(sym)], freshness
 
-        ordered = sorted(entries.values(), key=lambda e: (e.range.start.line, e.range.start.character))
-        return ordered, _freshness_snapshot(metadata)
+        has_scip = syntax_index.has_scip_tables(conn)
+        if has_scip:
+            row = conn.execute("SELECT symbol FROM global_symbols WHERE symbol = ?", (symbol,)).fetchone()
+            if row is not None:
+                locations = [
+                    _occurrence_to_location(path, occ)
+                    for path, occ in _occurrences_for_symbol(conn, symbol, role_bit=SymbolRoles.DEFINITION)
+                    if occ.is_definition()
+                ]
+                return symbol, locations, freshness
+
+        if not has_syntax:
+            # No per-file routing data at all (legacy snapshot) — exactly
+            # today's bare-name behavior, SCIP only.
+            resolved = self._resolved(conn, symbol)
+            locations = [
+                _occurrence_to_location(path, occ)
+                for path, occ in _occurrences_for_symbol(conn, resolved, role_bit=SymbolRoles.DEFINITION)
+                if occ.is_definition()
+            ]
+            return resolved, locations, freshness
+
+        combined = (_genuine_scip_candidates(conn, symbol) if has_scip else []) + _syntax_candidates(conn, symbol)
+        if not combined:
+            raise symbols.SymbolNotFoundError(
+                f"no symbol named {symbol!r} in this index (searched SCIP definitions and syntax declarations)"
+            )
+        if len(combined) == 1:
+            only = combined[0]
+            return only.symbol, [only.location], freshness
+        ordered = sorted(combined, key=lambda c: c.dotted_path)
+        raise symbols.AmbiguousSymbolError(symbol, tuple(ordered[: symbols.CANDIDATE_LIMIT]), len(ordered))
+
 
     def call_hierarchy(
         self, repo: str, symbol: str
-    ) -> tuple[list[CallHierarchyEntry], list[CallHierarchyEntry], FreshnessSnapshot]:
+    ) -> tuple[str, list[CallHierarchyEntry], list[CallHierarchyEntry], FreshnessSnapshot]:
+        """Single-level incoming/outgoing call hierarchy. SCIP-only (spec
+        TSI-05): requires real SCIP occurrence/enclosing-range data and
+        never derives call edges from syntax."""
+        from jarvis import syntax_index
+
         conn, metadata = get_connection(self._cache, repo)
-        symbol = self._resolved(conn, symbol)
-        incoming = _call_hierarchy_incoming(conn, symbol)
-        outgoing = _call_hierarchy_outgoing(conn, symbol)
-        return incoming, outgoing, _freshness_snapshot(metadata)
+        freshness = _freshness_snapshot(metadata)
+        if symbol.startswith("syntax:"):
+            raise CapabilityUnavailableError(
+                capability="callHierarchy",
+                message=(
+                    f"{symbol!r} is a syntax identifier: callHierarchy requires real SCIP "
+                    "occurrence/enclosing-range data, which syntax declarations never carry."
+                ),
+                reason="syntax identifiers carry no SCIP call-edge data",
+                recovery=f"jarvis reindex {repo} --scip",
+                freshness=freshness,
+            )
+        facts = syntax_index.read_snapshot_facts(conn)
+        if not facts.scip_calls:
+            raise CapabilityUnavailableError(
+                capability="callHierarchy",
+                message=f"callHierarchy is unavailable for {repo}: no SCIP call-edge data in this snapshot",
+                reason="no SCIP occurrence/enclosing-range data in this snapshot",
+                recovery=f"jarvis reindex {repo} --scip",
+                freshness=freshness,
+            )
+        resolved = self._resolved(conn, symbol)
+        incoming = _call_hierarchy_incoming(conn, resolved)
+        outgoing = _call_hierarchy_outgoing(conn, resolved)
+        return resolved, incoming, outgoing, freshness
 
     def type_hierarchy(
         self, repo: str, symbol: str
-    ) -> tuple[list[TypeHierarchyEntry], list[TypeHierarchyEntry], FreshnessSnapshot, bool]:
-        """Returns (supertypes, subtypes, freshness, available).
+    ) -> tuple[str, list[TypeHierarchyEntry], list[TypeHierarchyEntry], FreshnessSnapshot]:
+        """Single-level super/subtypes. SCIP-only (spec TSI-05): requires
+        real SCIP relationship data and never derives type edges from
+        syntax; preserves the distinction between absent relationship
+        data and a known-empty hierarchy via `CapabilityUnavailableError`
+        rather than a silently empty result."""
+        from jarvis import syntax_index
 
-        `available` is False when the index carries no relationship data at
-        all, which the caller must surface as "cannot answer" rather than as
-        an empty hierarchy.
-        """
         conn, metadata = get_connection(self._cache, repo)
-        available = relationship_data_present(conn)
-        if not available:
-            return [], [], _freshness_snapshot(metadata), False
-        symbol = self._resolved(conn, symbol)
-        supertypes = _type_hierarchy_supertypes(conn, symbol)
-        subtypes = _type_hierarchy_subtypes(conn, symbol)
-        return supertypes, subtypes, _freshness_snapshot(metadata), True
+        freshness = _freshness_snapshot(metadata)
+        if symbol.startswith("syntax:"):
+            raise CapabilityUnavailableError(
+                capability="typeHierarchy",
+                message=(
+                    f"{symbol!r} is a syntax identifier: typeHierarchy requires real SCIP "
+                    "relationship data, which syntax declarations never carry."
+                ),
+                reason="syntax identifiers carry no SCIP relationship data",
+                recovery=f"jarvis reindex {repo} --scip",
+                freshness=freshness,
+            )
+        facts = syntax_index.read_snapshot_facts(conn)
+        if not facts.scip_types:
+            raise CapabilityUnavailableError(
+                capability="typeHierarchy",
+                message=(
+                    "typeHierarchy unavailable for this index: no symbol carries relationship "
+                    "data. This index was built with an unpatched `scip` (upstream through "
+                    "v0.9.0 never populates global_symbols.relationships — scip#464). "
+                    "setup.sh now installs a fixed build: re-run setup.sh, then "
+                    "`jarvis reindex <slug>`. Do not read this as 'this type has no "
+                    "supertypes' — it is missing data, not an empty hierarchy."
+                ),
+                reason="no SCIP relationship data in this snapshot",
+                recovery=f"jarvis reindex {repo}",
+                freshness=freshness,
+            )
+        resolved = self._resolved(conn, symbol)
+        supertypes = _type_hierarchy_supertypes(conn, resolved)
+        subtypes = _type_hierarchy_subtypes(conn, resolved)
+        return resolved, supertypes, subtypes, freshness
 
     def get_index_status(self, repo: str, repo_path: str | None = None) -> tuple[bool, FreshnessSnapshot]:
         """`repo_path` (optional): a local git working directory to compare
@@ -509,6 +829,7 @@ class QueryService:
                 stale=False,
                 freshness=Freshness.UNKNOWN,
                 checked_at=snapshot.checked_at,
+                generation=snapshot.generation,
             )
 
         stale = snapshot.commit != live_head
@@ -518,4 +839,5 @@ class QueryService:
             stale=stale,
             freshness=Freshness.STALE if stale else Freshness.FRESH,
             checked_at=snapshot.checked_at,
+            generation=snapshot.generation,
         )

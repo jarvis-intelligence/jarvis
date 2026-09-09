@@ -116,6 +116,18 @@ class CoverageCounts:
 
 
 @dataclass(frozen=True)
+class FileProviderCoverage:
+    """One file's `syntax_files` row: parse outcome plus the per-file
+    provider-coverage bits `finalize_snapshot` derives from real SCIP data
+    (spec TSI-05 "Coverage precedence") -- the routing signal
+    `query.py` needs to decide SCIP-vs-syntax per operation, per file."""
+
+    state: str
+    reason: str | None
+    scip_outline: bool
+    scip_definition: bool
+
+@dataclass(frozen=True)
 class SyntaxBuildReport:
     counts: CoverageCounts
     reused_files: int
@@ -358,15 +370,11 @@ CREATE TABLE jarvis_snapshot (
 """
 
 _SYNTAX_SYMBOL_COLUMNS = (
-    "symbol, name, qualified_name, kind, parent_symbol, "
+    "symbol, file_path, name, qualified_name, kind, parent_symbol, "
     "declaration_start_byte, declaration_end_byte, declaration_start_line, declaration_start_character, "
     "declaration_end_line, declaration_end_character, "
     "selection_start_byte, selection_end_byte, selection_start_line, selection_start_character, "
     "selection_end_line, selection_end_character"
-)
-
-_SYNTAX_SYMBOL_INSERT_COLUMNS = "symbol, file_path, " + _SYNTAX_SYMBOL_COLUMNS.replace(
-    "symbol, ", "", 1
 )
 
 
@@ -377,14 +385,29 @@ def _has_table(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def has_syntax_tables(conn: sqlite3.Connection) -> bool:
+    """Whether `conn` carries Task 3's namespaced syntax tables at all --
+    False for a legacy pre-syntax-baseline snapshot, which has no per-file
+    provider coverage data and must be served exactly as before (spec
+    TSI-05 "detect capabilities before issuing provider-specific SQL")."""
+    return _has_table(conn, "syntax_files")
+
+
+def has_scip_tables(conn: sqlite3.Connection) -> bool:
+    """Whether `conn` carries genuine converter-produced SCIP tables at
+    all -- a syntax-only snapshot (SCIP disabled/unsupported/failed) has
+    none, and provider-specific SQL against them must never run."""
+    return _has_scip_conversion_tables(conn)
+
+
 def _row_to_syntax_symbol(row: tuple) -> SyntaxSymbol:
     (
-        symbol, name, qualified_name, kind, parent_symbol,
+        symbol, file_path, name, qualified_name, kind, parent_symbol,
         d_sb, d_eb, d_sl, d_sc, d_el, d_ec,
         s_sb, s_eb, s_sl, s_sc, s_el, s_ec,
     ) = row
     return SyntaxSymbol(
-        symbol=symbol, name=name, qualified_name=qualified_name, kind=DescriptorKind(kind),
+        symbol=symbol, file_path=file_path, name=name, qualified_name=qualified_name, kind=DescriptorKind(kind),
         parent_symbol=parent_symbol,
         declaration=Span(d_sb, d_eb, d_sl, d_sc, d_el, d_ec),
         selection=Span(s_sb, s_eb, s_sl, s_sc, s_el, s_ec),
@@ -412,7 +435,7 @@ def _insert_parsed(dest: sqlite3.Connection, parsed: ParsedSyntax) -> None:
         (parsed.file_path, parsed.language, parsed.file_hash, parsed.parser_identity, parsed.state, parsed.reason),
     )
     dest.executemany(
-        f"INSERT INTO syntax_symbols ({_SYNTAX_SYMBOL_INSERT_COLUMNS}) "
+        f"INSERT INTO syntax_symbols ({_SYNTAX_SYMBOL_COLUMNS}) "
         f"VALUES ({', '.join('?' for _ in range(18))})",
         [
             (
@@ -444,10 +467,10 @@ def _copy_previous_rows(previous: sqlite3.Connection, dest: sqlite3.Connection, 
     )
     file_path = row[0]
     symbol_rows = previous.execute(
-        f"SELECT {_SYNTAX_SYMBOL_INSERT_COLUMNS} FROM syntax_symbols WHERE file_path = ?", (file_path,)
+        f"SELECT {_SYNTAX_SYMBOL_COLUMNS} FROM syntax_symbols WHERE file_path = ?", (file_path,)
     ).fetchall()
     dest.executemany(
-        f"INSERT INTO syntax_symbols ({_SYNTAX_SYMBOL_INSERT_COLUMNS}) "
+        f"INSERT INTO syntax_symbols ({_SYNTAX_SYMBOL_COLUMNS}) "
         f"VALUES ({', '.join('?' for _ in range(18))})",
         symbol_rows,
     )
@@ -800,3 +823,20 @@ def file_coverage(conn: sqlite3.Connection, path: str) -> tuple[str, str | None]
     if row is None:
         return "unknown", None
     return row[0], row[1]
+
+
+def file_provider_coverage(conn: sqlite3.Connection, path: str) -> FileProviderCoverage | None:
+    """One file's parse state plus its real per-file SCIP outline/
+    definition coverage bits, or `None` when `path` was never recorded in
+    `syntax_files` at all (untracked/uncaptured -- spec TSI-05 "not-indexed").
+    Callers must check `has_syntax_tables(conn)` first: a legacy snapshot
+    has no `syntax_files` table to query."""
+    row = conn.execute(
+        "SELECT state, reason, scip_outline, scip_definition FROM syntax_files WHERE file_path = ?", (path,)
+    ).fetchone()
+    if row is None:
+        return None
+    state, reason, scip_outline, scip_definition = row
+    return FileProviderCoverage(
+        state=state, reason=reason, scip_outline=bool(scip_outline), scip_definition=bool(scip_definition)
+    )
