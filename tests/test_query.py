@@ -13,13 +13,15 @@ from pathlib import Path
 
 import pytest
 
-from jarvis import config
+from jarvis import config, scip_pb2
 from jarvis.index_reader import IndexConnectionCache, IndexNotFoundError
-from jarvis.models import Freshness
+from jarvis.models import Freshness, Position
 from jarvis.query import CapabilityUnavailableError, QueryService
+from jarvis.scip_decoder import SymbolRoles
 from jarvis.symbols import AmbiguousSymbolError, SymbolNotFoundError
 from jarvis.syntax import ParserPool
 from jarvis.syntax_index import build_syntax_index, capture_sources, copy_syntax_tables, finalize_snapshot
+from tests.fixtures.scip_encoder import encode_occurrences
 from tests.fixtures.synthetic_index import (
     ANIMAL_SYMBOL,
     CLASS_SYMBOL,
@@ -306,6 +308,42 @@ def _init_repo(path: Path) -> None:
     subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
 
 
+MULTI_SYMBOL = "scip-typescript npm @toy/pkg 0.0.1 src/`multi.ts`/Multi#"
+
+
+def _add_two_location_scip_symbol(conn: sqlite3.Connection) -> None:
+    """Real-schema SCIP data the base fixture lacks: one symbol with TWO
+    genuine definition occurrences (chunk-encoded blobs plus matching
+    mentions rows, exactly what `convert.go` would emit for two
+    definitions of one symbol), so the combined candidate rule's
+    "multiple locations of one genuine SCIP symbol group as one
+    candidate" clause is exercised against the public API."""
+    doc_id = conn.execute("SELECT MAX(id) FROM documents").fetchone()[0] + 1
+    symbol_id = conn.execute("SELECT MAX(id) FROM global_symbols").fetchone()[0] + 1
+    conn.execute("INSERT INTO documents (id, relative_path) VALUES (?, ?)", (doc_id, "toy/multi.ts"))
+    conn.execute(
+        "INSERT INTO global_symbols (id, symbol, display_name) VALUES (?, ?, 'Multi')",
+        (symbol_id, MULTI_SYMBOL),
+    )
+    for chunk_index, (start_line, start_char, end_char) in enumerate(((0, 6, 11), (4, 6, 11))):
+        chunk_id = conn.execute("SELECT MAX(id) FROM chunks").fetchone()[0] + 1
+        occurrence = scip_pb2.Occurrence(
+            range=[start_line, start_char, end_char],
+            symbol=MULTI_SYMBOL,
+            symbol_roles=SymbolRoles.DEFINITION,
+        )
+        conn.execute(
+            "INSERT INTO chunks (id, document_id, chunk_index, start_line, end_line, occurrences) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chunk_id, doc_id, chunk_index, start_line, start_line, encode_occurrences([occurrence])),
+        )
+        conn.execute(
+            "INSERT INTO mentions (chunk_id, symbol_id, role) VALUES (?, ?, ?)",
+            (chunk_id, symbol_id, int(SymbolRoles.DEFINITION)),
+        )
+    conn.commit()
+
+
 def build_combined_snapshot(tmp_path: Path, project: str, repo: str, branch: str) -> Path:
     """One immutable snapshot combining the real SCIP fixture
     (`build_synthetic_index_db`) with genuine syntax rows for a real git
@@ -327,6 +365,11 @@ def build_combined_snapshot(tmp_path: Path, project: str, repo: str, branch: str
     (toy / "partial.py").write_text("def good():\n    pass\n\n\ndef bad(:\n    pass\n")
     (toy / "dup1.py").write_text("def dup():\n    pass\n")
     (toy / "dup2.py").write_text("def dup():\n    pass\n")
+    # A syntax declaration colliding with a genuine SCIP name (`greet`)
+    # from an uncovered file — the mixed-provider candidate case.
+    (toy / "extra.py").write_text("def greet():\n    pass\n")
+    # Two declarations deliberately in non-alphabetical source order.
+    (toy / "order.py").write_text("def zebra():\n    pass\n\n\ndef aardvark():\n    pass\n")
     subprocess.run(["git", "-C", str(repo_dir), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(repo_dir), "commit", "-qm", "toy"], check=True)
 
@@ -342,6 +385,7 @@ def build_combined_snapshot(tmp_path: Path, project: str, repo: str, branch: str
 
     conn = sqlite3.connect(db_path)
     try:
+        _add_two_location_scip_symbol(conn)
         copy_syntax_tables(syntax_db, conn)
         finalize_snapshot(
             conn, generation="gen-combined", commit_sha=COMMIT_SHA, published_at="2026-07-08T12:00:00Z",
@@ -527,6 +571,58 @@ def test_resolve_definition_bare_name_multiple_syntax_candidates_raises_ambiguou
     paths = {c.location.path for c in candidates}
     assert paths == {"toy/dup1.py", "toy/dup2.py"}
     assert all(c.source == "tree-sitter" for c in candidates)
+
+
+
+def test_resolve_definition_groups_multiple_scip_locations_into_one_candidate(
+    combined_service: QueryService,
+):
+    """One genuine SCIP symbol defined at two locations (toy/multi.ts
+    lines 0 and 4) must resolve as ONE candidate — never one candidate
+    per location, which would surface as a false ambiguity."""
+    resolved, locations, _ = combined_service.resolve_definition(REPO, "Multi")
+    assert resolved == MULTI_SYMBOL
+    assert len(locations) == 1
+    assert locations[0].source == "scip"
+    assert locations[0].path == "toy/multi.ts"
+    assert (locations[0].range.start.line, locations[0].range.start.character) == (0, 6)
+
+
+def test_resolve_definition_bare_name_mixes_scip_and_syntax_candidates_without_winner_picking(
+    combined_service: QueryService,
+):
+    """An uncovered-file syntax `greet` collides with the genuine SCIP
+    `greet` method: the combined rule must yield BOTH candidates as a
+    structured ambiguity — coverage-based exclusion (what this router
+    implements) and prohibited name-based winner-picking (SCIP always
+    wins) are indistinguishable to every single-provider test."""
+    with pytest.raises(AmbiguousSymbolError) as excinfo:
+        combined_service.resolve_definition(REPO, "greet")
+    candidates = excinfo.value.candidates
+    assert len(candidates) == 2
+    assert {c.source for c in candidates} == {"scip", "tree-sitter"}
+    scip_candidate = next(c for c in candidates if c.source == "scip")
+    assert scip_candidate.symbol == METHOD_SYMBOL
+    assert scip_candidate.location is not None and scip_candidate.location.path == DOC_GREETER
+    syntax_candidate = next(c for c in candidates if c.source == "tree-sitter")
+    assert syntax_candidate.location is not None and syntax_candidate.location.path == "toy/extra.py"
+
+
+def test_document_symbols_syntax_file_returns_source_order_with_zero_based_lines(
+    combined_service: QueryService,
+):
+    """order.py declares zebra before aardvark on purpose: the outline
+    must be in source order (never alphabetical), on zero-based lines —
+    a one-based regression would report lines 1 and 5."""
+    result = combined_service.get_document_symbols(REPO, "toy/order.py")
+    assert [e.displayName for e in result.entries] == ["zebra", "aardvark"]
+    zebra, aardvark = result.entries
+    assert zebra.source == "tree-sitter" and aardvark.source == "tree-sitter"
+    assert zebra.selectionRange.start == Position(line=0, character=4)
+    assert zebra.selectionRange.end.character == 9
+    assert aardvark.selectionRange.start == Position(line=4, character=4)
+    assert zebra.range.start.line == 0
+    assert aardvark.range.start.line == 4
 
 
 def test_find_references_raises_capability_error_when_scip_absent(syntax_only_service: QueryService):
