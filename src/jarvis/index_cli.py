@@ -1183,6 +1183,7 @@ def index_repo(
             previous = _open_previous_snapshot(slug, root)
             pool = ParserPool()
             prepared_chunks: dict = {}
+            chunk_capture_warned = False
             try:
                 sem_work = _prepare_semantic_stage(
                     repo_path, slug, root, semantic_include, manifest)
@@ -1196,15 +1197,32 @@ def index_repo(
                     # (spec TSI-09): chunker reuses this exact tree instead
                     # of reparsing. A stale entry is discarded by
                     # `_finish_semantic_stage`'s hash check, observably.
+                    # Optional-consumer isolation (plan TSI-09 callback
+                    # contract): a failure here is a semantic-stage problem
+                    # and must never abort the required syntax build --
+                    # broad on purpose. Warn once and leave the entry absent
+                    # so `finish_semantic`'s missing-entry fallback re-chunks
+                    # the file from its own bytes.
                     from jarvis import chunker as _chunker
 
-                    prepared_chunks[captured.file_path] = _chunker.chunk_file(
-                        captured.file_path,
-                        data.decode("utf-8", errors="replace"),
-                        captured.file_hash or "",
-                        captured.language or "",
-                        pool=pool, tree=tree,
-                    )
+                    try:
+                        prepared_chunks[captured.file_path] = _chunker.chunk_file(
+                            captured.file_path,
+                            data.decode("utf-8", errors="replace"),
+                            captured.file_hash or "",
+                            captured.language or "",
+                            pool=pool, tree=tree,
+                        )
+                    except Exception as exc:
+                        nonlocal chunk_capture_warned
+                        if not chunk_capture_warned:
+                            chunk_capture_warned = True
+                            print(
+                                f"warning: semantic chunk capture failed for "
+                                f"{captured.file_path} "
+                                f"({exc.__class__.__name__}: {exc}); affected "
+                                f"files will be re-chunked by the semantic stage",
+                                file=sys.stderr)
 
                 build_report = build_syntax_index(
                     syntax_db, manifest, pool=pool, previous=previous,

@@ -4008,3 +4008,66 @@ def test_partial_status_for_documented_extraction_gaps(tmp_path: Path, monkeypat
         assert entry.scip_state == "available"  # SCIP itself was fine
     finally:
         registry.close()
+
+
+def test_semantic_chunk_capture_failure_never_fails_the_run(
+        tmp_path: Path, monkeypatch, capsys):
+    """TSI-09 callback isolation: an exception raised by the optional
+    shared-parse chunk consumer is contained -- the run still publishes
+    the baseline, the failing entries are skipped (empty prepared_chunks
+    reach the finish half, whose missing-entry fallback re-chunks), and
+    exactly one stderr warning names the failure."""
+    from jarvis import chunker as chunker_mod
+    from jarvis import semantic as semantic_mod
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index") or step == "scip expt-convert":
+            raise AssertionError(f"SCIP must not run in this test: {step}")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli._run", _run)
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+
+    def _prepare(repo_path, slug, root, include_prefixes, manifest):
+        inputs = tuple(
+            semantic_mod.SemanticInput(
+                file_path=f.file_path,
+                source_path=f.source_path,
+                file_hash=f.file_hash or "h",
+                language=f.language or "python")
+            for f in manifest.files if (f.language or "") == "python")
+        if not inputs:
+            return None
+        return semantic_mod.SemanticWork(
+            slug=slug, model=object(), store=object(), identity=object(),
+            admitted=len(inputs), skipped=(), carried=(), inputs=inputs,
+            vector_by_hash={})
+
+    finish_seen: list[dict] = []
+
+    def _finish(work, prepared_chunks, pool):
+        finish_seen.append(dict(prepared_chunks))
+        return False  # the semantic stage's own outcome stays nonfatal
+
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", _prepare)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", _finish)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("chunker exploded")
+
+    monkeypatch.setattr(chunker_mod, "chunk_file", _boom)
+
+    # scip=False keeps the optional enrichment out of the way; the
+    # contract under test is syntax-build survival, not SCIP interplay.
+    slug = index_repo(repo_dir, slug="isolated", root=data_root, scip=False)
+
+    assert (config.index_dir(slug, data_root) / "current").is_file()
+    assert finish_seen == [{}], "failing entry must be skipped, not propagated"
+    err = capsys.readouterr().err
+    assert "chunk capture failed" in err
+    assert err.count("chunk capture failed") == 1  # once per run, not per file
