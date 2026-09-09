@@ -245,9 +245,10 @@ config tweak.
 
 **Pattern:** `syntax.py` owns the one finite map from internal language name to
 grammar source — `FACTORIES: dict[str, tuple[str, str, str]]`, mapping 17
-language names to 16 pinned `(distribution, module, factory)` triples
-(TypeScript and TSX are two factories from one distribution; PHP selects the
-PHP-with-tags factory). Repository-supplied grammar code is never instantiated.
+language names to 17 pinned `(distribution, module, factory)` triples over 16
+distributions (TypeScript and TSX are two factories from one distribution; PHP
+selects the PHP-with-tags factory). Repository-supplied grammar code is never
+instantiated.
 
 **Why:**
 - A finite, reviewed map is auditable: no grab-bag provider can silently

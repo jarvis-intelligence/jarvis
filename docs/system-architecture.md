@@ -58,8 +58,8 @@ writing up into the storage seam):
 ### The Staged Pipeline (index_cli.py)
 
 `index_repo()` runs seven stages in a fixed order (spec TSI-04 §5). Every stage
-has an explicit failure boundary; only stage-4 (Zoekt) and stage-6/7
-(storage/publication) failures fail the run.
+has an explicit failure boundary; stage-1 validation failures and stage-4
+(Zoekt) and stage-6/7 (storage/publication) failures fail the run.
 
 1. **Validation** — git input, slug/path ownership, persisted configuration.
    SCIP tooling is deliberately NOT validated here: it is optional enrichment,
