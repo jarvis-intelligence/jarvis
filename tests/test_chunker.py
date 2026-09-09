@@ -486,3 +486,31 @@ def test_supplied_tree_is_reused_without_a_second_parse(monkeypatch):
     chunks = chunk_file("greet.py", source, "hash", "python", tree=tree)
     assert [c.symbol_name for c in chunks] == ["greet"]
     assert chunks[0].content.endswith("return '你好'")
+
+
+def test_supplied_tree_produces_identical_chunks_to_standalone_parse():
+    """The building block behind semantic.py's shared-input path
+    (prepare_semantic/finish_semantic, Task 4): chunking from a tree built
+    once -- exactly as build_syntax_index's on_parsed callback hands it --
+    must match chunking that parses the same multibyte source from
+    scratch, byte for byte."""
+    from jarvis.syntax import ParserPool
+
+    source = f'''# café mañana 你好
+import os
+
+
+def alpha(x):
+    """{"p" * 1100}"""
+    return x + 1
+
+
+def beta(y):
+    """{"q" * 1100}"""
+    return y - 1
+'''
+    tree = ParserPool().parse("python", source.encode("utf-8"))
+    shared = chunk_file("mod.py", source, "fh", "python", tree=tree)
+    standalone = chunk_file("mod.py", source, "fh", "python")
+    assert shared == standalone
+    assert [c.symbol_name for c in shared] == ["alpha", "beta"]

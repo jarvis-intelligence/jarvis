@@ -12,15 +12,20 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from jarvis import config
 from jarvis.chunker import (
-    CONTENT_FORMAT, Chunk, _force_included, chunk_file, hash_file, iter_source_files,
-    language_for, oversized_file_reason, skip_reason,
+    CONTENT_FORMAT, Chunk, _DEF_NODE_TYPES, _force_included, chunk_file, hash_file,
+    iter_source_files, language_for, oversized_file_reason, skip_reason,
 )
 from jarvis.embeddings import EmbeddingModel, default_model
 from jarvis.search import ZoektHit, ZoektUnavailableError, search_zoekt
 from jarvis.symbol_search import SymbolHit, extract_tokens, search_symbols
+from jarvis.syntax import ParserPool
+
+if TYPE_CHECKING:
+    from jarvis.syntax_index import SourceManifest
 
 RRF_K = 60
 VECTOR_TOP_K = 30
@@ -253,9 +258,49 @@ class SemanticStore:
         db.drop_table(slug, ignore_missing=True)
 
 
-def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
-                   model: EmbeddingModel | None = None,
-                   include_prefixes: tuple[str, ...] = ()) -> SemanticIndexReport:
+@dataclass(frozen=True)
+class SemanticInput:
+    """One admitted file whose vectors are not yet known -- either it
+    changed since the previous index, or there was no previous index."""
+    file_path: str
+    source_path: Path
+    file_hash: str
+    language: str
+
+
+@dataclass(frozen=True)
+class SemanticWork:
+    """Everything `finish_semantic` needs to encode and publish one repo's
+    vectors, produced by `prepare_semantic`'s identity/admission pass.
+    `vector_by_hash` is the one internal mutable field: `finish_semantic`
+    fills it in with newly-encoded vectors as it goes. The dataclass
+    itself stays frozen -- every public field is set once here and never
+    reassigned."""
+    slug: str
+    model: EmbeddingModel
+    store: SemanticStore
+    identity: TableIdentity
+    admitted: int
+    skipped: tuple[SkippedFile, ...]
+    carried: tuple[dict, ...]
+    inputs: tuple[SemanticInput, ...]
+    vector_by_hash: dict[str, list[float]]
+
+
+def prepare_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
+                     model: EmbeddingModel | None = None,
+                     include_prefixes: tuple[str, ...] = (),
+                     manifest: SourceManifest | None = None) -> SemanticWork:
+    """Identity/previous-table setup and admission/hash decisions --
+    everything that does not require encoding. `model.identity()` and
+    `.prefixes()` never load model weights, so this is cheap to call even
+    when the model itself is unavailable. When `manifest` is given (the
+    syntax-capture manifest for this same repo), a file present in it is
+    read from its captured scratch bytes instead of the live worktree --
+    one read shared with syntax extraction rather than two. A file absent
+    from the manifest (semantic-only/untracked, or reached via
+    `include_prefixes` force-include) falls back to the live path exactly
+    as before."""
     model = model or default_model()
     store = SemanticStore(config.lancedb_dir(root))
     query_prefix, doc_prefix = model.prefixes()
@@ -267,8 +312,10 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
     vector_by_hash = {row["content_hash"]: row["vector"]
                       for rows in previous.values() for row in rows}
 
+    manifest_by_path = {f.file_path: f for f in manifest.files} if manifest is not None else {}
+
     carried: list[dict] = []
-    pending: list[Chunk] = []
+    inputs: list[SemanticInput] = []
     skipped: list[SkippedFile] = []
     admitted = 0
     for abs_path, rel_path in iter_source_files(repo_path, include_prefixes):
@@ -281,7 +328,15 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
             if reason is not None:
                 skipped.append(SkippedFile(rel_path, reason))
                 continue
-        data = abs_path.read_bytes()
+        captured = manifest_by_path.get(rel_path)
+        if captured is not None and captured.source_path is not None:
+            data = captured.source_path.read_bytes()
+            file_hash = captured.file_hash or hash_file(data)
+            source_path = captured.source_path
+        else:
+            data = abs_path.read_bytes()
+            file_hash = hash_file(data)
+            source_path = abs_path
         source = data.decode("utf-8", errors="replace")
         # Admission runs BEFORE the carry-forward hash check on purpose: a
         # generated file already in the table still hashes equal, so
@@ -292,21 +347,53 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
             skipped.append(SkippedFile(rel_path, reason))
             continue
         admitted += 1
-        file_hash = hash_file(data)
         old_rows = previous.get(rel_path)
         if old_rows and old_rows[0]["file_hash"] == file_hash:
             carried.extend(old_rows)  # unchanged file: no re-parse, no re-embed
             continue
         language = language_for(abs_path)
-        pending.extend(chunk_file(rel_path, source, file_hash, language))
+        inputs.append(SemanticInput(file_path=rel_path, source_path=source_path,
+                                    file_hash=file_hash, language=language))
+
+    return SemanticWork(slug=slug, model=model, store=store, identity=identity,
+                        admitted=admitted, skipped=tuple(skipped),
+                        carried=tuple(carried), inputs=tuple(inputs),
+                        vector_by_hash=vector_by_hash)
+
+
+def semantic_parse_paths(work: SemanticWork) -> frozenset[str]:
+    """Which of `work.inputs` benefit from a shared parse tree -- only
+    languages whose chunking actually walks AST def nodes. A fixed-window
+    language re-chunks from raw text regardless of a supplied tree, so
+    requesting one for it would cost a parse that chunk_file never uses."""
+    return frozenset(item.file_path for item in work.inputs
+                     if item.language in _DEF_NODE_TYPES)
+
+
+def finish_semantic(work: SemanticWork, *, prepared_chunks: dict[str, list[Chunk]],
+                    pool: ParserPool) -> SemanticIndexReport:
+    """Chunk (reusing any supplied parse) and encode `work.inputs`, then
+    publish the combined table. `prepared_chunks` is scoped to this one
+    run: a missing entry, or one whose file_hash no longer matches this
+    input (a stale/mismatched supplied chunk), falls back to chunking the
+    input's own bytes rather than borrowing another generation's chunks."""
+    pending: list[Chunk] = []
+    for item in work.inputs:
+        chunks = prepared_chunks.get(item.file_path)
+        if chunks is not None and any(c.file_hash != item.file_hash for c in chunks):
+            chunks = None
+        if chunks is None:
+            text = item.source_path.read_bytes().decode("utf-8", errors="replace")
+            chunks = chunk_file(item.file_path, text, item.file_hash, item.language, pool=pool)
+        pending.extend(chunks)
 
     unique = [c for c in {c.content_hash: c for c in pending}.values()
-              if c.content_hash not in vector_by_hash]
-    for chunk, vector in zip(unique, model.embed_texts([c.content for c in unique])):
-        vector_by_hash[chunk.content_hash] = vector
+              if c.content_hash not in work.vector_by_hash]
+    for chunk, vector in zip(unique, work.model.embed_texts([c.content for c in unique])):
+        work.vector_by_hash[chunk.content_hash] = vector
 
     try:
-        truncated = model.count_oversized([c.content for c in unique])
+        truncated = work.model.count_oversized([c.content for c in unique])
     except Exception:
         # Telemetry must never abort an otherwise-good index. index_cli
         # already wraps this whole call, so an exception here would throw
@@ -320,22 +407,34 @@ def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
         max=token_counts[-1],
     ) if token_counts else None
 
-    rows = carried + [
+    rows = list(work.carried) + [
         {"chunk_id": uuid.uuid4().hex, "content_hash": c.content_hash,
          "file_hash": c.file_hash, "file_path": c.file_path,
          "start_line": c.start_line, "end_line": c.end_line,
          "symbol_name": c.symbol_name or "", "language": c.language,
-         "content": c.content, "vector": vector_by_hash[c.content_hash],
-         "model_name": identity.model_name, "model_revision": identity.model_revision,
-         "query_prefix": identity.query_prefix, "doc_prefix": identity.doc_prefix,
-         "content_format": identity.content_format}
+         "content": c.content, "vector": work.vector_by_hash[c.content_hash],
+         "model_name": work.identity.model_name, "model_revision": work.identity.model_revision,
+         "query_prefix": work.identity.query_prefix, "doc_prefix": work.identity.doc_prefix,
+         "content_format": work.identity.content_format}
         for c in pending
     ]
-    store.overwrite(slug, rows)
-    return SemanticIndexReport(rows=len(rows), files=admitted,
-                               skipped=tuple(skipped), truncated=truncated,
+    work.store.overwrite(work.slug, rows)
+    return SemanticIndexReport(rows=len(rows), files=work.admitted,
+                               skipped=work.skipped, truncated=truncated,
                                token_stats=stats,
-                               prefix_warning=model.prefix_warning())
+                               prefix_warning=work.model.prefix_warning())
+
+
+def index_semantic(repo_path: Path, slug: str, *, root: Path | None = None,
+                   model: EmbeddingModel | None = None,
+                   include_prefixes: tuple[str, ...] = ()) -> SemanticIndexReport:
+    """Standalone entry point: prepare and finish in one call with no
+    supplied parse trees. Still needed by the interactive post-install
+    path, which has no syntax-capture manifest to share."""
+    work = prepare_semantic(repo_path, slug, root=root, model=model,
+                            include_prefixes=include_prefixes)
+    return finish_semantic(work, prepared_chunks={}, pool=ParserPool())
+
 
 
 def semantic_search(slug: str, query: str, limit: int = 10, *, root: Path | None = None,
