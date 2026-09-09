@@ -2,27 +2,107 @@
 
 <!-- mcp-name: io.github.jarvis-intelligence/jarvis -->
 
-**Local-first code intelligence for coding agents.** Precomputed SCIP navigation
-(go-to-definition, find-references, call hierarchy, document symbols), Zoekt
-lexical search, cross-repo blast radius, and semantic search — exposed as MCP
-tools to Claude Code, Cursor, or any MCP client.
+[![CI](https://github.com/jarvis-intelligence/jarvis/actions/workflows/test.yml/badge.svg)](https://github.com/jarvis-intelligence/jarvis/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/jarvis-mcp.svg)](https://pypi.org/project/jarvis-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/jarvis-mcp.svg)](https://pypi.org/project/jarvis-mcp/)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%20%2F%20%20Linux-lightgrey)](https://pypi.org/project/jarvis-mcp/)
+[![License: MIT](https://img.shields.io/pypi/l/jarvis-mcp.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-server-2e5aa8)](https://modelcontextprotocol.io)
 
-Runs as a single stdio process reading local SQLite files. **No server, no auth,
-no network, nothing leaves your machine.**
+**Local-first code intelligence for coding agents.** Precomputed SCIP navigation
+(go-to-definition, find-references, call/type hierarchy, document symbols), Zoekt
+lexical search, natural-language semantic search, and cross-repo blast radius —
+exposed as nine MCP tools for Claude Code, Cursor, or any MCP client.
 
 One indexing CLI writes up, one stdio runtime reads down — the storage seam in
-`~/.jarvis` is the only contract between them.
+`~/.jarvis` is the only contract between them. **No server, no auth, no network,
+nothing leaves your machine.**
 
-## Quick Start
+[What is it?](#what-is-it) · [How it works](#how-it-works) · [Quick start](#quick-start) · [MCP tools](#mcp-tools) · [Requirements and limits](#requirements-and-limits) · [Indexing](#indexing-a-repo) · [Configuration](#configuration) · [Documentation](#documentation)
+
+## What is it?
+
+**Without jarvis**, asking your agent *"where is `AuthService` used?"* means
+grepping for the string, re-reading whole files to filter false positives, and
+guessing at call sites — burning context window on **search** instead of
+**reasoning**.
+
+**With jarvis**, the agent calls `findReferences` and gets exact file-and-range
+occurrences from a precomputed SCIP index, `callHierarchy` for the call graph,
+and `semanticSearch` for questions like *"where is token refresh handled?"* in
+plain language.
+
+Think of it as `grep`, but matching **symbols, definitions, and references** —
+indexed once per repo, answered in milliseconds.
+
+- **Symbol-level navigation** over a precomputed [SCIP](https://scip-code.org/)
+  index — TypeScript/TSX, Python, Java/Kotlin, Swift — plus Zoekt lexical
+  search (10 more languages, search-only) and optional vector search, all from
+  local SQLite/LanceDB files.
+- **Read-only by design.** jarvis never edits code; it is the retrieval half.
+  If you want an agent that performs semantic renames and refactors, you want
+  [Serena](https://github.com/oraios/serena) — the two are complementary.
+
+jarvis is deliberately narrow: one language per repo, macOS/Linux only, and
+indexing is an explicit step — see [Requirements and limits](#requirements-and-limits)
+before installing.
+
+## How it works
+
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/jarvis-intelligence/jarvis/main/docs/assets/jarvis-architecture.png"
+    width="880"
+    alt="jarvis architecture: a writer CLI and an MCP reader inside the jarvis system boundary, both talking to four stores in the local data dir — the immutable SCIP index, Zoekt shards, LanceDB vectors, and the registry — plus the git repo and a lazily spawned zoekt-webserver">
+</p>
+
+1. **Index.** `jarvis index /repo` runs the language's SCIP indexer, converts
+   the result to SQLite, builds Zoekt shards (plus optional embeddings), and
+   publishes everything **atomically** into `~/.jarvis`.
+2. **Serve.** `jarvis-server` speaks MCP over stdio and exposes nine tools,
+   backed by lazy singletons; a `zoekt-webserver` is spawned on first search
+   and shared across processes via pidfile.
+3. **Ask.** Your agent calls tools. Every query opens the published
+   `index-<sha>.db` read-only (`mode=ro&immutable=1`) — the runtime path never
+   writes.
+
+**Storage is the seam.** The runtime half only ever reads down into it; the
+indexing half only ever writes up into it; the two share no other contract.
+Three load-bearing consequences:
+
+- **The runtime path never writes.** Index files are never mutated in place.
+- **Publishing is atomic.** A reindex writes a new versioned `.db`, populates
+  the package graph, and runs `zoekt-index` — only once *all* of that succeeds
+  does `os.replace` (POSIX `rename(2)`) flip the small `current` pointer. A
+  query already reading the old file keeps working; there is no downtime
+  window, and a failure anywhere leaves the previously published index live.
+- **The package graph is rebuilt, not accumulated.** Each reindex clears that
+  repo's own outgoing edges before recomputing them, so `blastRadius` always
+  reflects each repo's *last* index run.
+
+Layer-by-layer detail, the full index pipeline, and the semantic path are in
+[`docs/system-architecture.md`](docs/system-architecture.md). Core query/search
+logic is ported from an internal reference implementation; the enterprise shell
+(FastAPI, Postgres, hosted-git auth, Cloud Build) is dropped in favor of a
+single stdio process reading local SQLite files.
+
+## Quick start
+
+**1. Install the external indexer binaries** (scip, zoekt, per-language indexers):
 
 ```bash
-# 1. External indexer binaries (scip, zoekt, per-language indexers)
 curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
+```
 
-# 2. jarvis itself
+**2. Install jarvis:**
+
+```bash
 uv tool install jarvis-mcp
+```
 
-# 3. Index a repo (slug defaults to the directory name)
+**3. Index a repo** (slug defaults to the directory name):
+
+```bash
 jarvis index /path/to/your/repo
 ```
 
@@ -40,7 +120,7 @@ Any other MCP client (or Claude Code without the plugin) registers manually:
 claude mcp add jarvis --scope user -- jarvis-server
 ```
 
-That's it — ask your agent "find all references to `AuthService`" and it will
+That's it — ask your agent *"find all references to `AuthService`"* and it will
 call `findReferences` instead of grepping.
 
 <details>
@@ -70,6 +150,15 @@ claude mcp add jarvis --scope user -- uv --directory "$(pwd)" run jarvis-server
 ```
 </details>
 
+<details>
+<summary>Optional extras</summary>
+
+```bash
+uv tool install "jarvis-mcp[watch]"      # + watchdog, for `jarvis watch`
+uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers/tree-sitter, for semanticSearch
+```
+</details>
+
 ## MCP tools
 
 | Tool | What it does |
@@ -77,12 +166,12 @@ claude mcp add jarvis --scope user -- uv --directory "$(pwd)" run jarvis-server
 | `goToDefinition` | Resolve a symbol to its defining file and range |
 | `findReferences` | Every occurrence of a symbol across the indexed repo |
 | `callHierarchy` | Incoming/outgoing calls for a symbol |
+| `typeHierarchy` | Supertypes/subtypes — needs an index built with the bundled `scip`, see [limitations](#known-upstream-limitations) |
 | `documentSymbols` | Outline of every symbol defined in one file |
 | `searchCode` | Zoekt lexical/regex search, optionally filtered to one repo |
 | `semanticSearch` | Natural-language search — vector hits fused with Zoekt lexical hits and SCIP symbol-definition matches via reciprocal rank fusion |
 | `blastRadius` | Which *other* indexed repos depend on a package, up to 2 hops |
 | `getIndexStatus` | Published commit, freshness, staleness vs. a working tree |
-| `typeHierarchy` | Supertypes/subtypes — needs an index built with the bundled `scip`, see [limitations](#known-upstream-limitations) |
 
 Every nav tool takes `repo` (the slug from `jarvis index`) plus a
 tool-specific `symbol` or `path`. All tools report failure the same way — a
@@ -122,39 +211,6 @@ Read this before installing — jarvis is deliberately narrow.
 
   Options: `--only <name>` to install one dependency, `--force` to reinstall,
   `--help` for usage. Re-running is safe: anything already present is skipped.
-
-Optional extras:
-
-```bash
-uv tool install "jarvis-mcp[watch]"      # + watchdog, for `jarvis watch`
-uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers/tree-sitter, for semanticSearch
-```
-
-## Why it's built this way
-
-**Storage is the seam.** The runtime half only ever reads down into it; the
-indexing half only ever writes up into it; the two share no other contract:
-
-Three load-bearing consequences of that seam:
-
-- **The runtime path never writes.** Queries open a published `index-<sha>.db`
-  read-only (`mode=ro&immutable=1`). Index files are never mutated in place.
-- **Publishing is atomic.** A reindex writes a new versioned `.db`, populates
-  the package graph, and runs `zoekt-index` — only once *all* of that succeeds
-  does `os.replace` (POSIX `rename(2)`) flip the small `current` pointer. A
-  query already reading the old file keeps working; there is no downtime
-  window, and a failure anywhere leaves the previously published index live.
-- **The package graph is rebuilt, not accumulated.** Each reindex clears that
-  repo's own outgoing edges before recomputing them, so a removed dependency's
-  edge is retracted — `blastRadius` always reflects each repo's *last* index
-  run.
-
-Layer-by-layer detail, the full index pipeline, and the semantic path are in
-[`docs/system-architecture.md`](docs/system-architecture.md).
-
-Core query/search logic is ported from an internal reference implementation;
-the enterprise shell (FastAPI, Postgres, hosted-git auth, Cloud Build) is
-dropped in favor of a single stdio process reading local SQLite files.
 
 ## Indexing a repo
 
@@ -345,7 +401,7 @@ Install them, and register the MCP server, with:
 /plugin install jarvis@jarvis
 ```
 
-See [Quick Start](#quick-start) above for the manual registration alternative.
+See [Quick start](#quick-start) above for the manual registration alternative.
 
 ## Standards
 
