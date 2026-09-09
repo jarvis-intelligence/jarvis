@@ -12,8 +12,10 @@ without this, a single long function ships as one unbounded chunk, which
 can blow an embedding model's sequence-length/memory limits at encode
 time. Unparseable files fall back to fixed overlapping windows over the
 whole file.
-tree_sitter_language_pack is imported lazily so a base install never
-needs it.
+Grammar access goes through jarvis.syntax (spec TSI-09, "Shared chunking
+and component boundaries"): grammars are base dependencies, loaded lazily
+per indexing worker, and provider installation/ABI failures propagate as
+SyntaxDependencyError instead of degrading to fixed windows.
 """
 
 from __future__ import annotations
@@ -22,8 +24,13 @@ import hashlib
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from jarvis.config import IGNORED_DIRS
+from jarvis.syntax import ParserPool, slice_text
+
+if TYPE_CHECKING:
+    from tree_sitter import Tree
 
 MAX_TOKENS = 512
 MIN_TOKENS = 256
@@ -41,7 +48,9 @@ _EFFECTIVE_MAX_TOKENS = MAX_TOKENS - HEADER_RESERVE_TOKENS
 # stored vector and forces a full re-chunk. Needed because unchanged files are
 # matched by file_hash, not content_hash -- without a version, a file whose
 # bytes never changed would carry its old-format rows forward forever.
-CONTENT_FORMAT = 1
+# Bumped 1 -> 2: byte-safe Unicode slicing and node end-line boundaries
+# changed stored contents/ranges (spec TSI-09).
+CONTENT_FORMAT = 2
 
 # Admission policy for the semantic index (the "Layer 4" pre-index filter).
 # Generated and minified files are pure noise once embedded: they dominate
@@ -87,9 +96,6 @@ _DEF_NODE_TYPES: dict[str, set[str]] = {
 }
 _CLASS_NODE_TYPES = {"class_definition", "class_declaration",
                      "interface_declaration", "protocol_declaration"}
-# Kotlin's grammar attaches no "name" field to class_declaration/function_declaration
-# (verified by direct parse); the identifier is a plain positional child instead.
-_IDENTIFIER_NODE_TYPES = {"type_identifier", "simple_identifier"}
 
 
 @dataclass(frozen=True)
@@ -238,10 +244,17 @@ def _node_name(node) -> str | None:
             child.type in _CLASS_NODE_TYPES or "function" in child.type or "method" in child.type
         ):
             return _node_name(child)
-    for child in node.children:  # grammars with no "name" field (e.g. kotlin)
-        if child.type in _IDENTIFIER_NODE_TYPES:
-            return child.text.decode("utf-8", errors="replace")
     return None
+
+
+def _end_line(node) -> int:
+    """Inclusive one-based end line for a node whose byte range may or may
+    not swallow the trailing newline. Ending at column 0 means the range
+    closes just after that newline, so the last content line is
+    end_point.row itself (one-based there); any other end sits inside a
+    line, so the line is end_point.row + 1 (spec TSI-09)."""
+    row, column = node.end_point
+    return row if column == 0 else row + 1
 
 
 def _walk(node):
@@ -316,15 +329,19 @@ def _split_oversized_def(node, text: str, rel_path: str, language: str, file_has
             for chunk_text, start, end in _window_lines(lines, base_line)]
 
 
-def _split_class(node, source: str, rel_path: str, language: str,
+def _split_class(node, source: bytes, rel_path: str, language: str,
                  file_hash: str) -> list[Chunk]:
     """Methods of an oversized class become their own chunks, tagged with the
-    class name so _apply_headers can re-add that context later."""
+    class name so _apply_headers can re-add that context later. `source` is
+    the captured UTF-8 bytes: node offsets are byte offsets, never str
+    indices (spec TSI-03, "Coordinates and identity")."""
     class_name = _node_name(node)
     methods = [n for n in _walk(node)
                if n.type in _DEF_NODE_TYPES[language] and n.type not in _CLASS_NODE_TYPES]
     if not methods:
-        text = source[node.start_byte:node.end_byte]
+        text = slice_text(source, node.start_byte, node.end_byte)
+        if not text:
+            return []
         if _tokens(text) > _EFFECTIVE_MAX_TOKENS:
             # A methods-less class (e.g. constants-only) has no natural
             # sub-boundary either -- window it the same way an oversized
@@ -336,11 +353,13 @@ def _split_class(node, source: str, rel_path: str, language: str,
                 for piece, start, end in _window_lines(text.splitlines(), base_line)
             ]
         return [_make_chunk(rel_path, language, file_hash, text,
-                            node.start_point[0] + 1, node.end_point[0] + 1, class_name)]
+                            node.start_point[0] + 1, _end_line(node), class_name)]
     chunks: list[Chunk] = []
     for m in methods:
         symbol = _node_name(m)
-        text = source[m.start_byte:m.end_byte]
+        text = slice_text(source, m.start_byte, m.end_byte)
+        if not text:
+            continue
         if _tokens(text) > _EFFECTIVE_MAX_TOKENS:
             # A single method can itself exceed the cap -- window it the same
             # way an oversized top-level def would be.
@@ -352,7 +371,7 @@ def _split_class(node, source: str, rel_path: str, language: str,
             )
         else:
             chunks.append(_make_chunk(rel_path, language, file_hash, text,
-                                      m.start_point[0] + 1, m.end_point[0] + 1,
+                                      m.start_point[0] + 1, _end_line(m),
                                       symbol, class_name))
     return chunks
 
@@ -382,12 +401,20 @@ def _merge_small(chunks: list[Chunk]) -> list[Chunk]:
     return merged
 
 
-def chunk_file(rel_path: str, source: str, file_hash: str, language: str) -> list[Chunk]:
-    try:
-        from tree_sitter_language_pack import get_parser
-        tree = get_parser(language).parse(source.encode("utf-8"))
-    except Exception:
+def chunk_file(rel_path: str, source: str, file_hash: str, language: str, *,
+               tree: Tree | None = None,
+               pool: ParserPool | None = None) -> list[Chunk]:
+    """Chunk one source file at symbol boundaries. Uses the supplied parse
+    tree when given (never reparses), else the supplied pool, else a
+    pool of its own. A language with no `_DEF_NODE_TYPES` entry is windowed
+    without constructing a parser; a provider installation/ABI failure for
+    a mapped language propagates as SyntaxDependencyError rather than
+    degrading to windows (spec TSI-09)."""
+    if language not in _DEF_NODE_TYPES:
         return _apply_headers(_fixed_windows(rel_path, language, file_hash, source), rel_path)
+    raw = source.encode("utf-8")
+    if tree is None:
+        tree = (pool if pool is not None else ParserPool()).parse(language, raw)
 
     root = tree.root_node
     defs = [n for n in root.children if n.type in _DEF_NODE_TYPES.get(language, set())]
@@ -396,14 +423,16 @@ def chunk_file(rel_path: str, source: str, file_hash: str, language: str) -> lis
 
     chunks: list[Chunk] = []
     for node in defs:
-        text = source[node.start_byte:node.end_byte]
+        text = slice_text(raw, node.start_byte, node.end_byte)
+        if not text:
+            continue
         target = node.children[-1] if node.type == "decorated_definition" else node
         if target.type in _CLASS_NODE_TYPES and _tokens(text) > _EFFECTIVE_MAX_TOKENS:
-            chunks.extend(_split_class(target, source, rel_path, language, file_hash))
+            chunks.extend(_split_class(target, raw, rel_path, language, file_hash))
         elif _tokens(text) > _EFFECTIVE_MAX_TOKENS:
             chunks.extend(_split_oversized_def(node, text, rel_path, language, file_hash))
         else:
             chunks.append(_make_chunk(rel_path, language, file_hash, text,
-                                      node.start_point[0] + 1, node.end_point[0] + 1,
+                                      node.start_point[0] + 1, _end_line(node),
                                       _node_name(node)))
     return _apply_headers(_merge_small(chunks), rel_path)

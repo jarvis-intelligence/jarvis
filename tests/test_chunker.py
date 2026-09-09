@@ -1,7 +1,7 @@
-"""Unit tests for tree-sitter AST chunking. Requires the `semantic` extra."""
+"""Unit tests for tree-sitter AST chunking. Grammar providers are base
+dependencies, so these run on any install."""
 import pytest
 
-pytest.importorskip("tree_sitter_language_pack")
 
 from jarvis.chunker import (
     MAX_TOKENS, Chunk, chunk_file, hash_file, iter_source_files, language_for,
@@ -451,3 +451,38 @@ def test_existing_languages_still_chunk_by_symbol():
     source = "def greet(name):\n    return f'hi {name}'\n"
     chunks = chunk_file("demo.py", source, "filehash", "python")
     assert [c.symbol_name for c in chunks] == ["greet"]
+
+
+def test_missing_grammar_propagates_as_dependency_error(monkeypatch):
+    """A mapped language without its grammar is a required-stage failure:
+    SyntaxDependencyError propagates instead of degrading to fixed windows
+    like ordinary unparseable source would (spec TSI-09)."""
+    import sys
+
+    from jarvis.syntax import SyntaxDependencyError
+    from tests.conftest import BlockImportFinder
+
+    monkeypatch.delitem(sys.modules, "tree_sitter_python", raising=False)
+    monkeypatch.setattr(sys, "meta_path",
+                        [BlockImportFinder("tree_sitter_python"), *sys.meta_path])
+    with pytest.raises(SyntaxDependencyError):
+        chunk_file("m.py", "def f():\n    return 1\n", "fh", "python")
+
+
+def test_supplied_tree_is_reused_without_a_second_parse(monkeypatch):
+    """chunk_file(tree=...) must chunk from the given parse. Blocking fresh
+    grammar loading proves no reparse happens: a hidden reparse would raise
+    SyntaxDependencyError here rather than produce the expected chunks."""
+    import sys
+
+    from jarvis.syntax import ParserPool
+    from tests.conftest import BlockImportFinder
+
+    source = "def greet():\n    return '你好'\n"
+    tree = ParserPool().parse("python", source.encode("utf-8"))
+    monkeypatch.delitem(sys.modules, "tree_sitter_python", raising=False)
+    monkeypatch.setattr(sys, "meta_path",
+                        [BlockImportFinder("tree_sitter_python"), *sys.meta_path])
+    chunks = chunk_file("greet.py", source, "hash", "python", tree=tree)
+    assert [c.symbol_name for c in chunks] == ["greet"]
+    assert chunks[0].content.endswith("return '你好'")
