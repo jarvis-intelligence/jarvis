@@ -50,6 +50,13 @@ class IndexMetadata:
     branch: str
     commit_sha: str | None
     published_at: str | None  # ISO-8601 UTC string as written by publish.sh
+    # Additive (Task 3, spec TSI-04 section 5): the syntax snapshot's own
+    # generation id and source-manifest digest, when this metadata sibles
+    # a snapshot that carries `jarvis_snapshot`. Old metadata.json files
+    # (and any legacy publish.sh writer) never populate these keys, so
+    # they default to None -- old metadata stays fully readable.
+    generation: str | None = None
+    source_hash: str | None = None
 
 
 def _index_dir(filestore_root: str, project: str, repo: str, branch: str) -> Path:
@@ -95,6 +102,8 @@ def read_metadata(filestore_root: str, project: str, repo: str, branch: str, poi
         branch=raw.get("branch", branch),
         commit_sha=raw.get("commit_sha"),
         published_at=raw.get("published_at"),
+        generation=raw.get("generation"),
+        source_hash=raw.get("source_hash"),
     )
 
 
