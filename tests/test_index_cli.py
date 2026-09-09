@@ -4010,18 +4010,23 @@ def test_partial_status_for_documented_extraction_gaps(tmp_path: Path, monkeypat
         registry.close()
 
 
-def test_semantic_chunk_capture_failure_never_fails_the_run(
+def test_semantic_chunk_capture_failure_discards_semantic_work(
         tmp_path: Path, monkeypatch, capsys):
-    """TSI-09 callback isolation: an exception raised by the optional
-    shared-parse chunk consumer is contained -- the run still publishes
-    the baseline, the failing entries are skipped (empty prepared_chunks
-    reach the finish half, whose missing-entry fallback re-chunks), and
-    exactly one stderr warning names the failure."""
+    """TSI-09 callback isolation per plan :563: an exception raised by the
+    optional shared-parse chunk consumer is contained -- the required
+    baseline still publishes, collection STOPS at the first failure
+    (chunk_file is not retried for later files), `_finish_semantic_stage`
+    is never attempted (this run's semantic work is discarded, so the
+    previous LanceDB table stays live), and the semantic stage warns
+    exactly once."""
     from jarvis import chunker as chunker_mod
     from jarvis import semantic as semantic_mod
 
     repo_dir = tmp_path / "repo"
     shutil.copytree(FIXTURE_REPO, repo_dir)
+    # A second python file pins stop-at-first-failure: chunk_file must not
+    # be reached for any file after the first raise.
+    (repo_dir / "second.py").write_text("def spare():\n    return 2\n")
     _init_git_repo(repo_dir)
     data_root = tmp_path / "data"
 
@@ -4041,23 +4046,23 @@ def test_semantic_chunk_capture_failure_never_fails_the_run(
                 file_hash=f.file_hash or "h",
                 language=f.language or "python")
             for f in manifest.files if (f.language or "") == "python")
-        if not inputs:
-            return None
+        assert len(inputs) >= 2, "fixture must hold two python files to pin stop-collection"
         return semantic_mod.SemanticWork(
             slug=slug, model=object(), store=object(), identity=object(),
             admitted=len(inputs), skipped=(), carried=(), inputs=inputs,
             vector_by_hash={})
 
-    finish_seen: list[dict] = []
-
     def _finish(work, prepared_chunks, pool):
-        finish_seen.append(dict(prepared_chunks))
-        return False  # the semantic stage's own outcome stays nonfatal
+        raise AssertionError(
+            "semantic finish must never run after a capture failure (plan :563)")
 
     monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", _prepare)
     monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", _finish)
 
+    chunk_calls: list[str] = []
+
     def _boom(*args, **kwargs):
+        chunk_calls.append(args[0] if args else "?")
         raise RuntimeError("chunker exploded")
 
     monkeypatch.setattr(chunker_mod, "chunk_file", _boom)
@@ -4067,7 +4072,16 @@ def test_semantic_chunk_capture_failure_never_fails_the_run(
     slug = index_repo(repo_dir, slug="isolated", root=data_root, scip=False)
 
     assert (config.index_dir(slug, data_root) / "current").is_file()
-    assert finish_seen == [{}], "failing entry must be skipped, not propagated"
+    assert len(chunk_calls) == 1  # stopped at the first failure, no retry
     err = capsys.readouterr().err
-    assert "chunk capture failed" in err
-    assert err.count("chunk capture failed") == 1  # once per run, not per file
+    assert "semantic indexing failed (index still published)" in err
+    assert "chunker exploded" in err
+    assert err.count("semantic indexing failed") == 1  # once, at its stage
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "indexed"  # baseline unaffected
+        assert entry.semantic_indexed_at is None  # discarded, not marked
+    finally:
+        registry.close()

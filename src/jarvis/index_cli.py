@@ -1183,7 +1183,7 @@ def index_repo(
             previous = _open_previous_snapshot(slug, root)
             pool = ParserPool()
             prepared_chunks: dict = {}
-            chunk_capture_warned = False
+            chunk_capture_error: Exception | None = None
             try:
                 sem_work = _prepare_semantic_stage(
                     repo_path, slug, root, semantic_include, manifest)
@@ -1197,14 +1197,19 @@ def index_repo(
                     # (spec TSI-09): chunker reuses this exact tree instead
                     # of reparsing. A stale entry is discarded by
                     # `_finish_semantic_stage`'s hash check, observably.
-                    # Optional-consumer isolation (plan TSI-09 callback
+                    # Optional-consumer isolation (plan §"collect_chunks"
                     # contract): a failure here is a semantic-stage problem
                     # and must never abort the required syntax build --
-                    # broad on purpose. Warn once and leave the entry absent
-                    # so `finish_semantic`'s missing-entry fallback re-chunks
-                    # the file from its own bytes.
+                    # broad on purpose. Record the FIRST error and stop
+                    # collecting; stage 5 then discards this run's semantic
+                    # work (skipping `_finish_semantic_stage` entirely, so
+                    # the previous LanceDB table stays live) and warns once
+                    # at its stage.
+                    nonlocal chunk_capture_error
                     from jarvis import chunker as _chunker
 
+                    if chunk_capture_error is not None:
+                        return
                     try:
                         prepared_chunks[captured.file_path] = _chunker.chunk_file(
                             captured.file_path,
@@ -1214,15 +1219,7 @@ def index_repo(
                             pool=pool, tree=tree,
                         )
                     except Exception as exc:
-                        nonlocal chunk_capture_warned
-                        if not chunk_capture_warned:
-                            chunk_capture_warned = True
-                            print(
-                                f"warning: semantic chunk capture failed for "
-                                f"{captured.file_path} "
-                                f"({exc.__class__.__name__}: {exc}); affected "
-                                f"files will be re-chunked by the semantic stage",
-                                file=sys.stderr)
+                        chunk_capture_error = exc
 
                 build_report = build_syntax_index(
                     syntax_db, manifest, pool=pool, previous=previous,
@@ -1258,9 +1255,20 @@ def index_repo(
             _sweep_zoekt_tmp_orphans(slug, root)
 
             # -- Stage 5: optional semantic finish (nonfatal) ------------
+            # A chunk-capture consumer failure discards this run's semantic
+            # work entirely (plan :563): finish is never attempted, so the
+            # previous LanceDB table stays live, and the stage warns once.
             semantic_ok = False
             if sem_work is not None:
-                semantic_ok = _finish_semantic_stage(sem_work, prepared_chunks, pool)
+                if chunk_capture_error is not None:
+                    print(
+                        "warning: semantic indexing failed (index still "
+                        f"published): {chunk_capture_error}",
+                        file=sys.stderr,
+                    )
+                else:
+                    semantic_ok = _finish_semantic_stage(
+                        sem_work, prepared_chunks, pool)
 
             # -- Stage 6: revalidate sources + graph edges ---------------
             # Storage failures here are HARD failures (spec TSI-04: graph/
