@@ -39,7 +39,6 @@ from jarvis.registry import (
     Registry,
     RegisteredRepo,
     SCIP_STATES,
-    SEARCH_ONLY_STATUS,  # noqa: F401 — legacy read-compat constant (spec §12)
     ScipStageFields,
     UNKNOWN_LANGUAGE,
     origin_of,
@@ -1531,11 +1530,12 @@ def _cmd_list(args: argparse.Namespace) -> int:
             # degraded joins the ◐ family (search still answers) with the
             # failure cause riding that reason field. `partial` is a
             # success variant and stays in the ✓ family. The historical
-            # `search-only` status (removed by spec §12) keeps rendering ◐
-            # so legacy rows never print a misleading ✓.
+            # `search-only` status string (removed by spec §12; only
+            # un-migrated legacy rows could still carry it) keeps ◐ so it
+            # never prints a misleading ✓.
             if repo.status == "failed":
                 marker = "✗"
-            elif repo.status in (DEGRADED_STATUS, SEARCH_ONLY_STATUS):
+            elif repo.status in (DEGRADED_STATUS, "search-only"):
                 marker = "◐"
             else:
                 marker = "✓"
@@ -1921,6 +1921,10 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser = subparsers.add_parser("watch", help="watch a repo and debounce-reindex on change")
     watch_parser.add_argument("path", help="path to the repo to watch")
     watch_parser.add_argument("--slug", help="override the auto-derived slug")
+    watch_parser.add_argument(
+        "--scheme", help="Xcode scheme to build (Swift repos using xcodebuild with more than one scheme)"
+    )
+    watch_parser.add_argument("--debounce", type=float, default=5.0, help="quiet-period seconds (default: 5.0)")
     watch_parser.add_argument(
         "--language",
         choices=sorted(_INDEXER_BY_LANGUAGE),

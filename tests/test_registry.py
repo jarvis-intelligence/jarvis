@@ -210,10 +210,9 @@ def test_language_override_column_added_to_preexisting_db(tmp_path: Path):
 
 
 def test_upsert_round_trips_scip_enabled(tmp_path):
-    """The reversible user choice (spec TSI-06): default true; the legacy
-    `search_only=True` spelling — kept only as write-compat for the
-    pre-TSI MCP surface — maps to disabled and reads back through the
-    derived `search_only` view."""
+    """The reversible user choice (spec TSI-06): default true; an
+    explicit scip_enabled on the upsert is the only writer besides the
+    `set_scip_enabled` setter."""
     from jarvis.registry import Registry
 
     registry = Registry(tmp_path / "registry.db")
@@ -222,13 +221,11 @@ def test_upsert_round_trips_scip_enabled(tmp_path):
         entry = registry.get("r")
         assert entry is not None
         assert entry.scip_enabled is True
-        assert entry.search_only is False
 
-        registry.upsert("r", "/p", "java", None, "indexed", search_only=True)
+        registry.upsert("r", "/p", "java", None, "indexed", scip_enabled=False)
         entry = registry.get("r")
         assert entry is not None
         assert entry.scip_enabled is False
-        assert entry.search_only is True
 
         registry.upsert("r", "/p", "java", None, "indexed", scip_enabled=True)
         entry = registry.get("r")
@@ -404,6 +401,30 @@ def _entry(**overrides):
     return RegisteredRepo(**fields)
 
 
+def test_record_failure_creates_row_when_absent(tmp_path: Path):
+    """D-05: a hard-failed FIRST index must still leave a row via
+    record_failure's INSERT..ON CONFLICT -- nothing else can explain the
+    failure or make `jarvis reindex` resolve the slug."""
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        returned = registry.record_failure(
+            "mine", "/repos/mine", "python", ORIGIN_FAILED_HARD,
+            "zoekt-git-index failed", "zoekt-git-index failed:\nboom",
+        )
+        assert returned.status == "failed"
+        entry = registry.get("mine")
+        assert entry is not None
+        assert entry.status == "failed"
+        assert entry.status_origin == ORIGIN_FAILED_HARD
+        assert entry.status_reason == "zoekt-git-index failed"
+        assert entry.status_stderr == "zoekt-git-index failed:\nboom"
+        assert entry.commit_sha is None
+    finally:
+        registry.close()
+
+
 def test_record_failure_overwrites_existing_row_and_preserves_choices(tmp_path: Path):
     """D-06: a failed reindex fully overwrites the run facts (commit_sha
     NULL, status failed, fresh last_indexed, failure fields stamped) while
@@ -462,16 +483,6 @@ def test_recovery_for_derives_per_origin_commands():
         "jarvis reindex mine"
     )
     assert recovery_for(_entry(status="search-only", status_origin=ORIGIN_MANUAL)) == (
-        "jarvis forget mine && jarvis index /repos/mine"
-    )
-
-
-def test_recovery_for_treats_legacy_opt_out_as_manual():
-    """Pre-migration search-only rows read disabled; the legacy D-10
-    escape is valid for whichever path created them."""
-    from jarvis.registry import recovery_for
-
-    assert recovery_for(_entry(status="search-only", scip_enabled=False)) == (
         "jarvis forget mine && jarvis index /repos/mine"
     )
 
@@ -595,7 +606,7 @@ def test_upsert_round_trips_origin_parameters(tmp_path: Path):
     registry = Registry(tmp_path / "registry.db")
     try:
         returned = registry.upsert("mine", "/repos/mine", "python", "abc123",
-                                   "search-only", search_only=True,
+                                   "search-only",
                                    status_origin=ORIGIN_MANUAL)
         entry = registry.get("mine")
         assert entry is not None
@@ -622,7 +633,7 @@ def test_upsert_origin_parameters_replace_a_prior_failure_record(tmp_path: Path)
         registry.record_failure("mine", "/repos/mine", "java", ORIGIN_FAILED_HARD,
                                 "scip-java index failed", "scip-java index failed:\nboom")
         registry.upsert("mine", "/repos/mine", "java", "abc123", "search-only",
-                        search_only=True, status_origin=ORIGIN_SIGNATURE,
+                        status_origin=ORIGIN_SIGNATURE,
                         status_reason="matched signature explanation")
         entry = registry.get("mine")
         assert entry is not None

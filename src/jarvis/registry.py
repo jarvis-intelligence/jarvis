@@ -26,13 +26,6 @@ PARTIAL_STATUS = "partial"
 # Exit 0. Supersedes the Phase-3 opt-in FALL-01 degrade (spec §12).
 DEGRADED_STATUS = "degraded"
 
-# Historical value from the pre-baseline search-only design. No writer has
-# produced it since TSI-11 superseded `search_only` persistence, and the
-# migration remaps stored rows — it survives only as a read-compat constant
-# for server.py's legacy explanation branch (flagged for removal together
-# with that surface).
-SEARCH_ONLY_STATUS = "search-only"
-
 # Origin taxonomy for failed rows (D-01): stored as readable slugs so they
 # can be inspected straight from the sqlite3 CLI. `signature`/`manual`/
 # `fallback` are historical values from the search-only design; the
@@ -262,14 +255,6 @@ class RegisteredRepo:
     # offer; NULL = never asked. No tri-state — NULL reads False.
     semantic_declined: bool = False
 
-    @property
-    def search_only(self) -> bool:
-        """Legacy read-compat for server.py's pre-TSI surface: True exactly
-        when SCIP enrichment is disabled. `search_only` persistence was
-        superseded by reversible `scip_enabled` (spec §12); this derived
-        view dies together with server.py's search-only explanation branch."""
-        return not self.scip_enabled
-
 
 def _normalize_scip_state(raw: str | None) -> str | None:
     """Vocabulary validation at READ time (spec TSI-06): a value outside
@@ -312,19 +297,11 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
 
 
 def origin_of(entry: RegisteredRepo) -> str | None:
-    """Origin slug for a row at read time. Legacy search-only rows carried a
-    NULL origin -- manual vs signature is unrecoverable post-hoc, and the
-    manual escape was valid for whichever created the row, so disabled rows
-    without a stored origin read as 'manual'."""
-    if entry.status_origin is not None:
-        return entry.status_origin
-    # The read-time manual fallback applies to legacy SEARCH-ONLY rows
-    # only — a modern `--no-scip` row is a reversible choice on a healthy
-    # baseline, not a legacy opt-out, and must not inherit the dead D-10
-    # escape hatch as its recovery advice.
-    if entry.search_only and entry.status == SEARCH_ONLY_STATUS:
-        return ORIGIN_MANUAL
-    return None
+    """The row's stored origin slug, or None. Legacy search-only rows that
+    were never stamped keep a NULL origin: manual vs signature is
+    unrecoverable post-hoc, and `recovery_for`'s degraded branch already
+    gives migrated rows the right recovery without inventing one."""
+    return entry.status_origin
 
 
 def recovery_for(entry: RegisteredRepo) -> str | None:
@@ -413,7 +390,6 @@ class Registry:
         scheme_override: str | None = None,
         semantic_include: tuple[str, ...] = (),
         language_override: str | None = None,
-        search_only: bool = False,
         status_origin: str | None = None,
         status_reason: str | None = None,
         status_stderr: str | None = None,
@@ -427,9 +403,8 @@ class Registry:
 
         - `scip_enabled` is written on every upsert: the resolved choice
           for this run (explicit CLI flag, persisted choice, or the
-          default). `search_only=True` is the legacy write-compat spelling
-          of `scip_enabled=False` for the pre-TSI surface and is otherwise
-          ignored — no search-only state is persisted.
+          default). No search-only state exists anymore — the legacy
+          column was dropped by the TSI-08 migration.
         - `scip_stage` is the terminal stage decision. When None (the
           transitional `indexing` write, or legacy-shaped upserts) the four
           stage columns are left untouched, so a transition to `indexing`
@@ -442,7 +417,7 @@ class Registry:
             raise ValueError(
                 f"invalid scip_state {scip_stage.state!r} (expected one of {sorted(SCIP_STATES)})"
             )
-        resolved_scip_enabled = (not search_only) if scip_enabled is None else scip_enabled
+        resolved_scip_enabled = True if scip_enabled is None else scip_enabled
         last_indexed = datetime.now(UTC)
         conflict_success_fields = (
             # D-04: success paths leave status_origin/status_reason/stderr at

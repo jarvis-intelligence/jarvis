@@ -19,7 +19,7 @@ from jarvis import config, syntax, syntax_index
 from jarvis.graph import GraphStore, blast_radius
 from jarvis.index_reader import IndexNotFoundError
 from jarvis.query import CapabilityUnavailableError, FreshnessSnapshot, QueryService
-from jarvis.registry import DEGRADED_STATUS, SEARCH_ONLY_STATUS, RegisteredRepo, origin_of, recovery_for
+from jarvis.registry import DEGRADED_STATUS, RegisteredRepo, origin_of, recovery_for
 from jarvis.search import ZoektLifecycle, search_zoekt, zoekt_repo_documents
 from jarvis.symbols import AmbiguousSymbolError
 
@@ -192,13 +192,11 @@ def _capability_fields(repo: str, indexed: bool, freshness: FreshnessSnapshot | 
                 nav_reason = None
             nav_recovery = None
         else:
-            if entry is not None and entry.search_only:
-                nav_reason = entry.status_reason or "indexed search-only — no SCIP index"
-            elif entry is not None and entry.status == DEGRADED_STATUS:
-                # FALL-01: name the actual failure cause so a degraded
-                # publish is visible at the MCP surface; recovery_for's
-                # fallback branch supplies the self-heal verb below.
-                nav_reason = entry.status_reason or "indexer failure — degraded to search-only"
+            if entry is not None and entry.status == DEGRADED_STATUS:
+                # Spec TSI-06/§12: name the actual SCIP stage cause so a
+                # degraded publish is visible at the MCP surface;
+                # recovery_for supplies the `--scip`/reindex retry verb.
+                nav_reason = entry.status_reason or "baseline published — SCIP enrichment unavailable"
             elif entry is None:
                 nav_reason = "no published index"
             else:
@@ -292,8 +290,8 @@ def _capability_fields(repo: str, indexed: bool, freshness: FreshnessSnapshot | 
 
 
 def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
-    """Turn a missing SCIP index into an explanation when the repo was
-    deliberately published search-only. Every other error passes through
+    """Turn a missing SCIP index into an explanation when the registry
+    row explains the repo's state. Every other error passes through
     unchanged, so this never hides a real fault.
 
     D-14: when the registry row explains the state, the IndexNotFoundError
@@ -319,18 +317,12 @@ def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
             payload.update(_freshness_fields(exc.freshness))
         return payload
     if isinstance(exc, IndexNotFoundError):
+        # Spec §12: the old search-only explanation branch is gone — no
+        # writer produces that status, and capability facts come from the
+        # snapshot, not the row. The error passes through; rows that do
+        # explain themselves gain the structured keys below.
         entry = _registry_entry(repo)
-        if entry is not None and entry.status == SEARCH_ONLY_STATUS:
-            payload = {
-                "error": (
-                    f"{repo} is indexed search-only: it has no SCIP index, so navigation "
-                    "tools cannot answer. searchCode and semanticSearch do work on it. "
-                    "This happens when the language's indexer cannot build the repo — "
-                    "for example an Android/Gradle project."
-                )
-            }
-        else:
-            payload = {"error": str(exc)}
+        payload = {"error": str(exc)}
         origin = origin_of(entry) if entry is not None else None
         if origin is not None:
             payload["state"] = origin
@@ -554,8 +546,9 @@ def _zoekt_base_url_if_running() -> str | None:
 
 def _scip_conn_or_none(repo: str):
     """The symbol signal wants a SCIP index but must not require one — a
-    search-only repo (or any failure) degrades semanticSearch to the
-    vector+zoekt signals, mirroring _zoekt_base_url_or_none."""
+    repo without a published snapshot (or any failure) degrades
+    semanticSearch to the vector+zoekt signals, mirroring
+    _zoekt_base_url_or_none."""
     try:
         return _service().connection(repo)
     except Exception:

@@ -310,21 +310,6 @@ def test_scip_conn_or_none_returns_none_when_no_index(monkeypatch):
     assert server._scip_conn_or_none(REPO) is None
 
 
-def test_error_payload_explains_a_search_only_repo(tmp_path: Path, monkeypatch):
-    from jarvis import config, server
-    from jarvis.index_reader import IndexNotFoundError
-    from jarvis.registry import Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
-    finally:
-        registry.close()
-
-    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
-    assert "search-only" in payload["error"]
-    assert "searchCode" in payload["error"]
 
 
 def test_error_payload_passes_through_other_errors(tmp_path: Path, monkeypatch):
@@ -335,49 +320,8 @@ def test_error_payload_passes_through_other_errors(tmp_path: Path, monkeypatch):
     assert payload == {"error": "boom"}
 
 
-def test_error_payload_carries_state_cause_recovery_for_a_signature_search_only_repo(tmp_path: Path, monkeypatch):
-    """STAT-02 / D-14: on a search-only repo whose registry row explains the
-    state, nav-tool errors gain additive `state`/`cause`/`recovery` keys
-    alongside the unchanged prose `error` string."""
-    from jarvis.index_reader import IndexNotFoundError
-    from jarvis.registry import ORIGIN_SIGNATURE, Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only",
-                        search_only=True, status_origin=ORIGIN_SIGNATURE,
-                        status_reason="the build produced no SCIP shards")
-    finally:
-        registry.close()
-
-    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
-
-    assert "search-only" in payload["error"]  # prose explanation retained
-    assert "searchCode" in payload["error"]
-    assert payload["state"] == "signature"
-    assert payload["cause"] == "the build produced no SCIP shards"
-    assert payload["recovery"] == "jarvis reindex gorepo"
 
 
-def test_error_payload_reports_manual_state_for_a_legacy_search_only_row(tmp_path: Path, monkeypatch):
-    """Pre-migration rows carry a NULL origin; `origin_of`'s read-time
-    fallback reports them as 'manual' with the forget+index escape (SC5)."""
-    from jarvis.index_reader import IndexNotFoundError
-    from jarvis.registry import Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
-    finally:
-        registry.close()
-
-    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
-
-    assert payload["state"] == "manual"
-    assert payload["recovery"] == "jarvis forget gorepo && jarvis index /p"
-    assert "cause" not in payload  # NULL reason on legacy rows — no fabricated key
 
 
 def test_error_payload_without_a_registry_row_stays_bare(tmp_path: Path, monkeypatch):
@@ -394,13 +338,13 @@ def test_error_payload_does_not_mask_other_faults_on_a_degraded_repo(tmp_path: P
     """A query fault on a degraded repo is not a degradation explanation:
     structured keys apply to the IndexNotFoundError branch only, so a
     RuntimeError keeps its existing bare shape (no masking)."""
-    from jarvis.registry import ORIGIN_SIGNATURE, Registry
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
 
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     registry = Registry(config.data_dir() / "registry.db")
     try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only",
-                        search_only=True, status_origin=ORIGIN_SIGNATURE,
+        registry.upsert("gorepo", "/p", "unknown", "abc", DEGRADED_STATUS,
+                        status_origin=ORIGIN_FALLBACK,
                         status_reason="the build produced no SCIP shards")
     finally:
         registry.close()
@@ -419,7 +363,7 @@ def test_error_payload_degrades_to_bare_error_when_registry_is_unreadable(tmp_pa
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     registry = Registry(config.data_dir() / "registry.db")
     try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
+        registry.upsert("gorepo", "/p", "unknown", "abc", "indexed")
     finally:
         registry.close()
 
@@ -432,21 +376,6 @@ def test_error_payload_degrades_to_bare_error_when_registry_is_unreadable(tmp_pa
     assert payload == {"error": "no pointer"}
 
 
-def test_get_index_status_reports_search_only_status():
-    """The MCP tool itself (not QueryService.get_index_status directly)
-    must surface the registry's status so a caller can distinguish
-    "search-only" from "never indexed" -- both report indexed=False."""
-    from jarvis.registry import Registry
-
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
-    finally:
-        registry.close()
-
-    result = server.get_index_status(repo="gorepo")
-    assert result["status"] == "search-only"
-    assert result["indexed"] is False
 
 
 def test_get_index_status_reports_none_status_when_never_registered():
@@ -455,56 +384,8 @@ def test_get_index_status_reports_none_status_when_never_registered():
     assert result["indexed"] is False
 
 
-def test_get_index_status_reports_last_index_run_for_a_search_only_repo(tmp_path: Path, monkeypatch):
-    """D-15: the run layer reports what the last run did. `outcome` mirrors
-    the registry status string verbatim (resolution #3 — no new enum);
-    origin/reason/recovery are populated exactly when the row carries
-    them. Existing keys keep their values."""
-    from jarvis.registry import ORIGIN_SIGNATURE, Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only",
-                        search_only=True, status_origin=ORIGIN_SIGNATURE,
-                        status_reason="the build produced no SCIP shards")
-    finally:
-        registry.close()
-
-    result = server.get_index_status(repo="gorepo")
-
-    assert result["last_index_run"] == {
-        "outcome": "search-only",
-        "origin": "signature",
-        "reason": "the build produced no SCIP shards",
-        "recovery": "jarvis reindex gorepo",
-    }
-    assert result["repo"] == "gorepo"
-    assert result["status"] == "search-only"
-    assert result["indexed"] is False
 
 
-def test_get_index_status_navigation_unavailable_for_search_only_explains_and_recovers(tmp_path: Path, monkeypatch):
-    """STAT-03/SC4: an MCP client branches on
-    capabilities.navigation.available without parsing prose; when it is
-    False on a search-only repo, the reason names the state and the
-    recovery says how to escape it."""
-    from jarvis.registry import Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        # Legacy row: NULL origin and NULL reason exercise the default
-        # wording and the origin_of manual fallback in one shot.
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
-    finally:
-        registry.close()
-
-    nav = server.get_index_status(repo="gorepo")["capabilities"]["navigation"]
-
-    assert nav["available"] is False
-    assert nav["reason"] == "indexed search-only — no SCIP index"
-    assert nav["recovery"] == "jarvis forget gorepo && jarvis index /p"
 
 def test_get_index_status_navigation_unavailable_for_degraded_reports_cause_and_recovery(tmp_path: Path, monkeypatch):
     """FALL-01 (visibility): on a degraded repo, navigation is unavailable
@@ -545,7 +426,7 @@ def test_get_index_status_degraded_reason_defaults_when_status_reason_missing(tm
     nav = server.get_index_status(repo="gorepo")["capabilities"]["navigation"]
 
     assert nav["available"] is False
-    assert nav["reason"] == "indexer failure — degraded to search-only"
+    assert nav["reason"] == "baseline published — SCIP enrichment unavailable"
 
 
 def test_get_index_status_reports_last_index_run_for_a_degraded_repo(tmp_path: Path, monkeypatch):

@@ -2063,7 +2063,7 @@ def test_cmd_list_marks_repo_health_at_a_glance(tmp_path: Path, monkeypatch, cap
     import argparse
 
     from jarvis.index_cli import _cmd_list
-    from jarvis.registry import ORIGIN_FAILED_HARD, SEARCH_ONLY_STATUS, Registry
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
 
     data_root = tmp_path / "data"
     monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
@@ -2072,8 +2072,11 @@ def test_cmd_list_marks_repo_health_at_a_glance(tmp_path: Path, monkeypatch, cap
         registry.record_failure("broken", "/repos/broken", "python",
                                 ORIGIN_FAILED_HARD, "scip-python index failed",
                                 "scip-python index failed:\nboom")
+        # The historical status literal: no writer produces it anymore,
+        # but un-migrated legacy rows could still carry it and must not
+        # print a misleading checkmark.
         registry.upsert("legacy", "/repos/legacy", "unknown", None,
-                        SEARCH_ONLY_STATUS, search_only=True)
+                        "search-only")
         registry.upsert("healthy", "/repos/healthy", "python", "abc123", "indexed")
     finally:
         registry.close()
@@ -2162,7 +2165,7 @@ def test_cmd_list_keeps_search_only_rows_five_field_beside_degraded(tmp_path: Pa
     import argparse
 
     from jarvis.index_cli import _cmd_list
-    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, SEARCH_ONLY_STATUS, Registry
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
 
     data_root = tmp_path / "data"
     monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
@@ -2172,7 +2175,7 @@ def test_cmd_list_keeps_search_only_rows_five_field_beside_degraded(tmp_path: Pa
                         DEGRADED_STATUS, status_origin=ORIGIN_FALLBACK,
                         status_reason="scip-python crashed mid-build")
         registry.upsert("legacy", "/repos/legacy", "unknown", None,
-                        SEARCH_ONLY_STATUS, search_only=True)
+                        "search-only")
     finally:
         registry.close()
 
@@ -3083,7 +3086,7 @@ def test_cmd_watch_reindex_never_prompts_even_at_a_tty(
     rc = _drive_cmd_watch(
         cli, monkeypatch,
         {"path": str(repo_dir), "slug": None, "scheme": None,
-         "debounce": 0.0, "language": None, "fallback_search_only": None},
+         "debounce": 0.0, "language": None, "scip": None},
         sleep_results=itertools.chain(itertools.repeat(None, 5), [KeyboardInterrupt()]),
     )
     assert rc == 0
@@ -3941,7 +3944,9 @@ def test_cmd_watch_runs_every_event_and_marks_watch_caller(
 ):
     """The watch driver runs index_repo for every debounced event with
     watch=True and the tri-state scip flag — suppression is index_repo's
-    stage-level decision now, not the driver's (spec TSI-07)."""
+    stage-level decision now, not the driver's (spec TSI-07). Driven
+    through the REAL watch subparser so flag drift (--scheme/--debounce)
+    fails here instead of at user startup."""
     import itertools
     import jarvis.index_cli as cli
 
@@ -3957,19 +3962,23 @@ def test_cmd_watch_runs_every_event_and_marks_watch_caller(
         captured["scip"] = scip
         captured["watch"] = watch
         captured["slug"] = slug
+        captured["scheme"] = scheme
         raise KeyboardInterrupt
 
     monkeypatch.setattr(cli, "index_repo", fake_index_repo)
 
+    # Real subparser — a dropped or renamed flag cannot reach this test.
+    args = cli.build_parser().parse_args(
+        ["watch", str(repo_dir), "--debounce", "0", "--scheme", "MyScheme", "--no-scip"]
+    )
     rc = _drive_cmd_watch(
-        cli, monkeypatch,
-        {"path": str(repo_dir), "slug": None, "scheme": "s",
-         "debounce": 0.0, "language": "swift", "scip": False},
+        cli, monkeypatch, vars(args) | {"func": None, "command": "watch"},
         sleep_results=itertools.chain(itertools.repeat(None, 5), [KeyboardInterrupt()]),
     )
 
     assert rc == 0
-    assert captured == {"scip": False, "watch": True, "slug": repo_dir.name}
+    assert captured == {"scip": False, "watch": True, "slug": repo_dir.name,
+                        "scheme": "MyScheme"}
 
 
 def test_partial_status_for_documented_extraction_gaps(tmp_path: Path, monkeypatch):
