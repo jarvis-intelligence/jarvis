@@ -1,7 +1,7 @@
 # Tree-sitter Syntax Baseline for the Indexing Pipeline
 
 **Date:** 2026-09-09  
-**Status:** Design sections approved; written specification awaiting user review. Implementation has not started.  
+**Status:** Written specification approved by the user on 2026-09-09. Implementation planning authorized; implementation has not started.
 **Scope:** One build-free syntax baseline alongside optional SCIP enrichment, using the existing MCP tools.  
 **Decision prefix:** `TSI-01` through `TSI-12` below. Source comments implementing these decisions must reference this specification and the relevant named section.
 
