@@ -145,6 +145,16 @@ def _build(repo: Path, scratch_root: Path, db_path: Path, *, previous=None):
     return manifest, report, conn
 
 
+def _syntax_file_flags(conn: sqlite3.Connection, path: str) -> tuple[int, int]:
+    """(scip_outline, scip_definition) as actually stored for `path` --
+    used to assert the real derived flags, not just that `state` falls in
+    the DDL's CHECK vocabulary."""
+    row = conn.execute(
+        "SELECT scip_outline, scip_definition FROM syntax_files WHERE file_path = ?", (path,)
+    ).fetchone()
+    return (row[0], row[1])
+
+
 def test_build_syntax_index_extracts_declarations_for_supported_file(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
     repo = make_repo(tmp_path / "repo")
@@ -294,11 +304,12 @@ def test_copy_syntax_tables_and_finalize_snapshot_derive_real_coverage(tmp_path,
         assert facts.scip_types is True
         assert facts.syntax_counts is not None
 
-        # toy/greeter.ts carries a real SCIP definition (Greeter#) in the
-        # fixture -> its declarations must not surface as "uncovered".
-        state, reason = file_coverage(conn, "toy/greeter.ts")
-        assert state in {"parsed", "partial", "failed", "skipped", "unsupported"}
-        assert reason is None or isinstance(reason, str)
+        # toy/greeter.ts's Greeter class shares its path AND name with
+        # the fixture's real SCIP definition (CLASS_SYMBOL) -> both
+        # provider flags must actually be set, not just "some valid
+        # state" -- see test below for the full covered-vs-uncovered
+        # exclusion contract this enables.
+        assert _syntax_file_flags(conn, "toy/greeter.ts") == (1, 1)
 
         read_back = read_snapshot_facts(conn)
         assert read_back.generation == "gen-1"
@@ -310,14 +321,28 @@ def test_copy_syntax_tables_and_finalize_snapshot_derive_real_coverage(tmp_path,
         conn.close()
 
 
-def test_finalize_snapshot_marks_covered_symbol_and_uncovered_query_excludes_it(tmp_path, monkeypatch):
+def test_uncovered_only_excludes_symbol_with_real_scip_definition(tmp_path, monkeypatch):
+    """The safety-critical contract: a symbol with real SCIP definition
+    coverage must actually disappear from `find_syntax_symbols(...,
+    uncovered_only=True)`, while an otherwise-identical symbol (same
+    name) in a file with no SCIP coverage at all must not."""
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-    (repo / "greeter.py").write_text("def greet():\n    return 1\n")
+    # toy/greeter.ts's path and `Greeter` class name are chosen to exactly
+    # match the real SCIP fixture's CLASS_SYMBOL definition
+    # (build_synthetic_index_db's DOC_GREETER == "toy/greeter.ts").
+    covered_dir = repo / "toy"
+    covered_dir.mkdir()
+    (covered_dir / "greeter.ts").write_text("class Greeter {}\n")
+    # other/greeter.ts declares an identically-named Greeter class at a
+    # path the SCIP fixture never mentions -- it must stay uncovered.
+    uncovered_dir = repo / "other"
+    uncovered_dir.mkdir()
+    (uncovered_dir / "greeter.ts").write_text("class Greeter {}\n")
     subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "toy"], check=True)
 
@@ -330,18 +355,28 @@ def test_finalize_snapshot_marks_covered_symbol_and_uncovered_query_excludes_it(
     conn = sqlite3.connect(scip_db)
     try:
         copy_syntax_tables(syntax_db, conn)
-        # greeter.py's declaration never overlaps the fixture's real SCIP
-        # coverage (toy/greeter.ts) -- it must remain "uncovered".
         finalize_snapshot(
             conn, generation="gen-1", commit_sha="abc123", published_at="2026-09-09T00:00:00Z",
             source_hash=manifest.source_hash, scip_state="available",
         )
-        state, _reason = file_coverage(conn, "greeter.py")
-        assert state == "parsed"
-        matches = find_syntax_symbols(conn, "greet", uncovered_only=True)
-        assert [m.name for m in matches] == ["greet"]
-        matches_all = find_syntax_symbols(conn, "greet", uncovered_only=False)
-        assert [m.name for m in matches_all] == ["greet"]
+
+        # Flags: covered file gets both set, uncovered file gets neither.
+        assert _syntax_file_flags(conn, "toy/greeter.ts") == (1, 1)
+        assert _syntax_file_flags(conn, "other/greeter.ts") == (0, 0)
+
+        covered_symbol = file_symbols(conn, "toy/greeter.ts")[0]
+        uncovered_symbol = file_symbols(conn, "other/greeter.ts")[0]
+        assert covered_symbol.name == "Greeter"
+        assert uncovered_symbol.name == "Greeter"
+
+        # uncovered_only=False: both identically-named symbols are found.
+        all_matches = find_syntax_symbols(conn, "Greeter", uncovered_only=False)
+        assert {s.symbol for s in all_matches} == {covered_symbol.symbol, uncovered_symbol.symbol}
+
+        # uncovered_only=True: the real-SCIP-covered symbol is excluded;
+        # only the genuinely uncovered one remains.
+        filtered_matches = find_syntax_symbols(conn, "Greeter", uncovered_only=True)
+        assert {s.symbol for s in filtered_matches} == {uncovered_symbol.symbol}
     finally:
         conn.close()
 
