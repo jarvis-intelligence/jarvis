@@ -35,10 +35,12 @@ plain language.
 Think of it as `grep`, but matching **symbols, definitions, and references** —
 indexed once per repo, answered in milliseconds.
 
-- **Symbol-level navigation** over a precomputed [SCIP](https://scip-code.org/)
-  index — TypeScript/TSX, Python, Java/Kotlin, Swift — plus Zoekt lexical
-  search (10 more languages, search-only) and optional vector search, all from
-  local SQLite/LanceDB files.
+- **Declaration-level navigation without any indexer** — a Tree-sitter syntax
+  baseline (17 languages) is built on every `jarvis index` run from pip-installed
+  grammars, no compiler or build system required — on top of a precomputed
+  [SCIP](https://scip-code.org/) index for full precise navigation
+  (TypeScript/TSX, Python, Java/Kotlin, Swift), Zoekt lexical search, and
+  optional vector search, all from local SQLite/LanceDB files.
 - **Read-only by design.** jarvis never edits code; it is the retrieval half.
   If you want an agent that performs semantic renames and refactors, you want
   [Serena](https://github.com/oraios/serena) — the two are complementary.
@@ -54,17 +56,18 @@ before installing.
     src="https://raw.githubusercontent.com/jarvis-intelligence/jarvis/main/docs/assets/jarvis-architecture.png"
     width="880"
     alt="jarvis architecture: a writer CLI and an MCP reader inside the jarvis system boundary, both talking to four stores in the local data dir — the immutable SCIP index, Zoekt shards, LanceDB vectors, and the registry — plus the git repo and a lazily spawned zoekt-webserver">
-</p>
-
-1. **Index.** `jarvis index /repo` runs the language's SCIP indexer, converts
-   the result to SQLite, builds Zoekt shards (plus optional embeddings), and
-   publishes everything **atomically** into `~/.jarvis`.
+1. **Index.** `jarvis index /repo` builds a Tree-sitter syntax baseline for every
+   supported file first, then optionally runs the language's SCIP indexer and
+   converts the result to SQLite, builds Zoekt shards (plus optional
+   embeddings), and publishes everything **atomically** into `~/.jarvis` as one
+   immutable snapshot selected by a single `current` pointer. SCIP tooling
+   missing or failing degrades the run to exit-0 — the baseline still publishes.
 2. **Serve.** `jarvis-server` speaks MCP over stdio and exposes nine tools,
    backed by lazy singletons; a `zoekt-webserver` is spawned on first search
    and shared across processes via pidfile.
 3. **Ask.** Your agent calls tools. Every query opens the published
-   `index-<sha>.db` read-only (`mode=ro&immutable=1`) — the runtime path never
-   writes.
+   `index-<sha>-<generation>.db` read-only (`mode=ro&immutable=1`) — the
+   runtime path never writes.
 
 **Storage is the seam.** The runtime half only ever reads down into it; the
 indexing half only ever writes up into it; the two share no other contract.
@@ -88,7 +91,9 @@ single stdio process reading local SQLite files.
 
 ## Quick start
 
-**1. Install the external indexer binaries** (scip, zoekt, per-language indexers):
+**1. Install the external indexer binaries** (only needed for optional SCIP
+navigation and Zoekt search — the Tree-sitter syntax baseline ships inside the
+pip package and needs no external binary): scip, zoekt, per-language indexers:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
@@ -155,23 +160,28 @@ claude mcp add jarvis --scope user -- uv --directory "$(pwd)" run jarvis-server
 
 ```bash
 uv tool install "jarvis-mcp[watch]"      # + watchdog, for `jarvis watch`
-uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers/tree-sitter, for semanticSearch
+uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers, for semanticSearch
 ```
 </details>
 
 ## MCP tools
 
-| Tool | What it does |
-|------|--------------|
-| `goToDefinition` | Resolve a symbol to its defining file and range |
-| `findReferences` | Every occurrence of a symbol across the indexed repo |
-| `callHierarchy` | Incoming/outgoing calls for a symbol |
-| `typeHierarchy` | Supertypes/subtypes — needs an index built with the bundled `scip`, see [limitations](#known-upstream-limitations) |
-| `documentSymbols` | Outline of every symbol defined in one file |
+| `goToDefinition` | Resolve a symbol to its defining file and range — SCIP when the file has SCIP definition coverage, otherwise the syntax baseline's declaration; each location carries `source` (`"scip"` or `"tree-sitter"`) and `positionEncoding` |
+| `findReferences` | Every occurrence of a symbol across the indexed repo — **SCIP-only**: without usable SCIP occurrence data it returns `requiredCapability`/`reason`/`recovery`, never an empty list |
+| `callHierarchy` | Incoming/outgoing calls for a symbol — **SCIP-only** (same contract as `findReferences`) |
+| `typeHierarchy` | Supertypes/subtypes — **SCIP-only**; needs an index built with the bundled `scip`, see [limitations](#known-upstream-limitations) |
+| `documentSymbols` | Outline of every symbol defined in one file — routed per file: the SCIP outline when usable, otherwise Tree-sitter declarations; a syntax-served response carries a `coverage` object (parsed/partial/failed counts and reason) |
 | `searchCode` | Zoekt lexical/regex search, optionally filtered to one repo |
 | `semanticSearch` | Natural-language search — vector hits fused with Zoekt lexical hits and SCIP symbol-definition matches via reciprocal rank fusion |
 | `blastRadius` | Which *other* indexed repos depend on a package, up to 2 hops |
-| `getIndexStatus` | Published commit, freshness, staleness vs. a working tree |
+| `getIndexStatus` | Published commit, freshness, staleness vs. a working tree; `capabilities.tools` reports per-tool providers, `capabilities.syntax` reports extraction counts, and freshness names the snapshot `generation` |
+
+`documentSymbols`/`goToDefinition` are **per-file provider routed**: a file with
+usable SCIP coverage is answered by SCIP (full identifiers, references,
+hierarchies); a file without it is answered by the syntax baseline's real
+Tree-sitter declarations, whose opaque `syntax:` identifiers round-trip through
+`goToDefinition`. Bare or qualified names search both providers, so an
+ambiguous name returns combined candidates from both.
 
 Every nav tool takes `repo` (the slug from `jarvis index`) plus a
 tool-specific `symbol` or `path`. All tools report failure the same way — a
@@ -187,17 +197,24 @@ Read this before installing — jarvis is deliberately narrow.
   git-tracked files; a polyglot monorepo gets indexed as whichever language has
   the most files. Multi-language merge is out of scope. Override with
   `--language`.
-- **SCIP navigation (`goToDefinition`, `findReferences`, etc.) covers four
-  language families:** TypeScript/TSX, Python, Java/Kotlin, Swift.
-  `jarvis index --search-only` additionally covers Go, Ruby, Rust, C,
-  C++, C#, PHP, Scala, shell, and SQL for `searchCode`/`semanticSearch`
-  only — no navigation.
+- **Build-free syntax baseline covers 17 languages** — Python, JavaScript,
+  TypeScript/TSX, Java, Kotlin, Swift, Go, Ruby, Rust, C, C++, C#, PHP, Scala,
+  Bash, and SQL — served by `documentSymbols`/`goToDefinition` as declaration
+  outlines. Grammars are **pip-installed** dependencies of the package itself
+  (no external binary, no download at index time); a repo with none of these
+  still gets Zoekt search.
+- **Precise SCIP navigation (`findReferences`, `callHierarchy`,
+  `typeHierarchy`) covers four language families:** TypeScript/TSX, Python,
+  Java/Kotlin, Swift. These tools require real SCIP data — without it they
+  explain what is missing and how to retry rather than returning empty
+  results.
 - **Navigation and search only — jarvis never edits code.** If you want an
   agent that can perform semantic renames and refactors, you want
   [Serena](https://github.com/oraios/serena); the two are complementary.
 - **Indexing is a separate, explicit step.** Nothing is live-analyzed. Run
   `jarvis index` (or `jarvis watch`) to publish an index before querying.
-- **Requires external binaries** that `setup.sh` installs:
+- **Optional SCIP/Zoekt enrichment requires external binaries** that `setup.sh`
+  installs (the syntax baseline itself ships in the wheel):
 
   | Purpose | Binary | Source |
   |---------|--------|--------|
@@ -220,18 +237,21 @@ jarvis index /path/to/your/repo --slug foo # or pick one explicitly
 jarvis index /path/to/your/repo --scheme MyScheme # Swift repo with an ambiguous Xcode scheme
 jarvis index /path/to/your/repo --language python # force the language instead of detecting it from git-tracked files
 jarvis index /path/to/your/repo --semantic-include vendor/generated # force-include a path the generated-file filter would otherwise skip
-jarvis index /path/to/your/repo --search-only # skip SCIP indexing; publish only Zoekt + semantic search
-jarvis index /path/to/your/repo --fallback-search-only # opt in: if the indexer fails mid-build, degrade to search-only (status `degraded`) instead of failing; the next reindex retries the full build
+jarvis index /path/to/your/repo --no-scip   # skip optional SCIP enrichment; the syntax baseline + Zoekt still publish (exit 0)
+jarvis index /path/to/your/repo --scip      # re-enable SCIP enrichment (both flags persist per repo)
 jarvis list
 jarvis status foo
 jarvis reindex foo
 jarvis forget foo
 ```
 
-`status` (as shown by both `list` and `status`) is usually `indexed` or
-`failed`, but can also be `partial`: the index published real symbols but no
-navigable positions (an indexer/converter bug) — check the stderr warning
-from `jarvis index` for details.
+`status` (as shown by both `list` and `status`) is one of `indexing` (run in
+progress), `indexed` (baseline published, SCIP usable/disabled/unsupported),
+`partial` (published, but the snapshot has documented syntax/SCIP extraction
+gaps), `degraded` (published, but the enabled SCIP stage failed, is missing, or
+is watch-suppressed — exit 0, cause and `jarvis reindex <slug> --scip` recovery
+recorded), or `failed` (a required stage/storage/publication failure — nothing
+new published; the previous snapshot stays live).
 
 `--semantic-include` is repeatable — pass it once per path prefix to
 force-include several. Like `--scheme` and `--language`, once set there is no flag to clear
@@ -250,14 +270,16 @@ one language per index:
 Ties break by fixed priority (`.ts` → `.tsx` → `.py` → `.java` → `.kt` → `.swift`).
 `.git`, `node_modules`, `.venv`, `__pycache__`, `dist`, and `build` are
 skipped. Reading git rather than walking the filesystem is deliberate: a walk
-also counts gitignored scratch directories, which can outnumber a repo's own
-code and pick a language it doesn't use.
+  also counts gitignored scratch directories, which can outnumber a repo's own
+  code and pick a language it doesn't use.
 
-The pipeline then runs: chosen indexer → `scip expt-convert` → populate the
-package dependency graph (`packages`/`edges` tables in `registry.db`) →
-`zoekt-index` into `~/.jarvis/.zoekt` → copy to
-`~/.jarvis/scip/_/<slug>/_/index-<sha>.db` → atomic `current` pointer flip →
-registry update.
+The pipeline then runs in stages: capture tracked files and build the syntax
+baseline (scratch) → optional SCIP indexer + `scip expt-convert` (failures
+degrade to exit-0, never blocking the baseline) → `zoekt-index` into
+`~/.jarvis/.zoekt` (its failure fails the run) → optional semantic embeddings →
+graph edge update → publish everything as one immutable
+`~/.jarvis/scip/_/<slug>/_/index-<sha>-<generation>.db` snapshot → atomic
+`current` pointer flip → registry update → old snapshots retired.
 
 > The `scip/_/<slug>/_/` path shape reuses the vendored `IndexConnectionCache`'s
 > `(project, repo, branch)` 3-tuple layout with the outer two pinned to `_` (see
@@ -282,7 +304,13 @@ jarvis watch /path/to/your/repo             # debounce defaults to 5s
 jarvis watch /path/to/your/repo --debounce 3
 jarvis watch /path/to/your/repo --scheme MyScheme
 jarvis watch /path/to/your/repo --language python
+jarvis watch /path/to/your/repo --no-scip   # persist SCIP-off for this repo
 ```
+
+Each debounced reindex runs the same staged pipeline as `jarvis index`. When a
+SCIP attempt already failed at the current commit, a watch run skips only that
+SCIP retry (the syntax baseline still publishes); a new commit, an explicit
+`jarvis reindex`, or an explicit `--scip` retries enrichment.
 
 Runs in the foreground (not a daemon) using `watchdog` — install it with the
 `watch` extra. A burst of file changes (e.g. an editor's atomic save touching
@@ -356,17 +384,16 @@ as of v0.9.0, `scip-java`, `scip-kotlinc`), not jarvis bugs:
   `setup.sh`, currently `2.2.0`); its compiler-plugin API is internal and
   unstable even across patch releases, so any other version fails.
   Both cases are detected automatically from the indexer's own failure output
-  and degrade to `--search-only` rather than failing outright.
+  and degrade to exit-0 `degraded` (SCIP skipped, syntax baseline still
+  published) rather than failing outright.
 - **Maven-built Java repos need bash >= 4.4 on macOS** — scip-java's generated
   `javac` wrapper (`#!/usr/bin/env bash`, `set -eu`) expands
   `"${LAUNCHER_ARGS[@]}"` unguarded, which errors on bash < 4.4; macOS ships
   only 3.2, so the build dies at `default-compile` with
   `LAUNCHER_ARGS[@]: unbound variable`. `setup.sh` works around it by linking
-  `~/.jarvis/shims/bash` to a newer bash and putting that one directory
   first on `PATH` for the indexer. If no bash >= 4.4 is installed, indexing
-  fails with the remedy rather than degrading to `--search-only` — unlike the
-  two cases above, this one is fixable (`brew install bash`), and a persisted
-  `--search-only` cannot be un-set.
+  fails with the remedy rather than degrading — unlike the two cases above,
+  this one is fixable (`brew install bash`).
 
 ## Configuration
 
@@ -377,10 +404,9 @@ JARVIS_DATA_DIR=/custom/path jarvis index /path/to/repo
 
 **Environment variables:**
 - `JARVIS_DATA_DIR` — override default `~/.jarvis` for all indexes and registry
-- `JARVIS_FALLBACK_SEARCH_ONLY` — default the opt-in degrade-to-search-only fallback
-  on for repos indexed without an explicit `--fallback-search-only` /
-  `--no-fallback-search-only` flag. Accepts `1`/`true`/`yes`/`on`
-  (case-insensitive); any other value is treated as off with a one-line warning.
+- `JARVIS_FALLBACK_SEARCH_ONLY` — **removed.** No longer read; jarvis prints a
+  one-line note if your shell still exports it. Replaced by the reversible
+  persisted `--scip`/`--no-scip` flags on `index`/`reindex`/`watch`.
 - `JARVIS_EMBEDDING_QUERY_PREFIX` / `JARVIS_EMBEDDING_DOC_PREFIX` — override the
   query/document instruction prefix applied before embedding. Auto-detected for bge-m3,
   e5, and nomic-embed; set these if using a different model that needs one — `semanticSearch`

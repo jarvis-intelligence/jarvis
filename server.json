@@ -6,12 +6,12 @@
     "url": "https://github.com/jarvis-intelligence/jarvis",
     "source": "github"
   },
-  "version": "0.7.2",
+  "version": "0.8.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "jarvis-mcp",
-      "version": "0.7.2",
+      "version": "0.8.0",
       "transport": {
         "type": "stdio"
       }

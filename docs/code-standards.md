@@ -157,24 +157,32 @@ def goToDefinition(repo: str, path: str, line: int, character: int):
 
 ---
 
-### 8. Optional Dependency Extras
+### 8. Base Grammar Dependencies and Optional Extras
 
-**Pattern:** Heavier, optional capabilities are gated behind `pyproject.toml` extras
-(`[project.optional-dependencies]`) rather than always-required dependencies. Two extras exist
-today:
+**Pattern:** The Tree-sitter runtime and every curated grammar package are
+**base dependencies** (`pyproject.toml` `[project.dependencies]`, spec TSI-02);
+heavier, truly optional capabilities stay gated behind
+`[project.optional-dependencies]`. Two extras exist today:
 - `watch = ["watchdog>=4.0"]` — needed for `jarvis watch`
-- `semantic = ["lancedb>=0.20", "sentence-transformers>=3.0", "tree-sitter>=0.25", "tree-sitter-language-pack>=0.1"]` — needed for `semanticSearch`
+- `semantic = ["lancedb>=0.20", "sentence-transformers>=3.0"]` — needed for `semanticSearch`
+
+(The grammar packages moved from the old `tree-sitter-language-pack`-based
+semantic extra to base dependencies: the syntax baseline must parse offline
+from prebuilt abi3 wheels with no extra installed and no download at index
+time.)
 
 **Why:**
-- A base `uv sync` install stays small and has no ML/native-binding dependencies
+- A base install has no ML/native-binding dependencies beyond the grammar wheels
 - Every import of an extra's packages is deferred inside the function that needs it, never at
   module top-level — so a base install can still import every module in `src/jarvis/`
   without the extra installed
 - Missing an extra fails narrowly and legibly at the point of use (e.g. `semantic.py` raises
   `SemanticExtraMissingError`, which `index_cli.py`'s semantic stage catches and skips with a
-  one-line hint) rather than crashing the whole CLI or server at import time
+  one-line hint); by contrast, a missing *base* grammar raises `SyntaxDependencyError`
+  immediately and loudly, because a broken base install is a packaging bug, not an optional
+  capability
 
-**Convention:** Install with `uv sync --extra <name>`. New optional capabilities should follow
+**Convention:** Install extras with `uv sync --extra <name>`. New optional capabilities should follow
 this same shape: add the extra, defer its imports, and fail with a specific, catchable exception
 when it's missing.
 
@@ -233,6 +241,73 @@ itself (`table_identity()`), not inferred from current config.
 embedding model, its prefixes, or `CONTENT_FORMAT` is a data-migration event (full reindex), not a
 config tweak.
 
+### 13. Curated Grammar Provider
+
+**Pattern:** `syntax.py` owns the one finite map from internal language name to
+grammar source — `FACTORIES: dict[str, tuple[str, str, str]]`, mapping 17
+language names to 16 pinned `(distribution, module, factory)` triples
+(TypeScript and TSX are two factories from one distribution; PHP selects the
+PHP-with-tags factory). Repository-supplied grammar code is never instantiated.
+
+**Why:**
+- A finite, reviewed map is auditable: no grab-bag provider can silently
+  resolve a language to an unexpected grammar or fetch one at runtime
+- Grammar identity is pinned per distribution, so stored rows can be keyed on
+  a `grammar_identity()` digest (extractor version + runtime version + grammar
+  versions) and re-extracted exactly when the extractor changes
+
+**Conventions:**
+- Lazy imports: `tree_sitter` types are `TYPE_CHECKING`-only; grammar modules
+  load inside `ParserPool` on first use per worker, never at module import
+- Frozen dataclasses for all extracted results (`Span`, `SyntaxSymbol`,
+  `ParsedSyntax`) — same rule as every other result type in the codebase
+- Byte-span slicing: node offsets are byte offsets into the captured UTF-8
+  bytes, and all text leaves the module through `slice_text(source, start,
+  end)` — never `str` indexing, which would corrupt multibyte positions
+- Extraction walks the tree with an explicit stack of sibling-iteration
+  frames, never Python recursion — a deeply nested file cannot exhaust the
+  interpreter's recursion limit
+
+### 14. Staged Publication
+
+**Pattern:** `index_repo()` runs fixed stages — validate, syntax baseline,
+optional SCIP, Zoekt, optional semantic, revalidate + graph, then
+**publish → record → retire** in that strict order — and each stage owns its
+failure boundary. Expected SCIP-stage failures *degrade* (exit-0 `degraded`,
+cause recorded); Zoekt/storage/publication failures fail the run with nothing
+new published.
+
+**Why:**
+- The optional enrichment can never block the build-free baseline (spec TSI-01)
+- Ordering publish before record before cleanup means a crash at any point
+  leaves either the old or the new snapshot live — never an orphaned cleanup
+  or a destroyed live snapshot
+- One immutable `index-<sha>-<generation>.db` per run, selected by one
+  `current` pointer, keeps readers generation-consistent: a single tool
+  operation cannot mix tables from two generations
+
+**Convention:** Scratch build → unique final name (`uuid4().hex` generation)
+→ write-temp-then-rename pointer flip → registry terminal write → retire
+superseded snapshots (best-effort, warns only). Never mutate a published
+database; never derive cleanup targets from anything but the filenames being
+deleted.
+
+### 15. Registry Status Vocabulary
+
+**Pattern:** Status strings are module-level constants in `registry.py`
+(`INDEXING_STATUS`, `PARTIAL_STATUS`, `DEGRADED_STATUS`, plus the `SCIP_STATES`
+frozenset), not inline literals. The CLI writer and the MCP reader import the
+same constants, so the vocabularies cannot drift.
+
+**Why:**
+- `jarvis status` output and `getIndexStatus` payloads must spell states
+  identically; duplicated string literals drifted exactly this way before
+- A frozen vocabulary makes read-time normalization honest: an unrecognized
+  persisted `scip_state` reads back as `unknown` instead of propagating
+
+**Convention:** Add a new state by extending the constant in `registry.py`
+first, then the readers — never by writing a new literal at a call site.
+
 ---
 
 ## Code Organization
@@ -273,9 +348,24 @@ so `typeHierarchy` is empty on real indexes (upstream issue scip-code/scip#464).
 
 ---
 
-### Error Messages
+## CLI Design
 
-**Pattern:** Include context (repo slug, file path, query) in error messages; avoid generic "error occurred."
+### Command Structure
+
+All commands are under `jarvis`:
+
+```bash
+jarvis index <path> [--slug name] [--scheme name] [--language name] [--semantic-include path] [--scip | --no-scip]
+jarvis list
+jarvis status <slug>
+jarvis reindex <slug> [--scip | --no-scip]
+jarvis forget <slug>
+jarvis watch <path> [--slug name] [--scheme name] [--language name] [--semantic-include path] [--debounce 5] [--scip | --no-scip]
+```
+
+### Error Handling
+
+**Pattern:** CLI errors print to stderr with context (which repo failed, why) and exit non-zero.
 
 **Examples:**
 - `f"Repo {repo} not indexed"`
