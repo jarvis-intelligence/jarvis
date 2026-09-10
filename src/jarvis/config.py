@@ -40,6 +40,27 @@ def swift_cache_dir(slug: str, root: Path | None = None) -> Path:
     return data_dir(root) / "cache" / "scip-swift" / slug
 
 
+def index_lockfile(slug: str, root: Path | None = None) -> Path:
+    """Per-slug build lock. Held (via `flock`) for the whole duration of one
+    index run by whichever process is writing — CLI, watch, or an
+    MCP-spawned child alike. Never unlinked while jarvis is running: removing
+    a file another waiter still holds open is the classic flock footgun."""
+    return data_dir(root) / f"index-{slug}.lock"
+
+
+def index_launchfile(slug: str, root: Path | None = None) -> Path:
+    """Single-writer record of an index run that has been spawned but has not
+    yet acquired the build lock. Written once, before spawn, by the process
+    doing the spawning; never mutated, and never touched by the child."""
+    return data_dir(root) / f"index-{slug}.launch"
+
+
+def index_log(slug: str, root: Path | None = None) -> Path:
+    """stderr of an MCP-spawned index child. The child must never inherit the
+    server's stdio — that stream is the MCP transport."""
+    return data_dir(root) / f"index-{slug}.log"
+
+
 def shim_dir(root: Path | None = None) -> Path:
     """Directory holding shims for system tools whose default version is too
     old for an indexer to use.
