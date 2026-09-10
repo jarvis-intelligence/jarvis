@@ -337,6 +337,46 @@ def test_job_state_none_when_nothing_in_flight(tmp_path, monkeypatch):
     assert jobs.job_state("app", indexed=False, registry_status=None) is None
 
 
+def _exited_but_unreaped_child() -> subprocess.Popen:
+    """A real child that has exited and has NEVER been polled.
+
+    Waiting must not reap: `poll()` calls waitpid, which both reaps and sets
+    returncode, so any spin on `poll()` destroys the very state under test.
+    Worse, a later `poll()` on an already-reaped handle returns 0 -- CPython
+    swallows ECHILD as exit 0 -- so a test that spins on `poll()` and then
+    resets `returncode` asserts against a fabricated 0, not the real code.
+    Reading the child's stdout to EOF proves it exited (the pipe closes when
+    it does) without touching waitpid.
+    """
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdout.write('up'); "
+                               "sys.stdout.flush(); raise SystemExit(3)"],
+        stdout=subprocess.PIPE,
+    )
+    assert child.stdout.read() == b"up"  # EOF => process gone, still unreaped
+    child.stdout.close()
+    assert child.returncode is None  # never polled
+    return child
+
+
+def test_job_state_reaps_an_exited_unpolled_child(tmp_path, monkeypatch):
+    """The zombie regression, at the level that owns the reaping.
+    `start_new_session=True` does not double-fork, so an exited child stays
+    our unreaped zombie whose pid still answers `os.kill(pid, 0)`.
+    Observation must reap to learn the truth."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    jobs.write_launch_record("app", Path("/tmp/app.log"))
+    child = _exited_but_unreaped_child()
+    try:
+        assert os.kill(child.pid, 0) is None  # a zombie still "exists"
+        state = jobs.job_state("app", indexed=False, registry_status=None,
+                               child=child)
+        assert state.state == "failed-at-startup"
+        assert state.exit_code == 3
+    finally:
+        child.wait()
+
+
 def test_clear_job_files_preserves_the_lock_inode(tmp_path, monkeypatch):
     """Unlinking a lock another process may have opened but not yet flocked
     lets the next writer lock a fresh inode instead -- two writers, one repo.
@@ -1858,26 +1898,29 @@ def test_status_reports_starting_immediately_after_spawn(tmp_path, monkeypatch):
 
 def test_status_reports_failed_at_startup_for_an_unreaped_child(tmp_path, monkeypatch):
     """A real child that exited but was never waited on is a zombie whose pid
-    still answers os.kill(pid, 0). Observation must reap instead, or the loop
-    sits in 'starting' forever. Cannot be caught with a mocked Popen."""
-    import subprocess
-    import sys
+    still answers os.kill(pid, 0). Observation must reap instead. Cannot be
+    caught with a mocked Popen.
 
+    Reuses `_exited_but_unreaped_child` from `tests/test_jobs.py` (import it)
+    rather than spinning on `poll()`: spinning reaps, and a subsequent
+    `poll()` on the reaped handle returns 0 from swallowed ECHILD, so the
+    exit code asserted below would be fabricated."""
     from jarvis import config, jobs, server
+    from tests.test_jobs import _exited_but_unreaped_child
 
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
     jobs.write_launch_record("app", config.index_log("app"))
-    child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(3)"])
-    while child.poll() is None:  # let it actually exit, but do not reap it yet
-        pass
-    child.returncode = None  # simulate a not-yet-reaped handle
+    child = _exited_but_unreaped_child()
     monkeypatch.setitem(server._launched, "app", child)
     monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
 
-    result = server.get_index_status(repo="app")
-    assert result["indexing"]["state"] == "failed-at-startup"
-    assert result["indexing"]["exitCode"] == 3
-    assert result["indexing"]["log"].endswith("index-app.log")
+    try:
+        result = server.get_index_status(repo="app")
+        assert result["indexing"]["state"] == "failed-at-startup"
+        assert result["indexing"]["exitCode"] == 3
+        assert result["indexing"]["log"].endswith("index-app.log")
+    finally:
+        child.wait()
 
 
 def test_status_reports_running_when_the_child_holds_the_lock(tmp_path, monkeypatch):
@@ -2267,14 +2310,23 @@ git commit -m "fix: address verification findings from server-side auto-index"
 `tests/test_jobs.py` were extracted into an isolated harness (the real
 module verbatim, with only `from jarvis import config` swapped for a shim
 supplying `data_dir` plus the three new path helpers) and run:
-**24 passed**. That exercises the load-bearing behaviour with real
+**25 passed**. That exercises the load-bearing behaviour with real
 primitives rather than mocks — a real second process holding `flock` across
 process boundaries, 8 threads × 25 concurrent `write_launch_record` calls
-asserting no exceptions and no leaked temp files, and every branch of the
-attempt-correlation ordering.
+asserting no exceptions and no leaked temp files, a real exited-but-unreaped
+child, and every branch of the attempt-correlation ordering.
 
-The run caught one defect that inspection had missed:
-`test_job_state_none_when_published` omitted `registry_updated_at`, so its
-fresh record looked *current* and the function returned `starting` instead
-of `None`. Fixed above by stamping the row later than the record, which is
-what a real publish does.
+The run caught two defects that inspection had missed:
+
+1. `test_job_state_none_when_published` omitted `registry_updated_at`, so its
+   fresh record looked *current* and the function returned `starting` instead
+   of `None`. Fixed by stamping the row later than the record, which is what
+   a real publish does.
+2. The zombie test's `while child.poll() is None: ...` **reaps** the child,
+   and resetting `returncode = None` afterward does not restore the unreaped
+   state — a later `poll()` returns `0` because CPython swallows `ECHILD` as
+   exit 0. Confirmed directly: `after real poll, returncode = 3` then
+   `second poll returns = 0`. The assertion would have compared against a
+   fabricated `0`. Fixed with `_exited_but_unreaped_child`, which waits on
+   stdout EOF instead of waitpid, and additionally asserts `os.kill(pid, 0)`
+   succeeds on the zombie — the exact reason pid liveness is unusable here.

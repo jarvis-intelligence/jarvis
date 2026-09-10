@@ -487,10 +487,15 @@ test.
 - A child that exits nonzero before the transitional `upsert` reports
   `state: "failed-at-startup"` with its `exitCode` and log path, from a real
   spawned process.
-- **Exited-but-unreaped child**: spawn a real child that exits immediately,
-  never `poll()` it, then observe — must report `failed-at-startup`, not
-  `starting`. This is the zombie regression and it cannot be caught with a
-  mocked `Popen`.
+- **Exited-but-unreaped child**: hand observation a real child that has
+  exited and has **never been polled** — must report `failed-at-startup`
+  with its true exit code, not `starting`. Wait for the exit via stdout EOF,
+  never by spinning on `poll()`: `poll()` reaps, and a later `poll()` on an
+  already-reaped handle returns `0` because CPython swallows `ECHILD` as
+  exit 0, so a spin-then-reset test asserts against a fabricated code. The
+  same test should assert `os.kill(pid, 0)` succeeds on the zombie, which is
+  the whole reason pid liveness is unusable. Cannot be caught with a mocked
+  `Popen`.
 - **Child-ready-before-parent-returns**: a real child that acquires the lock
   and registers before the tool returns; the poll must report `running`
   (row 1), and the record must be exactly what the parent wrote — proving no
