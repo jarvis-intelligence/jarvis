@@ -231,13 +231,29 @@ jobs:
       - uses: astral-sh/setup-uv@v5
 
       - name: Publish to PyPI
+        env:
+          # Optional escape hatch: a project-scoped API token in the
+          # PYPI_API_TOKEN repo secret publishes with `--token` instead of
+          # OIDC trusted publishing. Used (and then deleted) for the 0.8.1
+          # release when the re-pointed trusted publisher refused to match
+          # the workflow's claims; kept as a durable fallback so a future
+          # trusted-publishing outage never blocks an otherwise-built
+          # release. The token never appears in logs: uv reads it from the
+          # environment via the shell variable only.
+          PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           set -eu
           ls -la dist
-          # No token: --trusted-publishing exchanges this job's OIDC identity
-          # for a short-lived PyPI token. `always` fails loudly rather than
-          # silently falling back to an unauthenticated upload attempt.
-          uv publish --trusted-publishing always dist/*.whl
+          if [ -n "$PYPI_TOKEN" ]; then
+            echo "publishing with PYPI_API_TOKEN (token fallback)"
+            uv publish --token "$PYPI_TOKEN" dist/*.whl
+          else
+            # No token: --trusted-publishing exchanges this job's OIDC
+            # identity for a short-lived PyPI token. `always` fails loudly
+            # rather than silently falling back to an unauthenticated
+            # upload attempt.
+            uv publish --trusted-publishing always dist/*.whl
+          fi
 
 # One-time setup, before the first release:
 #
