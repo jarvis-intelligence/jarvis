@@ -1818,39 +1818,52 @@ def _cmd_forget(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    registry = Registry(config.data_dir() / "registry.db")
     try:
-        entry = registry.get(slug)
-        existed = registry.forget(slug)
-    finally:
-        registry.close()
-    if not existed:
-        print(f"error: no such repo: {slug}", file=sys.stderr)
+        with jobs.build_lock(slug):
+            registry = Registry(config.data_dir() / "registry.db")
+            try:
+                entry = registry.get(slug)
+                existed = registry.forget(slug)
+            finally:
+                registry.close()
+            if not existed:
+                print(f"error: no such repo: {slug}", file=sys.stderr)
+                return 1
+            if entry is not None:
+                _unpin_zoekt_repo_name(Path(entry.path))
+            # Package-edge teardown (spec TSI-08: refresh forget for all new
+            # artifacts while preserving Zoekt unpinning and package-edge
+            # teardown): every package this repo owned and every edge touching it
+            # dies with the registration. Other repos' identity rows survive —
+            # an edge pointing into a forgotten repo's packages would otherwise
+            # dangle. This closes the evidence-found gap where forget left the
+            # graph rows behind and blastRadius kept answering for a forgotten
+            # repo.
+            graph_store = GraphStore(config.data_dir() / "registry.db")
+            try:
+                graph_store.forget_repo(slug)
+            finally:
+                graph_store.close()
+            index_dir = config.index_dir(slug)
+            if index_dir.exists():
+                shutil.rmtree(index_dir)
+            _remove_zoekt_shards(slug)
+            shutil.rmtree(config.lancedb_dir() / f"{slug}.lance", ignore_errors=True)
+            # D-06: forgetting a repo removes everything jarvis stored for it. The
+            # scip-swift cache legitimately may not exist (never-Swift repo, or the
+            # binary never ran), hence ignore_errors like the lancedb sweep above.
+            shutil.rmtree(config.swift_cache_dir(slug), ignore_errors=True)
+            # D-06 continued: the launch record and index log are jarvis state
+            # too. Best-effort, like the sweeps above -- a cleanup failure must
+            # not fail a forget. The lock FILE itself is preserved: see
+            # jobs.clear_job_files.
+            jobs.clear_job_files(slug)
+    except jobs.BuildLockHeld as exc:
+        # Destroying a repo's row, graph edges, and artifacts while a writer
+        # is mid-run corrupts that run and can resurrect artifacts the forget
+        # already removed.
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    if entry is not None:
-        _unpin_zoekt_repo_name(Path(entry.path))
-    # Package-edge teardown (spec TSI-08: refresh forget for all new
-    # artifacts while preserving Zoekt unpinning and package-edge
-    # teardown): every package this repo owned and every edge touching it
-    # dies with the registration. Other repos' identity rows survive —
-    # an edge pointing into a forgotten repo's packages would otherwise
-    # dangle. This closes the evidence-found gap where forget left the
-    # graph rows behind and blastRadius kept answering for a forgotten
-    # repo.
-    graph_store = GraphStore(config.data_dir() / "registry.db")
-    try:
-        graph_store.forget_repo(slug)
-    finally:
-        graph_store.close()
-    index_dir = config.index_dir(slug)
-    if index_dir.exists():
-        shutil.rmtree(index_dir)
-    _remove_zoekt_shards(slug)
-    shutil.rmtree(config.lancedb_dir() / f"{slug}.lance", ignore_errors=True)
-    # D-06: forgetting a repo removes everything jarvis stored for it. The
-    # scip-swift cache legitimately may not exist (never-Swift repo, or the
-    # binary never ran), hence ignore_errors like the lancedb sweep above.
-    shutil.rmtree(config.swift_cache_dir(slug), ignore_errors=True)
     print(f"forgot {slug}")
     return 0
 

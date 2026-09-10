@@ -1330,6 +1330,65 @@ def test_forget_succeeds_when_swift_cache_dir_absent(tmp_path: Path, monkeypatch
     assert "forgot plainpy" in capsys.readouterr().out
 
 
+def test_forget_removes_job_files(tmp_path, monkeypatch):
+    """`jarvis forget` removes everything jarvis stored for a repo (D-06) --
+    launch record and index log included. The lock FILE survives on purpose:
+    unlinking it would let a waiter lock a detached inode."""
+    from jarvis import index_cli, jobs
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(repo), "python", None, "indexed")
+    finally:
+        registry.close()
+
+    jobs.write_launch_record("app", config.index_log("app"))
+    config.index_log("app").write_text("stderr", encoding="utf-8")
+
+    parser = index_cli.build_parser()
+    args = parser.parse_args(["forget", "app"])
+    assert args.func(args) == 0
+
+    assert not config.index_launchfile("app").exists()
+    assert not config.index_log("app").exists()
+
+
+def test_forget_refuses_while_a_writer_holds_the_lock(tmp_path, monkeypatch, capsys):
+    """Destroying a repo's index out from under a live writer is the failure
+    this guards. Tested against a HELD lock, not merely cleanup after
+    release."""
+    from jarvis import index_cli, jobs
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(repo), "python", None, "indexed")
+    finally:
+        registry.close()
+    jobs.write_launch_record("app", config.index_log("app"))
+
+    parser = index_cli.build_parser()
+    args = parser.parse_args(["forget", "app"])
+    with jobs.build_lock("app"):
+        assert args.func(args) == 1
+
+    # Nothing was destroyed, and the row still exists.
+    assert config.index_launchfile("app").exists()
+    assert "already running" in capsys.readouterr().err
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        assert registry.get("app") is not None
+    finally:
+        registry.close()
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
 def test_index_repo_builds_semantic_index_and_searches(tmp_path: Path, monkeypatch):
