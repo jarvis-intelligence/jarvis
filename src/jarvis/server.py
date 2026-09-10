@@ -101,8 +101,10 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _freshness_fields(snapshot: FreshnessSnapshot) -> dict[str, Any]:
-    return _json_safe(asdict(snapshot))
+def _freshness_fields(snapshot: FreshnessSnapshot | None) -> dict[str, Any]:
+    # `None` means the service reported no snapshot at all; honest
+    # degradation is "no freshness fields", never a crash.
+    return {} if snapshot is None else _json_safe(asdict(snapshot))
 
 
 def _registry_entry(repo: str) -> RegisteredRepo | None:
@@ -515,6 +517,41 @@ def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
     }
 
 
+def _indexing_fields(repo: str, indexed: bool) -> dict[str, Any]:
+    """The `indexing` block, or nothing when no run is in flight.
+
+    Reaping happens inside `jobs.job_state` via the retained handle: a
+    tracked child's exit code is stronger evidence than any liveness check,
+    and reaping is what stops an exited-but-unwaited child from reading as
+    alive forever.
+
+    Never raises: a status response must survive a bug in here.
+    """
+    try:
+        entry = _registry_entry(repo)
+        state = jobs.job_state(
+            repo, indexed=indexed,
+            registry_status=entry.status if entry is not None else None,
+            # Attempt correlation: a launch record newer than the row belongs
+            # to the CURRENT attempt, so stale `failed` / `indexing` state
+            # from a previous run cannot terminate this poll loop.
+            registry_updated_at=entry.last_indexed if entry is not None else None,
+            child=_launched.get(repo),
+        )
+    except Exception:  # Broad on purpose, same contract as the helpers above.
+        return {}
+    if state is None:
+        return {}
+    block: dict[str, Any] = {"state": state.state}
+    if state.pid is not None:
+        block["pid"] = state.pid
+    if state.exit_code is not None:
+        block["exitCode"] = state.exit_code
+    if state.log is not None:
+        block["log"] = state.log
+    return {"indexing": block}
+
+
 @mcp.tool(name="getIndexStatus")
 def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
     """Whether `repo` has a published index, and its freshness. Pass
@@ -522,7 +559,11 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
     published commit against `git rev-parse HEAD`; omitted, freshness is
     reported without a staleness comparison. `searchCoverage` reflects git
     HEAD at last index time, not the working tree — it does not account for
-    uncommitted or untracked changes."""
+    uncommitted or untracked changes.
+
+    While an index is being built, an `indexing` block reports its state:
+    `starting`, `running`, `failed-at-startup`, or `abandoned`. The first two
+    mean keep polling; the last two are terminal."""
     try:
         indexed, freshness = _service().get_index_status(repo, repo_path)
     except Exception as exc:
@@ -534,7 +575,8 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
         # helper must not kill the published status response.
         capability_fields = {"last_index_run": None, "capabilities": None}
     return {"repo": repo, "indexed": indexed, "status": _registry_status(repo),
-            **_freshness_fields(freshness), **_search_coverage_fields(repo), **capability_fields}
+            **_freshness_fields(freshness), **_search_coverage_fields(repo),
+            **_indexing_fields(repo, indexed), **capability_fields}
 
 
 @mcp.tool(name="indexRepo")

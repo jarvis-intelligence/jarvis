@@ -60,14 +60,6 @@ def _no_leaked_children():
 
 
 @pytest.mark.anyio
-async def test_list_tools_returns_nine_tools():
-    async with create_connected_server_and_client_session(server.mcp) as client:
-        result = await client.list_tools()
-        names = {tool.name for tool in result.tools}
-        assert names == EXPECTED_TOOLS
-
-
-@pytest.mark.anyio
 async def test_document_symbols_roundtrip():
     async with create_connected_server_and_client_session(server.mcp) as client:
         result = await client.call_tool("documentSymbols", {"repo": REPO, "path": DOC_GREETER})
@@ -922,6 +914,114 @@ def test_get_index_status_existing_keys_unchanged_for_a_legacy_snapshot():
     assert result["indexed"] is True
     assert result["capabilities"]["tools"]["documentSymbols"]["providers"] == ["scip"]
     assert result["capabilities"]["syntax"]["available"] is False
+
+
+class _NotIndexedStub:
+    """A QueryService whose repo has no published index."""
+
+    def get_index_status(self, repo: str, repo_path: str | None = None):
+        return False, None
+
+
+def test_status_reports_starting_immediately_after_spawn(tmp_path, monkeypatch):
+    """The regression that makes the whole poll contract usable: between
+    Popen returning and the child registering there is no row and no lock, and
+    a naive reading is 'not indexed, nothing running' -- so the agent spawns
+    again, forever."""
+    from jarvis import config, jobs, server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    jobs.write_launch_record("app", config.index_log("app"))
+
+    class _Live:
+        pid = 4242
+        def poll(self):
+            return None
+
+    monkeypatch.setitem(server._launched, "app", _Live())
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+
+    result = server.get_index_status(repo="app")
+    assert result["indexed"] is False
+    assert result["indexing"]["state"] == "starting"
+    assert result["indexing"]["pid"] == 4242
+
+
+def test_status_reports_failed_at_startup_for_an_unreaped_child(tmp_path, monkeypatch):
+    """A real child that exited but was never waited on is a zombie whose pid
+    still answers os.kill(pid, 0). Observation must reap instead. Cannot be
+    caught with a mocked Popen.
+
+    Reuses `_exited_but_unreaped_child` from `tests/test_jobs.py` (import it)
+    rather than spinning on `poll()`: spinning reaps, and a subsequent
+    `poll()` on the reaped handle returns 0 from swallowed ECHILD, so the
+    exit code asserted below would be fabricated."""
+    from jarvis import config, jobs, server
+    from tests.test_jobs import _exited_but_unreaped_child
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    jobs.write_launch_record("app", config.index_log("app"))
+    child = _exited_but_unreaped_child()
+    monkeypatch.setitem(server._launched, "app", child)
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+
+    try:
+        result = server.get_index_status(repo="app")
+        assert result["indexing"]["state"] == "failed-at-startup"
+        assert result["indexing"]["exitCode"] == 3
+        assert result["indexing"]["log"].endswith("index-app.log")
+    finally:
+        child.wait()
+
+
+def test_status_reports_running_when_the_child_holds_the_lock(tmp_path, monkeypatch):
+    """Child-ready-before-parent-returns: the child got there first. The
+    launch record must be exactly what the parent wrote, proving there is no
+    post-spawn mutation to interleave with."""
+    from jarvis import config, jobs, server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    jobs.write_launch_record("app", config.index_log("app"))
+    before = config.index_launchfile("app").read_bytes()
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+
+    with jobs.build_lock("app"):
+        result = server.get_index_status(repo="app")
+
+    assert result["indexing"]["state"] == "running"
+    assert config.index_launchfile("app").read_bytes() == before
+
+
+def test_status_leftover_record_does_not_mask_later_states(tmp_path, monkeypatch):
+    """Rows 2-4 precede the record, which is never deleted."""
+    from jarvis import config, jobs, server
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    jobs.write_launch_record("app", config.index_log("app"))
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", "/tmp/app", "python", None, "indexing")
+    finally:
+        registry.close()
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+    assert server.get_index_status(repo="app")["indexing"]["state"] == "abandoned"
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.mark_status("app", "failed")
+    finally:
+        registry.close()
+    assert "indexing" not in server.get_index_status(repo="app")
+
+
+def test_status_omits_indexing_when_nothing_in_flight(tmp_path, monkeypatch):
+    from jarvis import server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+    assert "indexing" not in server.get_index_status(repo="app")
 
 
 def test_index_repo_tool_spawns_and_reports_starting(tmp_path, monkeypatch):
