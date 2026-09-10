@@ -328,14 +328,43 @@ def test_error_payload_passes_through_other_errors(tmp_path: Path, monkeypatch):
 
 
 
-def test_error_payload_without_a_registry_row_stays_bare(tmp_path: Path, monkeypatch):
-    """D-14 keys appear only when the registry row actually explains the
-    state — a repo that was never registered keeps the bare error dict."""
+
+
+def test_missing_index_names_the_recovery_tool_without_a_row(tmp_path, monkeypatch):
+    """The row-less case is the one that matters: a never-indexed repo has no
+    registry row, so the pre-existing structured keys never appeared."""
+    from jarvis import server
     from jarvis.index_reader import IndexNotFoundError
 
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    payload = server._error_payload("absent", IndexNotFoundError("no published index for absent"))
-    assert payload == {"error": "no published index for absent"}
+    payload = server._error_payload("absent", IndexNotFoundError("no published index"))
+
+    assert payload["recoveryTool"] == "indexRepo"
+    assert "path" in payload["recoveryToolArgs"]
+    assert "state" not in payload  # no row to explain anything
+
+
+def test_missing_index_keeps_row_explanation_and_adds_the_tool(tmp_path, monkeypatch):
+    from jarvis import config, server
+    from jarvis.index_reader import IndexNotFoundError
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.record_failure("app", "/tmp/app", "python",
+                                origin="manual", reason="boom", stderr="trace")
+    finally:
+        registry.close()
+
+    payload = server._error_payload("app", IndexNotFoundError("no published index"))
+
+    assert payload["error"] == "no published index"
+    assert payload["cause"] == "boom"
+    assert payload["recovery"]  # prose recovery preserved
+    assert payload["recoveryTool"] == "indexRepo"
+    assert "status_stderr" not in payload
+    assert "trace" not in str(payload)
 
 
 def test_error_payload_does_not_mask_other_faults_on_a_degraded_repo(tmp_path: Path, monkeypatch):
@@ -357,9 +386,11 @@ def test_error_payload_does_not_mask_other_faults_on_a_degraded_repo(tmp_path: P
     assert payload == {"error": "kaboom"}
 
 
-def test_error_payload_degrades_to_bare_error_when_registry_is_unreadable(tmp_path: Path, monkeypatch):
+def test_error_payload_with_unreadable_registry_still_names_the_recovery_tool(tmp_path: Path, monkeypatch):
     """A broken registry degrades the lookup, never replaces one error with
-    another (the `_registry_status` best-effort convention)."""
+    another (the `_registry_entry` best-effort convention) — and the
+    recovery-tool keys survive the degraded lookup because they need no
+    row: only the row-derived `state`/`cause`/`recovery` keys go missing."""
     from jarvis import registry as registry_module
     from jarvis.index_reader import IndexNotFoundError
     from jarvis.registry import Registry
@@ -377,7 +408,11 @@ def test_error_payload_degrades_to_bare_error_when_registry_is_unreadable(tmp_pa
     monkeypatch.setattr(registry_module, "Registry", _unusable)
 
     payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
-    assert payload == {"error": "no pointer"}
+    assert payload == {
+        "error": "no pointer",
+        "recoveryTool": "indexRepo",
+        "recoveryToolArgs": {"path": "<the repo's local git working directory>"},
+    }
 
 
 

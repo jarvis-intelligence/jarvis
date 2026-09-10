@@ -339,9 +339,11 @@ def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
     D-14: when the registry row explains the state, the IndexNotFoundError
     branch also carries `state` (origin slug), `cause` (one-line reason),
     and `recovery` (derived command) as structured keys alongside the prose
-    `error` string — additive, so prose-only clients keep working. Keys
-    appear only when a row with an origin exists; `status_stderr` never
-    enters a payload (it can be megabytes).
+    `error` string — additive, so prose-only clients keep working. Those
+    row-derived keys appear only when a row with an origin exists; Task 8:
+    `recoveryTool`/`recoveryToolArgs` (naming the `indexRepo` tool) are
+    emitted on every IndexNotFoundError payload, row or not.
+    `status_stderr` never enters a payload (it can be megabytes).
 
     Task 5 (spec TSI-05): `CapabilityUnavailableError` — a SCIP-only tool
     with no usable capability in this snapshot, or an opaque `syntax:`
@@ -359,10 +361,16 @@ def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
             payload.update(_freshness_fields(exc.freshness))
         return payload
     if isinstance(exc, IndexNotFoundError):
-        # Spec §12: the old search-only explanation branch is gone — no
+        # Spec §12: the old search-only explanation branch is gone -- no
         # writer produces that status, and capability facts come from the
         # snapshot, not the row. The error passes through; rows that do
         # explain themselves gain the structured keys below.
+        #
+        # `recoveryTool` is emitted whether or not a row exists -- and a
+        # never-indexed repo has no row, which is precisely the case an agent
+        # hits first. The prose `recovery` above it names a shell command only
+        # a human can run; this names a tool the caller can invoke itself.
+        # `path` cannot be filled in here: slug -> path needs a registry row.
         entry = _registry_entry(repo)
         payload = {"error": str(exc)}
         origin = origin_of(entry) if entry is not None else None
@@ -373,6 +381,10 @@ def _error_payload(repo: str, exc: Exception) -> dict[str, Any]:
             recovery = recovery_for(entry)
             if recovery is not None:
                 payload["recovery"] = recovery
+        payload["recoveryTool"] = "indexRepo"
+        payload["recoveryToolArgs"] = {
+            "path": "<the repo's local git working directory>"
+        }
         return payload
     if isinstance(exc, AmbiguousSymbolError):
         hint = exc.candidates[0].dotted_path if exc.candidates else exc.query
