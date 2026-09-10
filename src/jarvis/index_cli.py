@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jarvis import config
+from jarvis import jobs
 from jarvis.graph import (
     GraphStore,
     clear_graph_edges_for_repo,
@@ -1087,10 +1088,30 @@ def index_repo(
     installed -- the MCP `indexRepo` path passes it so an agent tool call can
     never implicitly download embedding weights.
     """
-    from jarvis.syntax import ParserPool
-
     repo_path = repo_path.resolve()
     slug = config.repo_slug(slug or repo_path.name)
+    # Acquired before the duplicate guards and before the transitional
+    # `indexing` upsert: exclusion has to cover registry writes and artifact
+    # writes alike, or two writers race on the same slug. `flock` and not a
+    # pidfile -- a pidfile is a discovery cache, and nothing here binds a port
+    # to arbitrate a lost race the way ZoektLifecycle does.
+    with jobs.build_lock(slug, root=root):
+        return _index_repo_locked(
+            repo_path, slug=slug, root=root, scheme=scheme,
+            semantic_include=semantic_include, language=language,
+            scip=scip, watch=watch, semantic=semantic,
+        )
+
+
+def _index_repo_locked(
+    repo_path: Path, *, slug: str, root, scheme, semantic_include,
+    language, scip, watch, semantic,
+) -> str:
+    """`index_repo`'s body, running under the per-slug build lock. Split out
+    only so the lock's extent is visible in one place; the staged pipeline is
+    unchanged."""
+    from jarvis.syntax import ParserPool
+
     sha = _git_head(repo_path)
 
     registry = Registry(config.data_dir(root) / "registry.db")
@@ -1492,7 +1513,8 @@ def _cmd_index(args: argparse.Namespace) -> int:
             scip=getattr(args, "scip", None),
             semantic=getattr(args, "semantic", None) is not False,
         )
-    except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError, ValueError) as exc:
+    except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError,
+            jobs.BuildLockHeld, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"indexed {slug}")
