@@ -312,6 +312,21 @@ def _tracked_blob_count(repo_path: Path) -> int:
     return count
 
 
+def ensure_git_repo(repo_path: Path) -> None:
+    """Raise `NotAGitRepositoryError` unless `repo_path` is inside a git work
+    tree. Extracted from `_git_head` so a caller that only needs the check --
+    the MCP `indexRepo` pre-flight -- does not also need a commit to exist."""
+    check = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=repo_path, capture_output=True, text=True,
+    )
+    if check.returncode != 0:
+        raise NotAGitRepositoryError(
+            f"{repo_path} is not a git repository "
+            f"(git rev-parse --is-inside-work-tree: {check.stderr.strip()})"
+        )
+
+
 def _git_head(repo_path: Path) -> str:
     """Current commit SHA.
 
@@ -322,16 +337,7 @@ def _git_head(repo_path: Path) -> str:
     first raises `NotAGitRepositoryError` for the former; only a real
     git repo with no commits reaches the `IndexingError` below, naming the
     cause rather than letting a bare CalledProcessError escape."""
-    check = subprocess.run(
-        ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True,
-        text=True,
-    )
-    if check.returncode != 0:
-        raise NotAGitRepositoryError(
-            f"{repo_path} is not a git repository "
-            f"(git rev-parse --is-inside-work-tree: {check.stderr.strip()})"
-        )
+    ensure_git_repo(repo_path)
     result = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
         capture_output=True,
@@ -1007,6 +1013,58 @@ def _reject_duplicate_slug_for_path(registry: Registry, slug: str, repo_path: Pa
             )
 
 
+def _reject_slug_bound_to_another_path(
+    registry: Registry, slug: str, repo_path: Path,
+) -> None:
+    """One path per slug -- the inverse of `_reject_duplicate_slug_for_path`,
+    which enforces one slug per path and deliberately skips this direction.
+
+    Without it, `/a/app` and `/b/app` both derive the slug `app` and the
+    second silently overwrites the first's published index. That mattered
+    little while every index was a deliberate `jarvis index` invocation; the
+    MCP `indexRepo` path supplies paths and never chooses slugs, so it fires
+    routinely.
+
+    A registered path that no longer exists is a MOVE, not a collision --
+    `upsert` already does `path=excluded.path` -- so rejection requires both
+    paths to resolve. Mirrors the sibling guard's `except OSError: continue`.
+    """
+    existing = registry.get(slug)
+    if existing is None:
+        return
+    try:
+        registered = Path(existing.path).resolve(strict=True)
+    except OSError:
+        return
+    if registered == repo_path:
+        return
+    raise IndexingError(
+        f"slug {slug!r} is already bound to {registered}, not {repo_path}. "
+        f"Index this repo under a different name with "
+        f"`jarvis index {repo_path} --slug <name>`, or run "
+        f"`jarvis forget {slug}` first."
+    )
+
+
+def resolve_slug_for_path(registry: Registry, repo_path: Path) -> str:
+    """The slug an index run for `repo_path` should use.
+
+    Resolution order matters: a repo registered under an explicit `--slug`
+    must keep it, so a path lookup precedes basename derivation. Only a
+    genuinely unregistered path falls through to `config.repo_slug`.
+    """
+    resolved = repo_path.resolve()
+    for entry in registry.list():
+        try:
+            if Path(entry.path).resolve() == resolved:
+                return entry.slug
+        except OSError:
+            continue
+    slug = config.repo_slug(resolved.name)
+    _reject_slug_bound_to_another_path(registry, slug, resolved)
+    return slug
+
+
 def _record_failure_best_effort(
     registry: Registry, slug: str, repo_path: Path, language: str,
     reason: str, text: str,
@@ -1117,6 +1175,7 @@ def _index_repo_locked(
     registry = Registry(config.data_dir(root) / "registry.db")
     try:
         _reject_duplicate_slug_for_path(registry, slug, repo_path)
+        _reject_slug_bound_to_another_path(registry, slug, repo_path)
     except Exception:
         registry.close()
         raise

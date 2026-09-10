@@ -413,6 +413,109 @@ def test_reject_duplicate_slug_compares_resolved_paths(tmp_path: Path, monkeypat
         registry.close()
 
 
+
+def test_resolve_slug_reuses_the_registered_slug_for_a_known_path(tmp_path, monkeypatch):
+    """A repo indexed under an explicit --slug must keep it: resolution is by
+    path first, basename second. Otherwise indexRepo would derive a different
+    slug and index the same repo twice."""
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("custom-name", str(repo), "python", None, "indexed")
+        assert index_cli.resolve_slug_for_path(registry, repo) == "custom-name"
+    finally:
+        registry.close()
+
+
+def test_resolve_slug_rejects_same_basename_at_a_different_live_path(tmp_path, monkeypatch):
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    first = tmp_path / "a" / "app"
+    second = tmp_path / "b" / "app"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(first), "python", None, "indexed")
+        with pytest.raises(index_cli.IndexingError) as exc:
+            index_cli.resolve_slug_for_path(registry, second)
+        assert str(first) in str(exc.value)
+        assert str(second) in str(exc.value)
+    finally:
+        registry.close()
+
+
+def test_resolve_slug_allows_a_moved_repo(tmp_path, monkeypatch):
+    """The registered path no longer exists, so this is a move, not a
+    collision -- `upsert` already updates `path`."""
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    moved_to = tmp_path / "new" / "app"
+    moved_to.mkdir(parents=True)
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(tmp_path / "gone" / "app"), "python", None, "indexed")
+        assert index_cli.resolve_slug_for_path(registry, moved_to) == "app"
+    finally:
+        registry.close()
+
+
+def test_resolve_slug_derives_basename_when_unregistered(tmp_path, monkeypatch):
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "My Repo"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        assert index_cli.resolve_slug_for_path(registry, repo) == "my-repo"
+    finally:
+        registry.close()
+
+
+def test_index_repo_rejects_same_slug_at_a_different_path(tmp_path, monkeypatch):
+    """The guard must hold in the locked writer, not only in the MCP
+    pre-flight -- otherwise it is pure TOCTOU."""
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    first = tmp_path / "a" / "app"
+    first.mkdir(parents=True)
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(first), "python", None, "indexed")
+    finally:
+        registry.close()
+
+    second = tmp_path / "b" / "app"
+    second.mkdir(parents=True)
+    shutil.copytree(FIXTURE_REPO, second, dirs_exist_ok=True)
+    _init_git_repo(second)
+    _stub_pipeline(monkeypatch)
+    with pytest.raises(index_cli.IndexingError):
+        index_cli.index_repo(second)
+
+
+def test_ensure_git_repo_rejects_a_plain_directory(tmp_path):
+    from jarvis import index_cli
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(index_cli.NotAGitRepositoryError):
+        index_cli.ensure_git_repo(plain)
+
+
 def test_java_indexer_env_disables_gradle_parallelism(monkeypatch):
     from jarvis.index_cli import _java_indexer_env
 
