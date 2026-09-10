@@ -49,7 +49,7 @@ New `## [X.Y.Z] - YYYY-MM-DD` section at the **top**, above the previous entry. 
 
 ```bash
 uv run pytest -m "not integration" -q          # must be green
-grep -qF "mcp-name: io.github.jarvis-intelligence/jarvis" README.md && echo "marker present"
+grep -qF "mcp-name: io.github.phuongddx/jarvis" README.md && echo "marker present"
 
 ```
 
@@ -116,7 +116,7 @@ gh release create vX.Y.Z --title "vX.Y.Z — <short summary>" --notes "$(cat <<'
 ## Fixed / What changed
 ...
 
-See [CHANGELOG.md](https://github.com/jarvis-intelligence/jarvis/blob/main/CHANGELOG.md).
+See [CHANGELOG.md](https://github.com/phuongddx/jarvis/blob/main/CHANGELOG.md).
 EOF
 )"
 ```
@@ -126,9 +126,9 @@ EOF
 Publishing the release triggers two workflows in sequence — `publish-pypi.yml` (on `release: published`) runs the unit suite, checks the tag matches the packaged version, builds, verifies the wheel and the registry marker, smoke-tests a clean install, and publishes via PyPI trusted publishing; then `publish-mcp-registry.yml` (on `workflow_run`, only after `publish-pypi.yml` succeeds) publishes `server.json` to the official MCP Registry. Don't consider the release done until both show `success` — a red `publish-pypi.yml` run with a tag already pushed is a broken, half-shipped release that needs a *new* patch version to fix (you cannot re-upload or delete a PyPI version):
 
 ```bash
-gh run list --repo jarvis-intelligence/jarvis --workflow=publish-pypi.yml --limit 1
-gh run watch <run-id> --repo jarvis-intelligence/jarvis --exit-status   # or gh run view <run-id> if it already finished
-gh run list --repo jarvis-intelligence/jarvis --workflow=publish-mcp-registry.yml --limit 1
+gh run list --repo phuongddx/jarvis --workflow=publish-pypi.yml --limit 1
+gh run watch <run-id> --repo phuongddx/jarvis --exit-status   # or gh run view <run-id> if it already finished
+gh run list --repo phuongddx/jarvis --workflow=publish-mcp-registry.yml --limit 1
 ```
 
 **Verifying on PyPI itself:** don't trust `https://pypi.org/pypi/<pkg>/json`'s top-level `info.version` field alone — PyPI is eventually consistent and that field lags behind a just-published version by anywhere from seconds to a couple minutes (this is called out in `publish-mcp-registry.yml`'s own comments, which is exactly why that workflow retries on 404 rather than failing on the first miss). Check the full release list instead, which updates immediately:

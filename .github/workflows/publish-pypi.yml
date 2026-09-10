@@ -65,7 +65,7 @@ jobs:
       - name: Verify the MCP Registry ownership marker survived
         run: |
           set -eu
-          marker='mcp-name: io.github.jarvis-intelligence/jarvis'
+          marker='mcp-name: io.github.phuongddx/jarvis'
           if ! grep -qF "$marker" README.md; then
             echo "README.md is missing the registry ownership marker:" >&2
             echo "  <!-- $marker -->" >&2
@@ -244,7 +244,7 @@ jobs:
 # 1. Create the project's trusted publisher at
 #    https://pypi.org/manage/project/jarvis-mcp/settings/publishing/ with:
 #      PyPI project name: jarvis-mcp
-#      Owner:             jarvis-intelligence
+#      Owner:             phuongddx
 #      Repository:        jarvis
 #      Workflow name:     publish-pypi.yml
 #      Environment:       (leave empty -- see the publish job's comment; the

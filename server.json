@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.jarvis-intelligence/jarvis",
+  "name": "io.github.phuongddx/jarvis",
   "description": "Local-first SCIP code navigation and Zoekt search over your own indexed repositories",
   "repository": {
-    "url": "https://github.com/jarvis-intelligence/jarvis",
+    "url": "https://github.com/phuongddx/jarvis",
     "source": "github"
   },
   "version": "0.8.0",
