@@ -1120,8 +1120,8 @@ def ensure_git_repo(repo_path: Path) -> None:
     tree. Extracted from `_git_head` so a caller that only needs the check --
     the MCP `indexRepo` pre-flight -- does not also need a commit to exist."""
     check = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        cwd=repo_path, capture_output=True, text=True,
+        ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True,
     )
     if check.returncode != 0:
         raise NotAGitRepositoryError(
@@ -1129,6 +1129,13 @@ def ensure_git_repo(repo_path: Path) -> None:
             f"(git rev-parse --is-inside-work-tree: {check.stderr.strip()})"
         )
 ```
+
+The invocation is `git -C <path>`, matching the five existing call sites in
+this module -- NOT `cwd=repo_path`. With `cwd=`, a nonexistent path makes
+Python's chdir raise `FileNotFoundError` before git ever runs, which escapes
+`_cmd_index`'s handler tuple as a traceback; with `-C`, git itself exits
+nonzero and the documented `NotAGitRepositoryError` is raised (spec §11:
+"Not a git repo -> pre-flight error", never a traceback).
 
 In `_git_head`, replace the inline `check = subprocess.run(...)` / `if check.returncode != 0: raise ...` block with `ensure_git_repo(repo_path)`, leaving its surrounding comment about "has no commits yet" intact.
 
