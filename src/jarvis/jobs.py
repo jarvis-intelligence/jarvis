@@ -231,7 +231,7 @@ def job_state(
     current_attempt = record is not None and (
         registry_updated_at is None or record.started_at > registry_updated_at
     )
-    if current_attempt:  # rows 5-8, promoted above the stale row state
+    if current_attempt:  # rows 2-5, promoted above the stale row state
         if child is not None:
             code = child.poll()
             state = "starting" if code is None else "failed-at-startup"
@@ -241,9 +241,9 @@ def job_state(
             return JobState(state="starting", pid=None, exit_code=None, log=log)
         return JobState(state="failed-at-startup", pid=None,
                         exit_code=None, log=log)
-    if indexed or registry_status == "failed":  # rows 2, 3
+    if indexed or registry_status == "failed":  # rows 6, 7
         return None
-    if registry_status == "indexing":  # row 4
+    if registry_status == "indexing":  # row 8
         return JobState(state="abandoned", pid=None, exit_code=None, log=log)
     return None  # row 9
 
