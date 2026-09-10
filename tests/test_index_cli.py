@@ -516,6 +516,18 @@ def test_ensure_git_repo_rejects_a_plain_directory(tmp_path):
         index_cli.ensure_git_repo(plain)
 
 
+def test_ensure_git_repo_rejects_a_missing_path(tmp_path):
+    """A nonexistent path must surface as `NotAGitRepositoryError` (which
+    `_cmd_index` catches) — not a raw `FileNotFoundError` from Python's own
+    chdir, which would escape as a traceback. This pins the `git -C`
+    invocation form: with `cwd=repo_path`, Python raises before git runs."""
+    from jarvis import index_cli
+
+    missing = tmp_path / "does-not-exist"
+    with pytest.raises(index_cli.NotAGitRepositoryError):
+        index_cli.ensure_git_repo(missing)
+
+
 def test_java_indexer_env_disables_gradle_parallelism(monkeypatch):
     from jarvis.index_cli import _java_indexer_env
 

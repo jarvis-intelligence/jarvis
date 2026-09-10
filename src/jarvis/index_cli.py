@@ -317,8 +317,8 @@ def ensure_git_repo(repo_path: Path) -> None:
     tree. Extracted from `_git_head` so a caller that only needs the check --
     the MCP `indexRepo` pre-flight -- does not also need a commit to exist."""
     check = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        cwd=repo_path, capture_output=True, text=True,
+        ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True,
     )
     if check.returncode != 0:
         raise NotAGitRepositoryError(
