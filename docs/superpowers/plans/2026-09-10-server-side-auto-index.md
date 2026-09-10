@@ -229,9 +229,15 @@ def test_job_state_running_wins_over_published(tmp_path, monkeypatch):
 
 
 def test_job_state_none_when_published(tmp_path, monkeypatch):
+    """A record left over from the run that PUBLISHED is older than the row
+    it wrote, so it is not the current attempt. Omitting
+    `registry_updated_at` here would make the record look current and report
+    `starting` -- verified by running this file, not by inspection."""
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     jobs.write_launch_record("app", Path("/tmp/app.log"))
-    assert jobs.job_state("app", indexed=True, registry_status="indexed") is None
+    published_at = datetime.now(UTC) + timedelta(seconds=5)
+    assert jobs.job_state("app", indexed=True, registry_status="indexed",
+                          registry_updated_at=published_at) is None
 
 
 def test_job_state_none_when_failed(tmp_path, monkeypatch):
@@ -1263,40 +1269,63 @@ def test_forget_refuses_while_a_writer_holds_the_lock(tmp_path, monkeypatch, cap
 Run: `uv run pytest tests/test_index_cli.py -q -k "forget_removes_job_files or forget_refuses"`
 Expected: FAIL — the launch record still exists after forget, and forget returns 0 while the lock is held
 
-- [ ] **Step 3: Wrap the destructive half in the lock**
+- [ ] **Step 3: Put the whole teardown inside the lock**
 
-`_cmd_forget` currently resolves the slug, looks up the row, and then deletes
-artifacts. Leave the resolution and lookup where they are; wrap everything
-from the first destructive call (`shutil.rmtree(index_dir)`) through the final
-`print` in the lock:
+**All** of `_cmd_forget`'s teardown must be inside the lock, not just the
+`rmtree` calls: the real body deletes the registry row at
+`index_cli.py:1734` (`registry.forget`), unpins Zoekt at 1741
+(`_unpin_zoekt_repo_name`), and tears down package edges at 1752
+(`graph_store.forget_repo`) — all *before* the first `rmtree` at 1757. A lock
+that starts at `rmtree` would let a forget destroy the row and the graph out
+from under a live writer.
+
+Replace the body after slug resolution (`index_cli.py:1731-1763`) with the
+same sequence wrapped in the lock. Only the `try`/`with` and the
+`clear_job_files` call are new — every existing statement and comment keeps
+its order and text:
 
 ```python
     try:
         with jobs.build_lock(slug):
+            registry = Registry(config.data_dir() / "registry.db")
+            try:
+                entry = registry.get(slug)
+                existed = registry.forget(slug)
+            finally:
+                registry.close()
+            if not existed:
+                print(f"error: no such repo: {slug}", file=sys.stderr)
+                return 1
+            if entry is not None:
+                _unpin_zoekt_repo_name(Path(entry.path))
+            # <keep the existing TSI-08 package-edge teardown comment here>
+            graph_store = GraphStore(config.data_dir() / "registry.db")
+            try:
+                graph_store.forget_repo(slug)
+            finally:
+                graph_store.close()
+            index_dir = config.index_dir(slug)
             if index_dir.exists():
                 shutil.rmtree(index_dir)
             _remove_zoekt_shards(slug)
             shutil.rmtree(config.lancedb_dir() / f"{slug}.lance", ignore_errors=True)
-            # D-06: forgetting a repo removes everything jarvis stored for it.
-            # The scip-swift cache legitimately may not exist (never-Swift
-            # repo, or the binary never ran), hence ignore_errors like the
-            # lancedb sweep above.
+            # <keep the existing D-06 scip-swift-cache comment here>
             shutil.rmtree(config.swift_cache_dir(slug), ignore_errors=True)
             # D-06 continued: the launch record and index log are jarvis state
             # too. Best-effort, like the sweeps above -- a cleanup failure must
-            # not fail a forget. The lock file itself is preserved: see
+            # not fail a forget. The lock FILE itself is preserved: see
             # jobs.clear_job_files.
             jobs.clear_job_files(slug)
     except jobs.BuildLockHeld as exc:
-        # Deleting a repo's index while a writer is mid-run corrupts that run
-        # and can leave artifacts the forget already removed.
+        # Destroying a repo's row, graph edges, and artifacts while a writer
+        # is mid-run corrupts that run and can resurrect artifacts the forget
+        # already removed.
         print(f"error: {exc}", file=sys.stderr)
         return 1
 ```
 
-Keep the existing registry deletion where it already is relative to these
-calls — only the artifact deletion and the new `clear_job_files` move inside
-the lock. `print(f"forgot {slug}")` and `return 0` stay outside it.
+`return 1` from inside the `with` is fine — the lock releases on the way out.
+`print(f"forgot {slug}")` and `return 0` stay outside it.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -1327,10 +1356,22 @@ git commit -m "feat(index): clear job lock, launch record, and log on forget"
 
 - [ ] **Step 1: Write the failing tests**
 
-First update two existing things at the top of `tests/test_server_tools.py`:
-add `"indexRepo"` to the `EXPECTED_TOOLS` set (lines 24-34) and change the
-module docstring's "the 9 tools" to "the 10 tools". Then append the tests
-below.
+First update three existing things at the top of `tests/test_server_tools.py`:
+add `"indexRepo"` to the `EXPECTED_TOOLS` set (lines 24-34), change the
+module docstring's "the 9 tools" to "the 10 tools", and add the fixture
+below. Then append the tests.
+
+```python
+@pytest.fixture(autouse=True)
+def _no_leaked_children():
+    """`_spawn_index` mutates `server._launched` directly, so a spawn test
+    leaves a live handle behind and the next test's spawn hits the
+    duplicate-spawn guard and returns `alreadyRunning` instead of spawning.
+    Clear it around every test in this module."""
+    server._launched.clear()
+    yield
+    server._launched.clear()
+```
 
 An autouse fixture already sets `JARVIS_DATA_DIR` to `tmp_path` for every
 test in this file; the explicit `setenv` calls below re-point it to a
@@ -2221,3 +2262,19 @@ git commit -m "fix: address verification findings from server-side auto-index"
 **Type consistency:** `jobs.job_state(slug, *, indexed, registry_status, child, root, now)` is called from `server._indexing_fields` with `indexed` and `registry_status` (Task 7) matching Task 1's signature. `JobState.exit_code` (snake, Python) is surfaced as `exitCode` (camel, MCP JSON) only in `_indexing_fields` — the same boundary convention as the `@mcp.tool(name="camelCase")` names. `index_cli.resolve_slug_for_path(registry, repo_path)` is called with exactly that argument order in both Task 4's writer and Task 6's pre-flight. `_index_repo_locked`'s keyword names match `index_repo`'s call site in Task 3.
 
 **Known deviation from the spec, resolved here:** the spec's §5 payload example shows `pid` from the launch record; Task 1 deliberately omits `pid` from the record's two fields (`started_at`, `log`) because nothing branches on it, and Task 6 reports the pid from the live `Popen` handle instead. Same observable payload, one fewer mutable field.
+
+**Verified by execution, not inspection.** Task 1's `jobs.py` and
+`tests/test_jobs.py` were extracted into an isolated harness (the real
+module verbatim, with only `from jarvis import config` swapped for a shim
+supplying `data_dir` plus the three new path helpers) and run:
+**24 passed**. That exercises the load-bearing behaviour with real
+primitives rather than mocks — a real second process holding `flock` across
+process boundaries, 8 threads × 25 concurrent `write_launch_record` calls
+asserting no exceptions and no leaked temp files, and every branch of the
+attempt-correlation ordering.
+
+The run caught one defect that inspection had missed:
+`test_job_state_none_when_published` omitted `registry_updated_at`, so its
+fresh record looked *current* and the function returned `starting` instead
+of `None`. Fixed above by stamping the row later than the record, which is
+what a real publish does.
