@@ -1,21 +1,24 @@
 """jarvis MCP stdio server: thin tool wrappers around QueryService, the
 Zoekt search client, and the package dependency graph.
 
-Registers 9 tools: documentSymbols, goToDefinition, findReferences,
-callHierarchy, typeHierarchy, getIndexStatus, searchCode, semanticSearch, blastRadius.
+Registers 10 tools: documentSymbols, goToDefinition, findReferences,
+callHierarchy, typeHierarchy, getIndexStatus, searchCode, semanticSearch, blastRadius, indexRepo.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from jarvis import config, syntax, syntax_index
+from jarvis import config, jobs, syntax, syntax_index
 from jarvis.graph import GraphStore, blast_radius
 from jarvis.index_reader import IndexNotFoundError
 from jarvis.query import CapabilityUnavailableError, FreshnessSnapshot, QueryService
@@ -27,6 +30,43 @@ mcp = FastMCP("jarvis")
 _query_service: QueryService | None = None
 _zoekt_lifecycle: ZoektLifecycle | None = None
 _graph_store: GraphStore | None = None
+
+
+# Handles for index children this server spawned. Retained so observation can
+# reap them: `start_new_session=True` does not double-fork, so an exited child
+# stays our zombie and `os.kill(pid, 0)` would report it alive forever. Lost
+# on server restart by design -- `jobs.job_state` falls back to the launch
+# record's age for that case.
+_launched: dict[str, subprocess.Popen] = {}
+
+
+def index_cli_module():
+    """Deferred `index_cli` import. It pulls in the whole indexing pipeline,
+    so the reader must not pay for it at module import; tests also
+    monkeypatch through this seam."""
+    from jarvis import index_cli
+
+    return index_cli
+
+
+def _jarvis_bin() -> str:
+    """Absolute path to the `jarvis` console script.
+
+    PATH is not reliable here: MCP clients spawn servers with sanitized
+    environments, and `uv tool install` puts the script in a bin directory
+    that may not be on it. The interpreter's own directory is correct for
+    both venv and `uv tool` layouts, so try that first.
+    """
+    candidate = Path(sys.executable).parent / "jarvis"
+    if candidate.exists():
+        return str(candidate)
+    found = shutil.which("jarvis")
+    if found is not None:
+        return found
+    raise RuntimeError(
+        "the `jarvis` command could not be located next to this interpreter "
+        f"({Path(sys.executable).parent}) or on PATH; reinstall jarvis-mcp"
+    )
 
 
 def _service() -> QueryService:
@@ -495,6 +535,121 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
         capability_fields = {"last_index_run": None, "capabilities": None}
     return {"repo": repo, "indexed": indexed, "status": _registry_status(repo),
             **_freshness_fields(freshness), **_search_coverage_fields(repo), **capability_fields}
+
+
+@mcp.tool(name="indexRepo")
+def index_repo_tool(path: str, semantic: bool = False,
+                    scip: bool | None = None) -> dict[str, Any]:
+    """Build an index for the git repository at `path`, so the other tools
+    have something to read.
+
+    Takes a filesystem `path` rather than a `repo` slug -- deliberately the
+    only tool that does. Slug derivation is one-way, so the server cannot
+    turn a slug into a path for a repo it has never indexed; `path` is
+    exactly what the caller knows and the registry lacks. The returned `repo`
+    is the slug every other tool accepts.
+
+    Returns immediately with `state: "starting"`; the index runs in a
+    detached child. Poll `getIndexStatus` until it reports `indexed: true` or
+    a terminal `indexing.state` (`failed-at-startup`, `abandoned`) -- the
+    loop always terminates.
+
+    `semantic` defaults to False: the semantic stage loads embedding weights
+    (a multi-gigabyte download on first use), which is not something a single
+    tool call should trigger implicitly. `scip=None` leaves the repo's
+    persisted SCIP choice alone.
+    """
+    try:
+        return _spawn_index(path, semantic=semantic, scip=scip)
+    except Exception as exc:  # Broad on purpose: the MCP boundary never raises.
+        return {"error": str(exc)}
+
+
+def _spawn_index(path: str, *, semantic: bool,
+                 scip: bool | None) -> dict[str, Any]:
+    """`indexRepo`'s body. Every pre-flight check runs before anything is
+    spawned, so a caller gets an actionable error instead of a log file to go
+    read."""
+    index_cli = index_cli_module()
+    jarvis_bin = _jarvis_bin()
+    if shutil.which("zoekt-git-index") is None:
+        # Stage 4 of the pipeline is required and fails the run without it
+        # (index_cli.py's "Zoekt (required; failure fails the run)"). The
+        # tree-sitter baseline needs no LANGUAGE toolchain, but it is not
+        # binary-free.
+        return {
+            "error": "zoekt-git-index was not found on PATH; a first index "
+                     "cannot be built without it",
+            "recovery": "sh setup.sh --only zoekt",
+        }
+    resolved = Path(path).expanduser().resolve()
+    index_cli.ensure_git_repo(resolved)
+
+    registry = index_cli.Registry(config.data_dir() / "registry.db")
+    try:
+        slug = index_cli.resolve_slug_for_path(registry, resolved)
+        entry = registry.get(slug)
+    finally:
+        registry.close()
+
+    probe = jobs.lock_state(slug)
+    if probe.held:
+        return {"repo": slug, "path": str(resolved), "status": "indexing",
+                "state": "running", "pid": probe.pid,
+                "log": str(config.index_log(slug)), "alreadyRunning": True}
+    existing_child = _launched.get(slug)
+    if existing_child is not None and existing_child.poll() is None:
+        # The lock probe alone leaves a window: a child spawned moments ago
+        # may not have taken the lock yet, and spawning a second one would
+        # both lose the first handle (leaking a zombie we can no longer reap)
+        # and guarantee one child exits rc 1 on the lock.
+        return {"repo": slug, "path": str(resolved), "status": "indexing",
+                "state": "starting", "pid": existing_child.pid,
+                "log": str(config.index_log(slug)), "alreadyRunning": True}
+
+    flags: list[str] = []
+    if not semantic:
+        flags.append("--no-semantic")
+    if scip is True:
+        flags.append("--scip")
+    elif scip is False:
+        flags.append("--no-scip")
+
+    log_path = config.index_log(slug)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Before Popen, never after: a fast child (tiny repo, warm caches) can
+    # acquire the lock and register before the parent gets another turn, and
+    # a post-spawn write would then recreate state nobody removes. The record
+    # is written once and never mutated, so there is no handoff to serialize.
+    jobs.write_launch_record(slug, log_path)
+
+    log_file = open(log_path, "ab")
+    try:
+        child = subprocess.Popen(
+            # `--slug` is explicit and NOT optional: `resolve_slug_for_path`
+            # may have returned a slug the child would never derive on its own
+            # (a repo registered under a custom --slug resolves by path, not
+            # by basename). Without it the child derives the basename, hits
+            # `_reject_duplicate_slug_for_path`, and dies -- while this tool
+            # has already reported the custom slug to the caller.
+            [jarvis_bin, "index", str(resolved), "--slug", slug, *flags],
+            stdout=subprocess.DEVNULL,
+            stderr=log_file,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env={**os.environ, "JARVIS_DATA_DIR": str(config.data_dir())},
+        )
+    finally:
+        log_file.close()  # the child keeps its own duplicated fd
+    _launched[slug] = child
+
+    payload: dict[str, Any] = {
+        "repo": slug, "path": str(resolved), "status": "indexing",
+        "state": "starting", "pid": child.pid, "log": str(log_path),
+    }
+    if entry is not None:
+        payload["reindex"] = True
+    return payload
 
 @mcp.tool(name="searchCode")
 def search_code(query: str, repo: str | None = None) -> dict[str, Any]:
