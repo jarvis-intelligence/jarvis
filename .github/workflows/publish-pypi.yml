@@ -195,8 +195,8 @@ jobs:
 
           names = sorted(t["name"] for t in tools)
           # Guards against shipping a build that starts but registers nothing.
-          if len(names) != 9:
-              sys.exit(f"expected 9 tools, got {len(names)}: {names}")
+          if len(names) != 10:
+              sys.exit(f"expected 10 tools, got {len(names)}: {names}")
           # FastMCP derives tool descriptions from server.py docstrings; a
           # compilation mode that strips docstrings would pass every other
           # gate and ship undocumented tools.

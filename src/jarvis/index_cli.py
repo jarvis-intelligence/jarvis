@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jarvis import config
+from jarvis import jobs
 from jarvis.graph import (
     GraphStore,
     clear_graph_edges_for_repo,
@@ -311,6 +312,21 @@ def _tracked_blob_count(repo_path: Path) -> int:
     return count
 
 
+def ensure_git_repo(repo_path: Path) -> None:
+    """Raise `NotAGitRepositoryError` unless `repo_path` is inside a git work
+    tree. Extracted from `_git_head` so a caller that only needs the check --
+    the MCP `indexRepo` pre-flight -- does not also need a commit to exist."""
+    check = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True,
+    )
+    if check.returncode != 0:
+        raise NotAGitRepositoryError(
+            f"{repo_path} is not a git repository "
+            f"(git rev-parse --is-inside-work-tree: {check.stderr.strip()})"
+        )
+
+
 def _git_head(repo_path: Path) -> str:
     """Current commit SHA.
 
@@ -321,16 +337,7 @@ def _git_head(repo_path: Path) -> str:
     first raises `NotAGitRepositoryError` for the former; only a real
     git repo with no commits reaches the `IndexingError` below, naming the
     cause rather than letting a bare CalledProcessError escape."""
-    check = subprocess.run(
-        ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True,
-        text=True,
-    )
-    if check.returncode != 0:
-        raise NotAGitRepositoryError(
-            f"{repo_path} is not a git repository "
-            f"(git rev-parse --is-inside-work-tree: {check.stderr.strip()})"
-        )
+    ensure_git_repo(repo_path)
     result = subprocess.run(
         ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
         capture_output=True,
@@ -1006,6 +1013,58 @@ def _reject_duplicate_slug_for_path(registry: Registry, slug: str, repo_path: Pa
             )
 
 
+def _reject_slug_bound_to_another_path(
+    registry: Registry, slug: str, repo_path: Path,
+) -> None:
+    """One path per slug -- the inverse of `_reject_duplicate_slug_for_path`,
+    which enforces one slug per path and deliberately skips this direction.
+
+    Without it, `/a/app` and `/b/app` both derive the slug `app` and the
+    second silently overwrites the first's published index. That mattered
+    little while every index was a deliberate `jarvis index` invocation; the
+    MCP `indexRepo` path supplies paths and never chooses slugs, so it fires
+    routinely.
+
+    A registered path that no longer exists is a MOVE, not a collision --
+    `upsert` already does `path=excluded.path` -- so rejection requires both
+    paths to resolve. Mirrors the sibling guard's `except OSError: continue`.
+    """
+    existing = registry.get(slug)
+    if existing is None:
+        return
+    try:
+        registered = Path(existing.path).resolve(strict=True)
+    except OSError:
+        return
+    if registered == repo_path:
+        return
+    raise IndexingError(
+        f"slug {slug!r} is already bound to {registered}, not {repo_path}. "
+        f"Index this repo under a different name with "
+        f"`jarvis index {repo_path} --slug <name>`, or run "
+        f"`jarvis forget {slug}` first."
+    )
+
+
+def resolve_slug_for_path(registry: Registry, repo_path: Path) -> str:
+    """The slug an index run for `repo_path` should use.
+
+    Resolution order matters: a repo registered under an explicit `--slug`
+    must keep it, so a path lookup precedes basename derivation. Only a
+    genuinely unregistered path falls through to `config.repo_slug`.
+    """
+    resolved = repo_path.resolve()
+    for entry in registry.list():
+        try:
+            if Path(entry.path).resolve() == resolved:
+                return entry.slug
+        except OSError:
+            continue
+    slug = config.repo_slug(resolved.name)
+    _reject_slug_bound_to_another_path(registry, slug, resolved)
+    return slug
+
+
 def _record_failure_best_effort(
     registry: Registry, slug: str, repo_path: Path, language: str,
     reason: str, text: str,
@@ -1035,6 +1094,7 @@ def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None,
     scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
     language: str | None = None, scip: bool | None = None,
+    semantic: bool = True,
     watch: bool = False,
 ) -> str:
     """Runs the staged pipeline for one repo (spec TSI-04 §5 order) and
@@ -1081,16 +1141,41 @@ def index_repo(
     a new repo"; an explicit value updates it (spec TSI-07). `watch=True`
     marks a debounced watch caller so the suppression predicate may skip
     only the SCIP stage; explicit index/reindex calls always retry.
-    """
-    from jarvis.syntax import ParserPool
 
+    `semantic=False` skips the optional semantic stage even when the extra is
+    installed -- the MCP `indexRepo` path passes it so an agent tool call can
+    never implicitly download embedding weights.
+    """
     repo_path = repo_path.resolve()
     slug = config.repo_slug(slug or repo_path.name)
+    # Acquired before the duplicate guards and before the transitional
+    # `indexing` upsert: exclusion has to cover registry writes and artifact
+    # writes alike, or two writers race on the same slug. `flock` and not a
+    # pidfile -- a pidfile is a discovery cache, and nothing here binds a port
+    # to arbitrate a lost race the way ZoektLifecycle does.
+    with jobs.build_lock(slug, root=root):
+        return _index_repo_locked(
+            repo_path, slug=slug, root=root, scheme=scheme,
+            semantic_include=semantic_include, language=language,
+            scip=scip, watch=watch, semantic=semantic,
+        )
+
+
+def _index_repo_locked(
+    repo_path: Path, *, slug: str, root, scheme, semantic_include,
+    language, scip, watch, semantic,
+) -> str:
+    """`index_repo`'s body, running under the per-slug build lock. Split out
+    only so the lock's extent is visible in one place; the staged pipeline is
+    unchanged."""
+    from jarvis.syntax import ParserPool
+
     sha = _git_head(repo_path)
 
     registry = Registry(config.data_dir(root) / "registry.db")
     try:
         _reject_duplicate_slug_for_path(registry, slug, repo_path)
+        _reject_slug_bound_to_another_path(registry, slug, repo_path)
     except Exception:
         registry.close()
         raise
@@ -1185,8 +1270,10 @@ def index_repo(
             prepared_chunks: dict = {}
             chunk_capture_error: Exception | None = None
             try:
-                sem_work = _prepare_semantic_stage(
-                    repo_path, slug, root, semantic_include, manifest)
+                sem_work = (
+                    _prepare_semantic_stage(repo_path, slug, root, semantic_include, manifest)
+                    if semantic else None
+                )
                 parse_for = frozenset()
                 if sem_work is not None:
                     from jarvis import semantic as _semantic
@@ -1483,8 +1570,10 @@ def _cmd_index(args: argparse.Namespace) -> int:
             semantic_include=tuple(raw_include) if raw_include is not None else None,
             language=getattr(args, "language", None),
             scip=getattr(args, "scip", None),
+            semantic=getattr(args, "semantic", None) is not False,
         )
-    except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError, ValueError) as exc:
+    except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError,
+            jobs.BuildLockHeld, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"indexed {slug}")
@@ -1662,6 +1751,7 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
         semantic_include=list(repo.semantic_include),
         language=repo.language_override,
         scip=getattr(args, "scip", None),
+        semantic=getattr(args, "semantic", None) is not False,
     ))
 
 
@@ -1728,39 +1818,52 @@ def _cmd_forget(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    registry = Registry(config.data_dir() / "registry.db")
     try:
-        entry = registry.get(slug)
-        existed = registry.forget(slug)
-    finally:
-        registry.close()
-    if not existed:
-        print(f"error: no such repo: {slug}", file=sys.stderr)
+        with jobs.build_lock(slug):
+            registry = Registry(config.data_dir() / "registry.db")
+            try:
+                entry = registry.get(slug)
+                existed = registry.forget(slug)
+            finally:
+                registry.close()
+            if not existed:
+                print(f"error: no such repo: {slug}", file=sys.stderr)
+                return 1
+            if entry is not None:
+                _unpin_zoekt_repo_name(Path(entry.path))
+            # Package-edge teardown (spec TSI-08: refresh forget for all new
+            # artifacts while preserving Zoekt unpinning and package-edge
+            # teardown): every package this repo owned and every edge touching it
+            # dies with the registration. Other repos' identity rows survive —
+            # an edge pointing into a forgotten repo's packages would otherwise
+            # dangle. This closes the evidence-found gap where forget left the
+            # graph rows behind and blastRadius kept answering for a forgotten
+            # repo.
+            graph_store = GraphStore(config.data_dir() / "registry.db")
+            try:
+                graph_store.forget_repo(slug)
+            finally:
+                graph_store.close()
+            index_dir = config.index_dir(slug)
+            if index_dir.exists():
+                shutil.rmtree(index_dir)
+            _remove_zoekt_shards(slug)
+            shutil.rmtree(config.lancedb_dir() / f"{slug}.lance", ignore_errors=True)
+            # D-06: forgetting a repo removes everything jarvis stored for it. The
+            # scip-swift cache legitimately may not exist (never-Swift repo, or the
+            # binary never ran), hence ignore_errors like the lancedb sweep above.
+            shutil.rmtree(config.swift_cache_dir(slug), ignore_errors=True)
+            # D-06 continued: the launch record and index log are jarvis state
+            # too. Best-effort, like the sweeps above -- a cleanup failure must
+            # not fail a forget. The lock FILE itself is preserved: see
+            # jobs.clear_job_files.
+            jobs.clear_job_files(slug)
+    except jobs.BuildLockHeld as exc:
+        # Destroying a repo's row, graph edges, and artifacts while a writer
+        # is mid-run corrupts that run and can resurrect artifacts the forget
+        # already removed.
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    if entry is not None:
-        _unpin_zoekt_repo_name(Path(entry.path))
-    # Package-edge teardown (spec TSI-08: refresh forget for all new
-    # artifacts while preserving Zoekt unpinning and package-edge
-    # teardown): every package this repo owned and every edge touching it
-    # dies with the registration. Other repos' identity rows survive —
-    # an edge pointing into a forgotten repo's packages would otherwise
-    # dangle. This closes the evidence-found gap where forget left the
-    # graph rows behind and blastRadius kept answering for a forgotten
-    # repo.
-    graph_store = GraphStore(config.data_dir() / "registry.db")
-    try:
-        graph_store.forget_repo(slug)
-    finally:
-        graph_store.close()
-    index_dir = config.index_dir(slug)
-    if index_dir.exists():
-        shutil.rmtree(index_dir)
-    _remove_zoekt_shards(slug)
-    shutil.rmtree(config.lancedb_dir() / f"{slug}.lance", ignore_errors=True)
-    # D-06: forgetting a repo removes everything jarvis stored for it. The
-    # scip-swift cache legitimately may not exist (never-Swift repo, or the
-    # binary never ran), hence ignore_errors like the lancedb sweep above.
-    shutil.rmtree(config.swift_cache_dir(slug), ignore_errors=True)
     print(f"forgot {slug}")
     return 0
 
@@ -1801,7 +1904,8 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             # Debounce semantics are unchanged; watch.py stays pure.
             index_repo(
                 repo_path, slug=slug, scheme=args.scheme, language=args.language,
-                scip=getattr(args, "scip", None), watch=True,
+                scip=getattr(args, "scip", None),
+                semantic=getattr(args, "semantic", None) is not False, watch=True,
             )
             print(f"[watch] {slug} reindexed")
         except Exception as exc:
@@ -1874,6 +1978,23 @@ def _add_scip_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_semantic_flag(parser: argparse.ArgumentParser) -> None:
+    """The mutually exclusive `--semantic` / `--no-semantic` pair. One
+    tri-state dest, mirroring `_add_scip_flag`: omitted means "leave the
+    default in force" (the stage runs when the extra is installed), explicit
+    means the caller decided. Unlike --scip this is NOT persisted -- it is a
+    per-run cost decision, not a property of the repo."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--semantic", dest="semantic", action="store_true", default=None,
+        help="build the semantic (vector) index when the `semantic` extra is installed",
+    )
+    group.add_argument(
+        "--no-semantic", dest="semantic", action="store_false", default=None,
+        help="skip the semantic stage even when the `semantic` extra is installed",
+    )
+
+
 def _reject_removed_options(argv: list[str]) -> None:
     for arg in argv:
         if arg.split("=", 1)[0] in _REMOVED_OPTIONS:
@@ -1922,6 +2043,7 @@ def build_parser() -> argparse.ArgumentParser:
              "persisted and reused by reindex/watch)",
     )
     _add_scip_flag(index_parser)
+    _add_semantic_flag(index_parser)
     index_parser.set_defaults(func=_cmd_index)
     # SEMA-02 structural gate: only `jarvis index` offers — reindex's
     # synthetic Namespace, watch's index_repo call, and MCP paths all
@@ -1938,6 +2060,7 @@ def build_parser() -> argparse.ArgumentParser:
     reindex_parser = subparsers.add_parser("reindex", help="re-run indexing for a registered repo")
     reindex_parser.add_argument("slug")
     _add_scip_flag(reindex_parser)
+    _add_semantic_flag(reindex_parser)
     reindex_parser.set_defaults(func=_cmd_reindex)
 
     forget_parser = subparsers.add_parser("forget", help="remove a repo's registration and published index")
@@ -1959,6 +2082,7 @@ def build_parser() -> argparse.ArgumentParser:
              "persisted and reused by reindex/watch)",
     )
     _add_scip_flag(watch_parser)
+    _add_semantic_flag(watch_parser)
     watch_parser.set_defaults(func=_cmd_watch)
 
     return parser

@@ -49,6 +49,28 @@ def _init_git_repo(path: Path) -> None:
     subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=path, check=True)
 
 
+def _stub_pipeline(monkeypatch) -> None:
+    """Stub the external pipeline the way the neighbouring index_repo tests
+    do: the SCIP step fails (exit-0 degraded) and every other `_run` step
+    returns success without spawning binaries, so lock tests exercise the
+    lock, not the optional tooling."""
+    from jarvis import index_cli
+
+    monkeypatch.setattr(index_cli, "check_scip_version", lambda: None)
+    monkeypatch.setattr(
+        index_cli, "_prepare_semantic_stage",
+        lambda *a, **k: None,
+    )
+
+    def _run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            from jarvis.index_cli import IndexingError
+            raise IndexingError(f"{step} failed (simulated real failure):\nexit 1")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr(index_cli, "_run", _run)
+
+
 def test_git_tracked_files_lists_committed_paths(tmp_path: Path):
     from jarvis.index_cli import _git_tracked_files
 
@@ -389,6 +411,121 @@ def test_reject_duplicate_slug_compares_resolved_paths(tmp_path: Path, monkeypat
             _reject_duplicate_slug_for_path(registry, "second", repo.resolve())
     finally:
         registry.close()
+
+
+
+def test_resolve_slug_reuses_the_registered_slug_for_a_known_path(tmp_path, monkeypatch):
+    """A repo indexed under an explicit --slug must keep it: resolution is by
+    path first, basename second. Otherwise indexRepo would derive a different
+    slug and index the same repo twice."""
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("custom-name", str(repo), "python", None, "indexed")
+        assert index_cli.resolve_slug_for_path(registry, repo) == "custom-name"
+    finally:
+        registry.close()
+
+
+def test_resolve_slug_rejects_same_basename_at_a_different_live_path(tmp_path, monkeypatch):
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    first = tmp_path / "a" / "app"
+    second = tmp_path / "b" / "app"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(first), "python", None, "indexed")
+        with pytest.raises(index_cli.IndexingError) as exc:
+            index_cli.resolve_slug_for_path(registry, second)
+        assert str(first) in str(exc.value)
+        assert str(second) in str(exc.value)
+    finally:
+        registry.close()
+
+
+def test_resolve_slug_allows_a_moved_repo(tmp_path, monkeypatch):
+    """The registered path no longer exists, so this is a move, not a
+    collision -- `upsert` already updates `path`."""
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    moved_to = tmp_path / "new" / "app"
+    moved_to.mkdir(parents=True)
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(tmp_path / "gone" / "app"), "python", None, "indexed")
+        assert index_cli.resolve_slug_for_path(registry, moved_to) == "app"
+    finally:
+        registry.close()
+
+
+def test_resolve_slug_derives_basename_when_unregistered(tmp_path, monkeypatch):
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "My Repo"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        assert index_cli.resolve_slug_for_path(registry, repo) == "my-repo"
+    finally:
+        registry.close()
+
+
+def test_index_repo_rejects_same_slug_at_a_different_path(tmp_path, monkeypatch):
+    """The guard must hold in the locked writer, not only in the MCP
+    pre-flight -- otherwise it is pure TOCTOU."""
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    first = tmp_path / "a" / "app"
+    first.mkdir(parents=True)
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(first), "python", None, "indexed")
+    finally:
+        registry.close()
+
+    second = tmp_path / "b" / "app"
+    second.mkdir(parents=True)
+    shutil.copytree(FIXTURE_REPO, second, dirs_exist_ok=True)
+    _init_git_repo(second)
+    _stub_pipeline(monkeypatch)
+    with pytest.raises(index_cli.IndexingError):
+        index_cli.index_repo(second)
+
+
+def test_ensure_git_repo_rejects_a_plain_directory(tmp_path):
+    from jarvis import index_cli
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(index_cli.NotAGitRepositoryError):
+        index_cli.ensure_git_repo(plain)
+
+
+def test_ensure_git_repo_rejects_a_missing_path(tmp_path):
+    """A nonexistent path must surface as `NotAGitRepositoryError` (which
+    `_cmd_index` catches) — not a raw `FileNotFoundError` from Python's own
+    chdir, which would escape as a traceback. This pins the `git -C`
+    invocation form: with `cwd=repo_path`, Python raises before git runs."""
+    from jarvis import index_cli
+
+    missing = tmp_path / "does-not-exist"
+    with pytest.raises(index_cli.NotAGitRepositoryError):
+        index_cli.ensure_git_repo(missing)
 
 
 def test_java_indexer_env_disables_gradle_parallelism(monkeypatch):
@@ -973,7 +1110,7 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
     captured: dict = {}
 
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None, scip=None, watch=False):
+                        language=None, scip=None, semantic=True, watch=False):
         captured["path"] = path
         captured["slug"] = slug
         captured["scheme"] = scheme
@@ -1193,6 +1330,65 @@ def test_forget_succeeds_when_swift_cache_dir_absent(tmp_path: Path, monkeypatch
     assert "forgot plainpy" in capsys.readouterr().out
 
 
+def test_forget_removes_job_files(tmp_path, monkeypatch):
+    """`jarvis forget` removes everything jarvis stored for a repo (D-06) --
+    launch record and index log included. The lock FILE survives on purpose:
+    unlinking it would let a waiter lock a detached inode."""
+    from jarvis import index_cli, jobs
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(repo), "python", None, "indexed")
+    finally:
+        registry.close()
+
+    jobs.write_launch_record("app", config.index_log("app"))
+    config.index_log("app").write_text("stderr", encoding="utf-8")
+
+    parser = index_cli.build_parser()
+    args = parser.parse_args(["forget", "app"])
+    assert args.func(args) == 0
+
+    assert not config.index_launchfile("app").exists()
+    assert not config.index_log("app").exists()
+
+
+def test_forget_refuses_while_a_writer_holds_the_lock(tmp_path, monkeypatch, capsys):
+    """Destroying a repo's index out from under a live writer is the failure
+    this guards. Tested against a HELD lock, not merely cleanup after
+    release."""
+    from jarvis import index_cli, jobs
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(repo), "python", None, "indexed")
+    finally:
+        registry.close()
+    jobs.write_launch_record("app", config.index_log("app"))
+
+    parser = index_cli.build_parser()
+    args = parser.parse_args(["forget", "app"])
+    with jobs.build_lock("app"):
+        assert args.func(args) == 1
+
+    # Nothing was destroyed, and the row still exists.
+    assert config.index_launchfile("app").exists()
+    assert "already running" in capsys.readouterr().err
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        assert registry.get("app") is not None
+    finally:
+        registry.close()
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
 def test_index_repo_builds_semantic_index_and_searches(tmp_path: Path, monkeypatch):
@@ -1232,7 +1428,7 @@ def test_semantic_include_flag_reaches_index_repo_as_a_tuple(tmp_path, monkeypat
 
     def _fake_index_repo(repo_path, *, slug=None, root=None, scheme=None,
                          semantic_include=None, language=None, scip=None,
-                         watch=False):
+                         semantic=True, watch=False):
         captured["semantic_include"] = semantic_include
         return "myrepo"
 
@@ -1499,7 +1695,7 @@ def test_reindex_forwards_stored_language_override(tmp_path: Path, monkeypatch):
 
     captured: dict = {}
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None, scip=None, watch=False):
+                        language=None, scip=None, semantic=True, watch=False):
         captured["language"] = language
         return slug
 
@@ -3958,7 +4154,7 @@ def test_cmd_watch_runs_every_event_and_marks_watch_caller(
 
     def fake_index_repo(path, *, slug=None, root=None, scheme=None,
                         semantic_include=None, language=None, scip=None,
-                        watch=False):
+                        semantic=True, watch=False):
         captured["scip"] = scip
         captured["watch"] = watch
         captured["slug"] = slug
@@ -4085,3 +4281,113 @@ def test_semantic_chunk_capture_failure_discards_semantic_work(
         assert entry.semantic_indexed_at is None  # discarded, not marked
     finally:
         registry.close()
+
+
+def test_index_repo_semantic_false_skips_the_stage(tmp_path, monkeypatch):
+    """An agent-triggered index must never implicitly download embedding
+    weights. `semantic=False` skips prepare entirely -- not merely the
+    install offer, which is TTY-gated and therefore already unreachable."""
+    from jarvis import index_cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    calls: list[str] = []
+    monkeypatch.setattr(
+        index_cli, "_prepare_semantic_stage",
+        lambda *a, **k: calls.append("prepared") or None,
+    )
+    monkeypatch.setattr(index_cli, "check_scip_version", lambda: None)
+
+    def _run(cmd, *, cwd, step, env=None):
+        # Degrade path (narrowed FALL-04): a simulated SCIP failure keeps
+        # the fake run cheap while the rest of the pipeline still publishes.
+        if step.endswith(" index"):
+            from jarvis.index_cli import IndexingError
+            raise IndexingError(f"{step} failed (simulated real failure):\nexit 1")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr(index_cli, "_run", _run)
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+
+    index_cli.index_repo(repo_dir, semantic=False)
+    assert calls == []
+
+    index_cli.index_repo(repo_dir, semantic=True)
+    assert calls == ["prepared"]
+
+
+def test_no_semantic_flag_parses_to_false():
+    from jarvis import index_cli
+
+    parser = index_cli.build_parser()
+    assert parser.parse_args(["index", "/r", "--no-semantic"]).semantic is False
+    assert parser.parse_args(["index", "/r", "--semantic"]).semantic is True
+    assert parser.parse_args(["index", "/r"]).semantic is None
+    assert parser.parse_args(["reindex", "s", "--no-semantic"]).semantic is False
+    assert parser.parse_args(["watch", "/r", "--no-semantic"]).semantic is False
+
+
+def test_index_repo_refuses_when_build_lock_held(tmp_path, monkeypatch):
+    """Exclusion must cover the registry write too: the loser leaves the row
+    exactly as it found it."""
+    from jarvis import index_cli, jobs
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    _stub_pipeline(monkeypatch)
+
+    with jobs.build_lock(config.repo_slug(repo_dir.name)):
+        with pytest.raises(jobs.BuildLockHeld):
+            index_cli.index_repo(repo_dir)
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        assert registry.get(config.repo_slug(repo_dir.name)) is None
+    finally:
+        registry.close()
+
+
+def test_index_repo_lock_is_held_at_the_transitional_upsert(tmp_path, monkeypatch):
+    """The lock must be acquired BEFORE the row flips to 'indexing', or two
+    writers can both register."""
+    from jarvis import index_cli, jobs
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    _stub_pipeline(monkeypatch)
+    slug = config.repo_slug(repo_dir.name)
+
+    seen: list[bool] = []
+    real_upsert = index_cli.Registry.upsert
+
+    def _spy(self, *args, **kwargs):
+        seen.append(jobs.lock_state(slug).held)
+        return real_upsert(self, *args, **kwargs)
+
+    monkeypatch.setattr(index_cli.Registry, "upsert", _spy)
+    index_cli.index_repo(repo_dir)
+    assert seen and all(seen)
+
+
+def test_index_repo_releases_lock_on_failure(tmp_path, monkeypatch):
+    from jarvis import index_cli, jobs
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    _stub_pipeline(monkeypatch)
+    monkeypatch.setattr(
+        index_cli, "_pin_zoekt_repo_name",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    with pytest.raises(Exception):
+        index_cli.index_repo(repo_dir)
+    assert jobs.lock_state(config.repo_slug(repo_dir.name)).held is False

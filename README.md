@@ -12,7 +12,7 @@
 **Local-first code intelligence for coding agents.** Precomputed SCIP navigation
 (go-to-definition, find-references, call/type hierarchy, document symbols), Zoekt
 lexical search, natural-language semantic search, and cross-repo blast radius —
-exposed as nine MCP tools for Claude Code, Cursor, or any MCP client.
+exposed as ten MCP tools for Claude Code, Cursor, or any MCP client.
 
 One indexing CLI writes up, one stdio runtime reads down — the storage seam in
 `~/.jarvis` is the only contract between them. **No server, no auth, no network,
@@ -62,7 +62,7 @@ before installing.
    embeddings), and publishes everything **atomically** into `~/.jarvis` as one
    immutable snapshot selected by a single `current` pointer. SCIP tooling
    missing or failing degrades the run to exit-0 — the baseline still publishes.
-2. **Serve.** `jarvis-server` speaks MCP over stdio and exposes nine tools,
+2. **Serve.** `jarvis-server` speaks MCP over stdio and exposes ten tools,
    backed by lazy singletons; a `zoekt-webserver` is spawned on first search
    and shared across processes via pidfile.
 3. **Ask.** Your agent calls tools. Every query opens the published
@@ -175,6 +175,7 @@ uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers, for 
 | `semanticSearch` | Natural-language search — vector hits fused with Zoekt lexical hits and SCIP symbol-definition matches via reciprocal rank fusion |
 | `blastRadius` | Which *other* indexed repos depend on a package, up to 2 hops |
 | `getIndexStatus` | Published commit, freshness, staleness vs. a working tree; `capabilities.tools` reports per-tool providers, `capabilities.syntax` reports extraction counts, and freshness names the snapshot `generation` |
+| `indexRepo` | Build an index for a git repo at `path` so the other tools have something to read. Returns immediately; poll `getIndexStatus`. `semantic` defaults to false. |
 
 `documentSymbols`/`goToDefinition` are **per-file provider routed**: a file with
 usable SCIP coverage is answered by SCIP (full identifiers, references,
@@ -411,6 +412,10 @@ JARVIS_DATA_DIR=/custom/path jarvis index /path/to/repo
   query/document instruction prefix applied before embedding. Auto-detected for bge-m3,
   e5, and nomic-embed; set these if using a different model that needs one — `semanticSearch`
   warns when an unlisted model has no prefix configured.
+
+`jarvis index --no-semantic` skips the semantic (vector) stage even when the
+`semantic` extra is installed. The MCP `indexRepo` tool passes it by default,
+so an agent tool call never implicitly downloads embedding weights.
 
 ## Agent skills
 

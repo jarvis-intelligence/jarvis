@@ -2,7 +2,7 @@
 
 ## High-Level Overview
 
-jarvis is a **local-first, single-user code intelligence MCP server** that combines structural navigation (SCIP-backed) with lexical search (Zoekt-backed) and natural-language semantic/vector search in a single stdio process. It bridges the SCIP indexing ecosystem with the MCP protocol, exposing 9 tools to Claude Code, Cursor, and other MCP clients: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius`.
+jarvis is a **local-first, single-user code intelligence MCP server** that combines structural navigation (SCIP-backed) with lexical search (Zoekt-backed) and natural-language semantic/vector search in a single stdio process. It bridges the SCIP indexing ecosystem with the MCP protocol, exposing 10 tools to Claude Code, Cursor, and other MCP clients: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius`, `indexRepo`.
 
 The system is built around five core engines:
 
@@ -24,7 +24,7 @@ other contract.
 | Layer | Contents |
 |---|---|
 | 1 · Clients | Claude Code, Cursor, any MCP host |
-| 2 · MCP Server | `server.py` — FastMCP over stdio, 9 tools |
+| 2 · MCP Server | `server.py` — FastMCP over stdio, 10 tools |
 | 3 · Engines | Query (`query.py`), Search (`search.py`), Graph (`graph.py`), Semantic (`semantic.py`, `chunker.py`, `embeddings.py`, `symbol_search.py`), Syntax (`syntax.py`, `syntax_index.py`) |
 | 4 · Storage | `index-<sha>-<generation>.db` + `current` pointer, `.zoekt/` shards, `registry.db`, `~/.jarvis/lancedb/` |
 | 5 · Indexing orchestration | `index_cli.py` — capture → syntax baseline → optional SCIP → Zoekt → optional semantic → graph → atomic publish |
@@ -40,7 +40,7 @@ only.
 Expanding layers 1–4 of the table above, the runtime path is:
 
 - **Client**: Claude Code / Cursor / any MCP client → MCP stdio
-- **Server** (`server.py`): FastMCP dispatcher → 9 tools
+- **Server** (`server.py`): FastMCP dispatcher → 10 tools
 - **Query Engine** (`query.py`): reads the navigation snapshot SQLite (SCIP documents/chunks/global_symbols tables + namespaced `syntax_*` tables) and routes per file
 - **Search Engine** (`search.py`): HTTP client to embedded Zoekt webserver
 - **Graph Engine** (`graph.py`): Queries package edges in registry.db

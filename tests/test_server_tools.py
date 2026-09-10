@@ -1,4 +1,4 @@
-"""MCP in-memory client session: list_tools returns the 9 tools, and
+"""MCP in-memory client session: list_tools returns the 10 tools, and
 roundtrips for documentSymbols, searchCode, semanticSearch, and blastRadius against the
 synthetic fixture / a fake zoekt-webserver / an in-memory package graph."""
 
@@ -31,6 +31,7 @@ EXPECTED_TOOLS = {
     "searchCode",
     "semanticSearch",
     "blastRadius",
+    "indexRepo",
 }
 
 
@@ -47,12 +48,15 @@ def _wired_query_service(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(server, "_query_service", None)
 
 
-@pytest.mark.anyio
-async def test_list_tools_returns_nine_tools():
-    async with create_connected_server_and_client_session(server.mcp) as client:
-        result = await client.list_tools()
-        names = {tool.name for tool in result.tools}
-        assert names == EXPECTED_TOOLS
+@pytest.fixture(autouse=True)
+def _no_leaked_children():
+    """`_spawn_index` mutates `server._launched` directly, so a spawn test
+    leaves a live handle behind and the next test's spawn hits the
+    duplicate-spawn guard and returns `alreadyRunning` instead of spawning.
+    Clear it around every test in this module."""
+    server._launched.clear()
+    yield
+    server._launched.clear()
 
 
 @pytest.mark.anyio
@@ -324,14 +328,43 @@ def test_error_payload_passes_through_other_errors(tmp_path: Path, monkeypatch):
 
 
 
-def test_error_payload_without_a_registry_row_stays_bare(tmp_path: Path, monkeypatch):
-    """D-14 keys appear only when the registry row actually explains the
-    state — a repo that was never registered keeps the bare error dict."""
+
+
+def test_missing_index_names_the_recovery_tool_without_a_row(tmp_path, monkeypatch):
+    """The row-less case is the one that matters: a never-indexed repo has no
+    registry row, so the pre-existing structured keys never appeared."""
+    from jarvis import server
     from jarvis.index_reader import IndexNotFoundError
 
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    payload = server._error_payload("absent", IndexNotFoundError("no published index for absent"))
-    assert payload == {"error": "no published index for absent"}
+    payload = server._error_payload("absent", IndexNotFoundError("no published index"))
+
+    assert payload["recoveryTool"] == "indexRepo"
+    assert "path" in payload["recoveryToolArgs"]
+    assert "state" not in payload  # no row to explain anything
+
+
+def test_missing_index_keeps_row_explanation_and_adds_the_tool(tmp_path, monkeypatch):
+    from jarvis import config, server
+    from jarvis.index_reader import IndexNotFoundError
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.record_failure("app", "/tmp/app", "python",
+                                origin="manual", reason="boom", stderr="trace")
+    finally:
+        registry.close()
+
+    payload = server._error_payload("app", IndexNotFoundError("no published index"))
+
+    assert payload["error"] == "no published index"
+    assert payload["cause"] == "boom"
+    assert payload["recovery"]  # prose recovery preserved
+    assert payload["recoveryTool"] == "indexRepo"
+    assert "status_stderr" not in payload
+    assert "trace" not in str(payload)
 
 
 def test_error_payload_does_not_mask_other_faults_on_a_degraded_repo(tmp_path: Path, monkeypatch):
@@ -353,9 +386,11 @@ def test_error_payload_does_not_mask_other_faults_on_a_degraded_repo(tmp_path: P
     assert payload == {"error": "kaboom"}
 
 
-def test_error_payload_degrades_to_bare_error_when_registry_is_unreadable(tmp_path: Path, monkeypatch):
+def test_error_payload_with_unreadable_registry_still_names_the_recovery_tool(tmp_path: Path, monkeypatch):
     """A broken registry degrades the lookup, never replaces one error with
-    another (the `_registry_status` best-effort convention)."""
+    another (the `_registry_entry` best-effort convention) — and the
+    recovery-tool keys survive the degraded lookup because they need no
+    row: only the row-derived `state`/`cause`/`recovery` keys go missing."""
     from jarvis import registry as registry_module
     from jarvis.index_reader import IndexNotFoundError
     from jarvis.registry import Registry
@@ -373,7 +408,11 @@ def test_error_payload_degrades_to_bare_error_when_registry_is_unreadable(tmp_pa
     monkeypatch.setattr(registry_module, "Registry", _unusable)
 
     payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
-    assert payload == {"error": "no pointer"}
+    assert payload == {
+        "error": "no pointer",
+        "recoveryTool": "indexRepo",
+        "recoveryToolArgs": {"path": "<the repo's local git working directory>"},
+    }
 
 
 
@@ -910,3 +949,371 @@ def test_get_index_status_existing_keys_unchanged_for_a_legacy_snapshot():
     assert result["indexed"] is True
     assert result["capabilities"]["tools"]["documentSymbols"]["providers"] == ["scip"]
     assert result["capabilities"]["syntax"]["available"] is False
+
+
+class _NotIndexedStub:
+    """A QueryService whose repo has no published index."""
+
+    def get_index_status(self, repo: str, repo_path: str | None = None):
+        return False, None
+
+
+def test_status_reports_starting_immediately_after_spawn(tmp_path, monkeypatch):
+    """The regression that makes the whole poll contract usable: between
+    Popen returning and the child registering there is no row and no lock, and
+    a naive reading is 'not indexed, nothing running' -- so the agent spawns
+    again, forever."""
+    from jarvis import config, jobs, server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    jobs.write_launch_record("app", config.index_log("app"))
+
+    class _Live:
+        pid = 4242
+        def poll(self):
+            return None
+
+    monkeypatch.setitem(server._launched, "app", _Live())
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+
+    result = server.get_index_status(repo="app")
+    assert result["indexed"] is False
+    assert result["indexing"]["state"] == "starting"
+    assert result["indexing"]["pid"] == 4242
+
+
+def test_status_reports_failed_at_startup_for_an_unreaped_child(tmp_path, monkeypatch):
+    """A real child that exited but was never waited on is a zombie whose pid
+    still answers os.kill(pid, 0). Observation must reap instead. Cannot be
+    caught with a mocked Popen.
+
+    Reuses `_exited_but_unreaped_child` from `tests/test_jobs.py` (import it)
+    rather than spinning on `poll()`: spinning reaps, and a subsequent
+    `poll()` on the reaped handle returns 0 from swallowed ECHILD, so the
+    exit code asserted below would be fabricated."""
+    from jarvis import config, jobs, server
+    from tests.test_jobs import _exited_but_unreaped_child
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    jobs.write_launch_record("app", config.index_log("app"))
+    child = _exited_but_unreaped_child()
+    monkeypatch.setitem(server._launched, "app", child)
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+
+    try:
+        result = server.get_index_status(repo="app")
+        assert result["indexing"]["state"] == "failed-at-startup"
+        assert result["indexing"]["exitCode"] == 3
+        assert result["indexing"]["log"].endswith("index-app.log")
+    finally:
+        child.wait()
+
+
+def test_status_reports_running_when_the_child_holds_the_lock(tmp_path, monkeypatch):
+    """Child-ready-before-parent-returns: the child got there first. The
+    launch record must be exactly what the parent wrote, proving there is no
+    post-spawn mutation to interleave with."""
+    from jarvis import config, jobs, server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    jobs.write_launch_record("app", config.index_log("app"))
+    before = config.index_launchfile("app").read_bytes()
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+
+    with jobs.build_lock("app"):
+        result = server.get_index_status(repo="app")
+
+    assert result["indexing"]["state"] == "running"
+    assert config.index_launchfile("app").read_bytes() == before
+
+
+def test_status_leftover_record_does_not_mask_later_states(tmp_path, monkeypatch):
+    """Rows 2-4 precede the record, which is never deleted."""
+    from jarvis import config, jobs, server
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    jobs.write_launch_record("app", config.index_log("app"))
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", "/tmp/app", "python", None, "indexing")
+    finally:
+        registry.close()
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+    assert server.get_index_status(repo="app")["indexing"]["state"] == "abandoned"
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.mark_status("app", "failed")
+    finally:
+        registry.close()
+    assert "indexing" not in server.get_index_status(repo="app")
+
+
+def test_status_omits_indexing_when_nothing_in_flight(tmp_path, monkeypatch):
+    from jarvis import server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(server, "_service", lambda: _NotIndexedStub())
+    assert "indexing" not in server.get_index_status(repo="app")
+
+
+def test_index_repo_tool_spawns_and_reports_starting(tmp_path, monkeypatch):
+    from jarvis import config, jobs, server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which",
+                        lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(server.index_cli_module(), "ensure_git_repo", lambda p: None)
+
+    captured: dict = {}
+
+    class _Fake:
+        pid = 999
+
+        def poll(self):
+            return None
+
+    def _fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return _Fake()
+
+    monkeypatch.setattr(server.subprocess, "Popen", _fake_popen)
+
+    result = server.index_repo_tool(path=str(repo))
+
+    assert result["repo"] == "app"
+    assert result["state"] == "starting"
+    assert result["pid"] == 999
+    assert captured["argv"][:5] == [
+        "/fake/jarvis", "index", str(repo.resolve()), "--slug", "app",
+    ]
+    assert "--no-semantic" in captured["argv"]
+    # The record exists by the time the tool returns, so an immediate poll
+    # can never see "nothing running".
+    assert jobs.read_launch_record("app") is not None
+
+
+def test_index_repo_tool_never_inherits_server_stdout(tmp_path, monkeypatch):
+    """stdio IS the MCP transport: one inherited write corrupts the JSON-RPC
+    stream and kills the session."""
+    from jarvis import server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(server.index_cli_module(), "ensure_git_repo", lambda p: None)
+
+    captured: dict = {}
+
+    class _Fake:
+        pid = 1
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(server.subprocess, "Popen",
+                        lambda argv, **kw: (captured.update(kw), _Fake())[1])
+    server.index_repo_tool(path=str(repo))
+
+    assert captured["stdout"] is server.subprocess.DEVNULL
+    assert captured["stdin"] is server.subprocess.DEVNULL
+    assert captured["stderr"] is not None
+    assert captured["stderr"] is not server.subprocess.DEVNULL
+    assert captured["start_new_session"] is True
+    assert captured["env"]["JARVIS_DATA_DIR"] == str(config.data_dir())
+
+
+def test_index_repo_tool_semantic_true_omits_the_flag(tmp_path, monkeypatch):
+    from jarvis import server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(server.index_cli_module(), "ensure_git_repo", lambda p: None)
+
+    captured: dict = {}
+
+    class _Fake:
+        pid = 1
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(server.subprocess, "Popen",
+                        lambda argv, **kw: (captured.update(argv=argv), _Fake())[1])
+    server.index_repo_tool(path=str(repo), semantic=True, scip=False)
+
+    assert "--no-semantic" not in captured["argv"]
+    assert "--no-scip" in captured["argv"]
+
+
+def test_index_repo_tool_passes_a_registered_custom_slug(tmp_path, monkeypatch):
+    """A repo registered under an explicit --slug resolves by path, not by
+    basename. Without passing --slug through, the child derives the basename,
+    trips `_reject_duplicate_slug_for_path`, and dies -- while this tool has
+    already told the caller to poll the custom slug."""
+    from jarvis import config, server
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("custom-name", str(repo), "python", None, "indexed")
+    finally:
+        registry.close()
+
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(server.index_cli_module(), "ensure_git_repo", lambda p: None)
+
+    captured: dict = {}
+
+    class _Fake:
+        pid = 7
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(server.subprocess, "Popen",
+                        lambda argv, **kw: (captured.update(argv=argv), _Fake())[1])
+    result = server.index_repo_tool(path=str(repo))
+
+    assert result["repo"] == "custom-name"
+    assert result["reindex"] is True
+    assert captured["argv"][3:5] == ["--slug", "custom-name"]
+
+
+def test_index_repo_tool_does_not_spawn_a_second_child(tmp_path, monkeypatch):
+    """The lock probe leaves a window: a child spawned moments ago may not
+    hold the lock yet. Spawning again would drop the first handle, leaking a
+    zombie that can no longer be reaped."""
+    from jarvis import server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(server.index_cli_module(), "ensure_git_repo", lambda p: None)
+
+    class _Live:
+        pid = 11
+        def poll(self):
+            return None
+
+    monkeypatch.setitem(server._launched, "app", _Live())
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn a duplicate")
+
+    monkeypatch.setattr(server.subprocess, "Popen", _no_spawn)
+    result = server.index_repo_tool(path=str(repo))
+
+    assert result["alreadyRunning"] is True
+    assert result["pid"] == 11
+
+
+def test_index_repo_tool_preflight_missing_zoekt(tmp_path, monkeypatch):
+    """TSI removed the language-toolchain blocker, not every binary: Stage 4
+    Zoekt is still required, so say so instead of spawning a doomed child."""
+    from jarvis import server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which",
+                        lambda name: None if name == "zoekt-git-index" else f"/usr/bin/{name}")
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn")
+
+    monkeypatch.setattr(server.subprocess, "Popen", _no_spawn)
+    result = server.index_repo_tool(path=str(repo))
+
+    assert "zoekt-git-index" in result["error"]
+    assert result["recovery"] == "sh setup.sh --only zoekt"
+
+
+def test_index_repo_tool_preflight_not_a_git_repo(tmp_path, monkeypatch):
+    from jarvis import index_cli, server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "plain"
+    repo.mkdir()
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    # Brief drift fix: `subprocess.run` inside `ensure_git_repo` constructs
+    # the module-global `Popen`, so a blanket patch would make the git
+    # pre-flight probe itself raise "must not spawn". Pass `git` through to
+    # the real Popen (it IS the pre-flight working) and forbid only the
+    # index child.
+    real_popen = server.subprocess.Popen
+
+    def _no_spawn(argv, *a, **k):
+        if argv[0] == "git":
+            return real_popen(argv, *a, **k)
+        raise AssertionError("must not spawn")
+
+    monkeypatch.setattr(server.subprocess, "Popen", _no_spawn)
+    result = server.index_repo_tool(path=str(repo))
+    assert "not a git repository" in result["error"]
+
+
+def test_index_repo_tool_adopts_a_live_job(tmp_path, monkeypatch):
+    from jarvis import jobs, server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(server.index_cli_module(), "ensure_git_repo", lambda p: None)
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn a duplicate")
+
+    monkeypatch.setattr(server.subprocess, "Popen", _no_spawn)
+    with jobs.build_lock("app"):
+        result = server.index_repo_tool(path=str(repo))
+
+    assert result["alreadyRunning"] is True
+    assert result["state"] == "running"
+
+
+def test_index_repo_tool_reports_missing_binary(tmp_path, monkeypatch):
+    from jarvis import server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    # Brief drift fix: the verbatim brief test patches only `shutil.which`,
+    # but any installed venv ships `bin/jarvis` next to the interpreter, so
+    # `_jarvis_bin()`'s candidate lookup would succeed and the tool would
+    # report the zoekt error instead. Point sys.executable at a directory
+    # with no `jarvis` sibling so "no jarvis anywhere" actually holds; the
+    # test logic (real `_jarvis_bin`, PATH lookup dead) is unchanged.
+    monkeypatch.setattr(server.sys, "executable",
+                        str(tmp_path / "venv" / "bin" / "python"))
+    monkeypatch.setattr(server.shutil, "which", lambda name: None)
+    result = server.index_repo_tool(path=str(repo))
+    assert "jarvis" in result["error"]
+
+
+@pytest.mark.anyio
+async def test_index_repo_tool_is_registered():
+    """Extends the file's existing EXPECTED_TOOLS convention rather than
+    reaching into FastMCP internals."""
+    async with create_connected_server_and_client_session(server.mcp) as client:
+        listed = {tool.name for tool in (await client.list_tools()).tools}
+    assert listed == EXPECTED_TOOLS
