@@ -1,8 +1,8 @@
 # jarvis
 
-<!-- mcp-name: io.github.jarvis-intelligence/jarvis -->
+<!-- mcp-name: io.github.phuongddx/jarvis -->
 
-[![CI](https://github.com/jarvis-intelligence/jarvis/actions/workflows/test.yml/badge.svg)](https://github.com/jarvis-intelligence/jarvis/actions/workflows/test.yml)
+[![CI](https://github.com/phuongddx/jarvis/actions/workflows/test.yml/badge.svg)](https://github.com/phuongddx/jarvis/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/jarvis-mcp.svg)](https://pypi.org/project/jarvis-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/jarvis-mcp.svg)](https://pypi.org/project/jarvis-mcp/)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%20%2F%20%20Linux-lightgrey)](https://pypi.org/project/jarvis-mcp/)
@@ -53,7 +53,7 @@ before installing.
 
 <p align="center">
   <img
-    src="https://raw.githubusercontent.com/jarvis-intelligence/jarvis/main/docs/assets/jarvis-architecture.png"
+    src="https://raw.githubusercontent.com/phuongddx/jarvis/main/docs/assets/jarvis-architecture.png"
     width="880"
     alt="jarvis architecture: a writer CLI and an MCP reader inside the jarvis system boundary, both talking to four stores in the local data dir — the immutable SCIP index, Zoekt shards, LanceDB vectors, and the registry — plus the git repo and a lazily spawned zoekt-webserver">
 1. **Index.** `jarvis index /repo` builds a Tree-sitter syntax baseline for every
@@ -149,7 +149,7 @@ inherit your shell's), use the absolute path from `which jarvis-server`.
 <summary>Running from a clone instead</summary>
 
 ```bash
-git clone https://github.com/jarvis-intelligence/jarvis && cd jarvis
+git clone https://github.com/phuongddx/jarvis && cd jarvis
 uv sync
 claude mcp add jarvis --scope user -- uv --directory "$(pwd)" run jarvis-server
 ```

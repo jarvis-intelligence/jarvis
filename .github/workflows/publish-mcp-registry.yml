@@ -19,7 +19,7 @@
 # Why github-oidc rather than `mcp-publisher login github`: the interactive
 # flow needs a human to paste a device code, which would make every release
 # block on someone being at a keyboard. OIDC authenticates the workflow itself
-# and unlocks the io.github.jarvis-intelligence/* namespace with no stored secret.
+# and unlocks the io.github.phuongddx/* namespace with no stored secret.
 #
 # The registry verifies ownership by finding `mcp-name: <name>` in the README
 # published to PyPI, so that marker and server.json's `name` must agree --

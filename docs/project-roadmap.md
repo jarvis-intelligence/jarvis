@@ -259,14 +259,14 @@ Published jarvis as a Claude Code plugin (marketplace discovery) and to the offi
 **New structure:**
 - `plugin/` directory: plugin manifest (`.claude-plugin/plugin.json`), MCP server registration (`.mcp.json`), and plugin skills (under `plugin/skills/`)
 - `.claude-plugin/marketplace.json` (root): declares this repo as a plugin marketplace
-- `server.json` (root): MCP Registry server descriptor (`io.github.jarvis-intelligence/jarvis`)
+- `server.json` (root): MCP Registry server descriptor (`io.github.phuongddx/jarvis`)
 - `.github/workflows/publish-mcp-registry.yml`: publishes `server.json` to official MCP Registry after PyPI publish succeeds; retries up to 6x for eventual consistency
 - `scripts/check_versions.py`: asserts `pyproject.toml` and `server.json` (×2) declare the same version (run via test + CI to prevent drift); the Claude Code and Codex plugin manifests moved to jarvis-index and version independently
 
 **Install flows:**
 - PyPI: `pip install jarvis-mcp` or `uv sync`
 - Plugin: `/plugin marketplace add jarvis-intelligence/jarvis-index` → `/plugin install jarvis@jarvis`
-- MCP Registry: Claude Code directly discovers `io.github.jarvis-intelligence/jarvis`
+- MCP Registry: Claude Code directly discovers `io.github.phuongddx/jarvis`
 
 **Version consistency:** Four version fields (pyproject.toml [project].version, server.json.version, server.json.packages[0].version, plugin/.claude-plugin/plugin.json.version) are asserted identical. `.claude-plugin/marketplace.json` deliberately omits a version field to avoid a fifth place drift could occur. (A fifth field, `.codex-plugin/plugin.json.version`, joined the guard later — see below.)
 
