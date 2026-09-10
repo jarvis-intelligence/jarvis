@@ -1,5 +1,89 @@
 # Changelog
 
+## [0.8.0] - 2026-09-10
+
+Minor rather than patch: jarvis gains a build-free syntax baseline — every
+`jarvis index`/`reindex`/`watch` run now publishes declaration-level
+navigation for 17 languages without any external indexer — and the one-way
+`--search-only` mode is replaced by reversible, persisted SCIP controls.
+
+### Added
+
+- **Tree-sitter syntax baseline, always on (spec TSI-01..TSI-04).**
+  `jarvis index` captures every git-tracked source file, extracts named
+  declarations with curated Tree-sitter grammars, and publishes them into the
+  same immutable SQLite snapshot as the optional SCIP tables — selected by the
+  single `current` pointer, now named `index-<sha>-<generation>.db` (fresh
+  `uuid4().hex` generation per publish, so a same-commit reindex never touches
+  a live filename). Incremental reuse keys rows on file hash + grammar
+  identity, so unchanged files carry their rows forward and a grammar bump
+  forces re-extraction. The 17 supported languages (Python, JavaScript,
+  TypeScript/TSX, Java, Kotlin, Swift, Go, Ruby, Rust, C, C++, C#, PHP,
+  Scala, Bash, SQL) ship as **base pip dependencies** — 16 pinned grammar
+  distributions plus the `tree-sitter` runtime, resolved from prebuilt abi3
+  wheels on every supported platform (verified by a 12-cell wheel-only
+  resolution matrix over CPython 3.12/3.13/3.14 × macOS/Linux arm64/x86-64).
+  Nothing is vendored into jarvis's wheel and nothing is downloaded at index
+  time; a fresh `uv sync` with no extras parses all 17 languages offline.
+- **Per-file provider routing on `documentSymbols`/`goToDefinition` (spec
+  TSI-05).** A file with usable SCIP coverage is served by its SCIP
+  outline/definitions; a file without it is served by real syntax
+  declarations. Every location now carries `source` (`"scip"` or
+  `"tree-sitter"`) and `positionEncoding`; syntax outline entries add
+  `selectionRange`/`qualifiedName`/`parentSymbol`, `documentSymbols` adds a
+  `coverage` object for syntax-served files, and bare/qualified names search
+  both providers and merge candidates. Opaque `syntax:` identifiers returned
+  by the baseline round-trip through `goToDefinition`. The SCIP-only tools —
+  `findReferences`, `callHierarchy`, `typeHierarchy` — never fake results:
+  without usable SCIP data they return the established error shape plus
+  `requiredCapability`/`reason`/`recovery` instead of an empty array.
+- **Live capabilities on `getIndexStatus`.** `capabilities.tools` reports, for
+  each of the five navigation tools, whether its providers have data in the
+  published snapshot (with reason/recovery when not); `capabilities.syntax`
+  reports per-state extraction counts and the extraction identity; freshness
+  names the snapshot `generation` so a caller can tell which immutable
+  snapshot answered.
+
+### Changed
+
+- **`--search-only` is gone; `--scip`/`--no-scip` replace it (spec TSI-07).**
+  The old opt-in degradation configuration was one-way: a persisted
+  search-only choice could never be un-set. SCIP enrichment is now controlled
+  by a reversible choice persisted per repo — `--scip`/`--no-scip` on `index`,
+  `reindex`, and `watch`; omitted means use the persisted choice, defaulting
+  to enabled for a new repo. SCIP tooling is no longer validated up front: a
+  missing or failing indexer degrades the run to exit-0 `degraded` with the
+  cause recorded, and the syntax baseline publishes regardless. The removed
+  `--search-only`/`--fallback-search-only`/`--no-fallback-search-only` flags
+  are rejected with their replacement (never silently mapped), and
+  `JARVIS_FALLBACK_SEARCH_ONLY` is no longer read (a one-line note replaces a
+  silent ignore). Watch runs whose SCIP attempt already failed at the current
+  commit skip only that retry — the baseline still publishes; a new commit, an
+  explicit reindex, or an explicit `--scip` retries enrichment.
+- **Registry schema carries per-stage truth (spec TSI-06/TSI-08).** Rows gain
+  `scip_enabled`/`scip_state` (available/partial/failed/unavailable/
+  unsupported/disabled, read-normalized to `unknown` for legacy rows) plus
+  failure evidence and `scip_failed_at_sha`; the overall status vocabulary is
+  now `indexing`/`indexed`/`partial`/`degraded`/`failed`. A one-time,
+  transactional, idempotent migration preserves every legacy row's facts
+  (including historical search-only opt-outs, which map to `degraded` with an
+  explanatory note) before the superseded columns are dropped. `forget` now
+  also tears down the repo's graph edges and unpins its Zoekt repository name.
+- **Shared parse input across the syntax and semantic stages (spec TSI-09).**
+  `semantic.py`'s `index_semantic()` is split into `prepare_semantic()`/
+  `finish_semantic()` so the chunker consumes the syntax stage's parse tree
+  instead of reparsing; `chunk_file()` accepts a supplied `tree`, and its
+  slicing is byte-safe Unicode (chunk `CONTENT_FORMAT` bumped to 2, so old
+  semantic tables are fully re-embedded rather than mixed).
+
+### Fixed
+
+- **`README.md` now matches the shipped behavior**: requirements describe the
+  pip-installed grammars and per-language coverage, the tool table documents
+  `source`/`coverage` provenance and the SCIP-required contract, and every
+  reference to the removed search-only flags is replaced with the reversible
+  controls and the degraded-status semantics.
+
 ## [0.7.2] - 2026-09-08
 
 No functional changes — v0.7.1's own publish run also failed the

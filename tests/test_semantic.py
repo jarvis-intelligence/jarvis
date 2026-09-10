@@ -1,5 +1,6 @@
 """Unit tests for semantic store + RRF fusion."""
 import sqlite3
+import subprocess
 import sys
 
 import pytest
@@ -105,6 +106,35 @@ def _write_repo(tmp_path, n_files=2):
     for i in range(n_files):
         (repo / f"mod_{i}.py").write_text(FUNC.format(n=i, pad="p" * 1100))
     return repo
+
+
+MULTIBYTE_TWO_FUNCS = f'''# café mañana 你好
+import os
+
+
+def alpha(x):
+    """{"p" * 1100}"""
+    return x + 1
+
+
+def beta(y):
+    """{"q" * 1100}"""
+    return y - 1
+'''
+
+
+def _git_repo(root):
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+    return root
+
+
+def _commit_file(repo, rel_path, content):
+    (repo / rel_path).write_text(content)
+    subprocess.run(["git", "-C", str(repo), "add", rel_path], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
 
 
 @pytest.fixture()
@@ -536,3 +566,209 @@ def test_semantic_search_symbol_signal_failure_degrades_silently(tmp_path, lance
     assert result["total"] >= 1
     assert result["results"][0]["sources"] == ["vector"]
     assert "error" not in result
+
+
+# ---------------------------------------------------------------------------
+# Task 4: shared-parse-tree input for prepare_semantic/finish_semantic.
+# ---------------------------------------------------------------------------
+
+
+def test_shared_tree_chunks_match_standalone_index(tmp_path, lancedb_available):
+    """The future CLI orchestration builds chunks once from the syntax
+    build's own parse tree (semantic_parse_paths -> build_syntax_index's
+    on_parsed -> chunk_file(tree=...)) and hands them to finish_semantic.
+    That path must produce the same stored rows (ignoring generated row
+    UUIDs) and the same embedding identities as the standalone
+    index_semantic() path that reparses everything itself."""
+    from jarvis.chunker import chunk_file
+    from jarvis.semantic import (
+        SemanticStore, finish_semantic, index_semantic, prepare_semantic,
+        semantic_parse_paths,
+    )
+    from jarvis.syntax import ParserPool
+    from jarvis.syntax_index import build_syntax_index, capture_sources
+
+    repo_shared = _git_repo(tmp_path / "repo_shared")
+    _commit_file(repo_shared, "mod.py", MULTIBYTE_TWO_FUNCS)
+    repo_standalone = _git_repo(tmp_path / "repo_standalone")
+    _commit_file(repo_standalone, "mod.py", MULTIBYTE_TWO_FUNCS)
+
+    manifest = capture_sources(repo_shared, tmp_path / "scratch")
+    work = prepare_semantic(repo_shared, "shared", root=tmp_path / "data_shared",
+                            model=FakeEmbedder(), manifest=manifest)
+    parse_for = semantic_parse_paths(work)
+    assert parse_for == frozenset({"mod.py"})
+
+    prepared_chunks: dict[str, list] = {}
+
+    def collect_chunks(file, raw, tree):
+        prepared_chunks[file.file_path] = chunk_file(
+            file.file_path, raw.decode("utf-8"), file.file_hash, file.language, tree=tree,
+        )
+
+    build_syntax_index(tmp_path / "syntax.db", manifest, pool=ParserPool(),
+                       parse_for=parse_for, on_parsed=collect_chunks)
+    assert "mod.py" in prepared_chunks  # the callback actually ran
+    shared_report = finish_semantic(work, prepared_chunks=prepared_chunks, pool=ParserPool())
+
+    standalone_report = index_semantic(repo_standalone, "standalone",
+                                       root=tmp_path / "data_standalone", model=FakeEmbedder())
+
+    assert shared_report.rows == standalone_report.rows > 0
+
+    def _normalized(rows_by_path):
+        result = {}
+        for path, rows in rows_by_path.items():
+            cleaned = [{k: v for k, v in row.items() if k != "chunk_id"} for row in rows]
+            cleaned.sort(key=lambda r: (r["start_line"], r["end_line"], r["content"]))
+            result[path] = cleaned
+        return result
+
+    shared_rows = SemanticStore((tmp_path / "data_shared") / "lancedb").rows_by_path("shared")
+    standalone_rows = SemanticStore((tmp_path / "data_standalone") / "lancedb").rows_by_path("standalone")
+    assert _normalized(shared_rows) == _normalized(standalone_rows)
+
+
+def test_finish_semantic_never_reparses_when_prepared_chunks_cover_every_input(
+    tmp_path, lancedb_available, monkeypatch
+):
+    """Proof of "never reparse a file whose supplied chunks are valid":
+    with tree_sitter_python blocked, finish_semantic must still succeed
+    when every input's chunks were already supplied -- any fallback
+    reparse would raise SyntaxDependencyError instead."""
+    from jarvis.chunker import chunk_file
+    from jarvis.semantic import finish_semantic, prepare_semantic
+    from jarvis.syntax import ParserPool
+    from tests.conftest import BlockImportFinder
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.py").write_text(MULTIBYTE_TWO_FUNCS)
+    work = prepare_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert {item.file_path for item in work.inputs} == {"mod.py"}
+    item = work.inputs[0]
+    tree = ParserPool().parse("python", item.source_path.read_bytes())
+    prepared_chunks = {
+        "mod.py": chunk_file("mod.py", MULTIBYTE_TWO_FUNCS, item.file_hash, "python", tree=tree),
+    }
+
+    monkeypatch.delitem(sys.modules, "tree_sitter_python", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [BlockImportFinder("tree_sitter_python"), *sys.meta_path])
+    report = finish_semantic(work, prepared_chunks=prepared_chunks, pool=ParserPool())
+    assert report.rows == len(prepared_chunks["mod.py"])
+
+
+def test_finish_semantic_ignores_prepared_chunks_with_mismatched_hash(tmp_path, lancedb_available):
+    """A supplied chunk map entry whose file_hash no longer matches the
+    input (a stale/mismatched generation) must never be borrowed --
+    finish_semantic falls back to chunking the input's own bytes."""
+    from jarvis.chunker import chunk_file
+    from jarvis.semantic import SemanticStore, finish_semantic, prepare_semantic
+    from jarvis.syntax import ParserPool
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.py").write_text(FUNC.format(n=0, pad="p" * 1100))
+    work = prepare_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    stale = chunk_file("mod.py", "def stale():\n    return 0\n", "stale-hash", "python")
+
+    finish_semantic(work, prepared_chunks={"mod.py": stale}, pool=ParserPool())
+    rows = SemanticStore((tmp_path / "data") / "lancedb").rows_by_path("myrepo")
+    assert "f_0" in rows["mod.py"][0]["content"]
+    assert not any("stale" in r["content"] for r in rows["mod.py"])
+
+
+def test_semantic_parse_paths_excludes_fixed_window_languages(tmp_path, lancedb_available):
+    """Bash has no _DEF_NODE_TYPES entry -- chunk_file windows it
+    regardless of a supplied tree, so it must never be requested."""
+    from jarvis.semantic import prepare_semantic, semantic_parse_paths
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.py").write_text(FUNC.format(n=0, pad="p" * 1100))
+    (repo / "script.sh").write_text("echo hi\n" * 5)
+    work = prepare_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert {item.file_path for item in work.inputs} == {"mod.py", "script.sh"}
+    assert semantic_parse_paths(work) == frozenset({"mod.py"})
+
+
+def test_prepare_finish_split_matches_index_semantic_for_unchanged_files(tmp_path, lancedb_available):
+    """The prepare/finish split, exercised directly (not through the
+    index_semantic wrapper), must skip unchanged files exactly like the
+    original single-function implementation and keep their persisted
+    contents/ranges intact."""
+    from jarvis.semantic import SemanticStore, finish_semantic, index_semantic, prepare_semantic
+    from jarvis.syntax import ParserPool
+
+    repo = _write_repo(tmp_path)
+    first = FakeEmbedder()
+    index_semantic(repo, "myrepo", root=tmp_path / "data", model=first)
+    (repo / "mod_1.py").write_text(FUNC.format(n=99, pad="q" * 1100))
+    second = FakeEmbedder()
+    work = prepare_semantic(repo, "myrepo", root=tmp_path / "data", model=second)
+    assert {item.file_path for item in work.inputs} == {"mod_1.py"}  # zero new inputs for mod_0.py
+
+    finish_semantic(work, prepared_chunks={}, pool=ParserPool())
+    assert len(second.embedded) == 1  # only the changed file's chunk, no reembedding
+    assert "f_99" in second.embedded[0]
+
+    rows = SemanticStore((tmp_path / "data") / "lancedb").rows_by_path("myrepo")
+    unchanged = rows["mod_0.py"][0]
+    assert unchanged["start_line"] == 1 and "f_0" in unchanged["content"]
+
+
+def test_prepare_semantic_raises_install_hint_without_lancedb(tmp_path, monkeypatch):
+    """Missing semantic deps must surface as the same clean, catchable
+    error prepare_semantic's callers rely on to skip semantic without
+    disturbing anything else -- never a different/opaque failure."""
+    from jarvis.embeddings import SemanticExtraMissingError
+    from jarvis.semantic import prepare_semantic
+    from tests.conftest import BlockImportFinder
+
+    monkeypatch.delitem(sys.modules, "lancedb", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [BlockImportFinder("lancedb"), *sys.meta_path])
+    repo = _write_repo(tmp_path)
+    with pytest.raises(SemanticExtraMissingError):
+        prepare_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+
+
+def test_finish_semantic_raises_install_hint_without_sentence_transformers(
+    tmp_path, monkeypatch, lancedb_available
+):
+    from jarvis.embeddings import EmbeddingModel, SemanticExtraMissingError
+    from jarvis.semantic import finish_semantic, prepare_semantic
+    from jarvis.syntax import ParserPool
+    from tests.conftest import BlockImportFinder
+
+    repo = _write_repo(tmp_path)
+    work = prepare_semantic(repo, "myrepo", root=tmp_path / "data", model=EmbeddingModel())
+    monkeypatch.delitem(sys.modules, "sentence_transformers", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [BlockImportFinder("sentence_transformers"), *sys.meta_path])
+    with pytest.raises(SemanticExtraMissingError):
+        finish_semantic(work, prepared_chunks={}, pool=ParserPool())
+
+
+def test_finish_semantic_failure_preserves_previous_table(tmp_path, lancedb_available):
+    """A chunk/embedding failure must never touch the previously-published
+    table -- store.overwrite() only ever runs after encoding succeeds."""
+    from jarvis.semantic import SemanticStore, finish_semantic, index_semantic, prepare_semantic
+    from jarvis.syntax import ParserPool
+
+    repo = _write_repo(tmp_path)
+    report = index_semantic(repo, "myrepo", root=tmp_path / "data", model=FakeEmbedder())
+    assert report.rows == 2
+    store = SemanticStore((tmp_path / "data") / "lancedb")
+    before = store.rows_by_path("myrepo")
+
+    (repo / "mod_0.py").write_text(FUNC.format(n=99, pad="p" * 1100))
+
+    class BoomEmbedder(FakeEmbedder):
+        def embed_texts(self, texts):
+            raise RuntimeError("boom")
+
+    work = prepare_semantic(repo, "myrepo", root=tmp_path / "data", model=BoomEmbedder())
+    with pytest.raises(RuntimeError, match="boom"):
+        finish_semantic(work, prepared_chunks={}, pool=ParserPool())
+
+    after = store.rows_by_path("myrepo")
+    assert after == before

@@ -31,6 +31,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from enum import StrEnum
 
+from jarvis.models import Location
+
 
 class DescriptorKind(StrEnum):
     NAMESPACE = "NAMESPACE"
@@ -192,6 +194,12 @@ class Candidate:
     symbol: str
     dotted_path: str
     kind: DescriptorKind
+    # Additive (Task 5, spec TSI-05): every resolve()-produced candidate is
+    # a SCIP match, so `source` defaults accordingly; `resolve()` itself
+    # never populates `location` (only `query.py`'s combined goToDefinition
+    # candidate rule does, so distinct declarations can be told apart).
+    source: str = "scip"
+    location: Location | None = None
 
 
 class SymbolNotFoundError(Exception):

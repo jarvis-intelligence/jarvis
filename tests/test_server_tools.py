@@ -17,6 +17,7 @@ from jarvis.index_reader import IndexNotFoundError
 from jarvis.search import ZoektLifecycle
 from jarvis.symbols import AmbiguousSymbolError, Candidate, DescriptorKind
 from tests.fixtures.synthetic_index import CLASS_SYMBOL, DOC_GREETER, METHOD_SYMBOL, build_published_index
+from tests.test_query import build_combined_snapshot, build_syntax_only_snapshot
 
 REPO = "toy-repo"
 
@@ -84,10 +85,9 @@ async def test_unexpected_exception_still_returns_structured_error_payload(monke
     def _boom(*args, **kwargs):
         raise RuntimeError("boom")
 
-    # goToDefinition resolves the symbol before calling get_definitions, so
-    # the raising call must be resolve_symbol to exercise the same
-    # generic-exception path this test targets.
-    monkeypatch.setattr(server.QueryService, "resolve_symbol", _boom)
+    # goToDefinition routes through resolve_definition (Task 5), the sole
+    # call site that does resolution + lookup for that tool.
+    monkeypatch.setattr(server.QueryService, "resolve_definition", _boom)
     async with create_connected_server_and_client_session(server.mcp) as client:
         result = await client.call_tool("goToDefinition", {"repo": REPO, "symbol": "x"})
         assert result.isError is not True
@@ -111,10 +111,9 @@ async def test_ambiguous_symbol_error_reaches_client_as_candidates_payload(monke
     def _ambiguous(*args, **kwargs):
         raise AmbiguousSymbolError("dup", candidates, 2)
 
-    # goToDefinition resolves the symbol via resolve_symbol before calling
-    # get_definitions -- see server.py's go_to_definition -- so that is the
-    # call site to raise from to exercise the real wiring end to end.
-    monkeypatch.setattr(server.QueryService, "resolve_symbol", _ambiguous)
+    # goToDefinition routes through resolve_definition (Task 5) -- that is
+    # the call site to raise from to exercise the real wiring end to end.
+    monkeypatch.setattr(server.QueryService, "resolve_definition", _ambiguous)
     async with create_connected_server_and_client_session(server.mcp) as client:
         result = await client.call_tool("goToDefinition", {"repo": REPO, "symbol": "dup"})
         assert result.isError is not True
@@ -122,8 +121,8 @@ async def test_ambiguous_symbol_error_reaches_client_as_candidates_payload(monke
 
     assert payload["candidateTotal"] == 2
     assert payload["candidates"] == [
-        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD"},
-        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD"},
+        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD", "source": "scip"},
+        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD", "source": "scip"},
     ]
     assert "definitions" not in payload
 
@@ -246,7 +245,13 @@ async def test_type_hierarchy_reports_unavailable_instead_of_empty(monkeypatch):
 
     def _unavailable(self, repo, symbol):
         _, metadata = query.get_connection(self._cache, repo)
-        return [], [], query._freshness_snapshot(metadata), False
+        raise query.CapabilityUnavailableError(
+            capability="typeHierarchy",
+            message="typeHierarchy unavailable for this index: no symbol carries relationships data.",
+            reason="no SCIP relationship data in this snapshot",
+            recovery=f"jarvis reindex {repo}",
+            freshness=query._freshness_snapshot(metadata),
+        )
 
     monkeypatch.setattr(server.QueryService, "type_hierarchy", _unavailable)
     async with create_connected_server_and_client_session(server.mcp) as client:
@@ -255,6 +260,7 @@ async def test_type_hierarchy_reports_unavailable_instead_of_empty(monkeypatch):
 
     assert "error" in payload, payload
     assert "relationships" in payload["error"].lower()
+    assert payload["requiredCapability"] == "typeHierarchy"
     assert "supertypes" not in payload
 
 
@@ -304,21 +310,6 @@ def test_scip_conn_or_none_returns_none_when_no_index(monkeypatch):
     assert server._scip_conn_or_none(REPO) is None
 
 
-def test_error_payload_explains_a_search_only_repo(tmp_path: Path, monkeypatch):
-    from jarvis import config, server
-    from jarvis.index_reader import IndexNotFoundError
-    from jarvis.registry import Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
-    finally:
-        registry.close()
-
-    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
-    assert "search-only" in payload["error"]
-    assert "searchCode" in payload["error"]
 
 
 def test_error_payload_passes_through_other_errors(tmp_path: Path, monkeypatch):
@@ -329,49 +320,8 @@ def test_error_payload_passes_through_other_errors(tmp_path: Path, monkeypatch):
     assert payload == {"error": "boom"}
 
 
-def test_error_payload_carries_state_cause_recovery_for_a_signature_search_only_repo(tmp_path: Path, monkeypatch):
-    """STAT-02 / D-14: on a search-only repo whose registry row explains the
-    state, nav-tool errors gain additive `state`/`cause`/`recovery` keys
-    alongside the unchanged prose `error` string."""
-    from jarvis.index_reader import IndexNotFoundError
-    from jarvis.registry import ORIGIN_SIGNATURE, Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only",
-                        search_only=True, status_origin=ORIGIN_SIGNATURE,
-                        status_reason="the build produced no SCIP shards")
-    finally:
-        registry.close()
-
-    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
-
-    assert "search-only" in payload["error"]  # prose explanation retained
-    assert "searchCode" in payload["error"]
-    assert payload["state"] == "signature"
-    assert payload["cause"] == "the build produced no SCIP shards"
-    assert payload["recovery"] == "jarvis reindex gorepo"
 
 
-def test_error_payload_reports_manual_state_for_a_legacy_search_only_row(tmp_path: Path, monkeypatch):
-    """Pre-migration rows carry a NULL origin; `origin_of`'s read-time
-    fallback reports them as 'manual' with the forget+index escape (SC5)."""
-    from jarvis.index_reader import IndexNotFoundError
-    from jarvis.registry import Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
-    finally:
-        registry.close()
-
-    payload = server._error_payload("gorepo", IndexNotFoundError("no pointer"))
-
-    assert payload["state"] == "manual"
-    assert payload["recovery"] == "jarvis forget gorepo && jarvis index /p"
-    assert "cause" not in payload  # NULL reason on legacy rows — no fabricated key
 
 
 def test_error_payload_without_a_registry_row_stays_bare(tmp_path: Path, monkeypatch):
@@ -388,13 +338,13 @@ def test_error_payload_does_not_mask_other_faults_on_a_degraded_repo(tmp_path: P
     """A query fault on a degraded repo is not a degradation explanation:
     structured keys apply to the IndexNotFoundError branch only, so a
     RuntimeError keeps its existing bare shape (no masking)."""
-    from jarvis.registry import ORIGIN_SIGNATURE, Registry
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
 
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     registry = Registry(config.data_dir() / "registry.db")
     try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only",
-                        search_only=True, status_origin=ORIGIN_SIGNATURE,
+        registry.upsert("gorepo", "/p", "unknown", "abc", DEGRADED_STATUS,
+                        status_origin=ORIGIN_FALLBACK,
                         status_reason="the build produced no SCIP shards")
     finally:
         registry.close()
@@ -413,7 +363,7 @@ def test_error_payload_degrades_to_bare_error_when_registry_is_unreadable(tmp_pa
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     registry = Registry(config.data_dir() / "registry.db")
     try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
+        registry.upsert("gorepo", "/p", "unknown", "abc", "indexed")
     finally:
         registry.close()
 
@@ -426,21 +376,6 @@ def test_error_payload_degrades_to_bare_error_when_registry_is_unreadable(tmp_pa
     assert payload == {"error": "no pointer"}
 
 
-def test_get_index_status_reports_search_only_status():
-    """The MCP tool itself (not QueryService.get_index_status directly)
-    must surface the registry's status so a caller can distinguish
-    "search-only" from "never indexed" -- both report indexed=False."""
-    from jarvis.registry import Registry
-
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
-    finally:
-        registry.close()
-
-    result = server.get_index_status(repo="gorepo")
-    assert result["status"] == "search-only"
-    assert result["indexed"] is False
 
 
 def test_get_index_status_reports_none_status_when_never_registered():
@@ -449,56 +384,8 @@ def test_get_index_status_reports_none_status_when_never_registered():
     assert result["indexed"] is False
 
 
-def test_get_index_status_reports_last_index_run_for_a_search_only_repo(tmp_path: Path, monkeypatch):
-    """D-15: the run layer reports what the last run did. `outcome` mirrors
-    the registry status string verbatim (resolution #3 — no new enum);
-    origin/reason/recovery are populated exactly when the row carries
-    them. Existing keys keep their values."""
-    from jarvis.registry import ORIGIN_SIGNATURE, Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only",
-                        search_only=True, status_origin=ORIGIN_SIGNATURE,
-                        status_reason="the build produced no SCIP shards")
-    finally:
-        registry.close()
-
-    result = server.get_index_status(repo="gorepo")
-
-    assert result["last_index_run"] == {
-        "outcome": "search-only",
-        "origin": "signature",
-        "reason": "the build produced no SCIP shards",
-        "recovery": "jarvis reindex gorepo",
-    }
-    assert result["repo"] == "gorepo"
-    assert result["status"] == "search-only"
-    assert result["indexed"] is False
 
 
-def test_get_index_status_navigation_unavailable_for_search_only_explains_and_recovers(tmp_path: Path, monkeypatch):
-    """STAT-03/SC4: an MCP client branches on
-    capabilities.navigation.available without parsing prose; when it is
-    False on a search-only repo, the reason names the state and the
-    recovery says how to escape it."""
-    from jarvis.registry import Registry
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    registry = Registry(config.data_dir() / "registry.db")
-    try:
-        # Legacy row: NULL origin and NULL reason exercise the default
-        # wording and the origin_of manual fallback in one shot.
-        registry.upsert("gorepo", "/p", "unknown", "abc", "search-only", search_only=True)
-    finally:
-        registry.close()
-
-    nav = server.get_index_status(repo="gorepo")["capabilities"]["navigation"]
-
-    assert nav["available"] is False
-    assert nav["reason"] == "indexed search-only — no SCIP index"
-    assert nav["recovery"] == "jarvis forget gorepo && jarvis index /p"
 
 def test_get_index_status_navigation_unavailable_for_degraded_reports_cause_and_recovery(tmp_path: Path, monkeypatch):
     """FALL-01 (visibility): on a degraded repo, navigation is unavailable
@@ -539,7 +426,7 @@ def test_get_index_status_degraded_reason_defaults_when_status_reason_missing(tm
     nav = server.get_index_status(repo="gorepo")["capabilities"]["navigation"]
 
     assert nav["available"] is False
-    assert nav["reason"] == "indexer failure — degraded to search-only"
+    assert nav["reason"] == "baseline published — SCIP enrichment unavailable"
 
 
 def test_get_index_status_reports_last_index_run_for_a_degraded_repo(tmp_path: Path, monkeypatch):
@@ -759,8 +646,8 @@ def test_error_payload_renders_ambiguous_candidates(tmp_path: Path, monkeypatch)
     payload = server._error_payload(REPO, AmbiguousSymbolError("dup", candidates, 7))
     assert payload["candidateTotal"] == 7
     assert payload["candidates"] == [
-        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD"},
-        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD"},
+        {"symbol": "sym-a", "dottedPath": "a.C.dup", "kind": "METHOD", "source": "scip"},
+        {"symbol": "sym-b", "dottedPath": "b.D.dup", "kind": "METHOD", "source": "scip"},
     ]
     assert "ambiguous" in payload["error"]
     assert "a.C.dup" in payload["error"]  # leads with the qualifier hint
@@ -917,3 +804,109 @@ def test_mcp_server_advertises_the_jarvis_name():
     from jarvis.server import mcp
 
     assert mcp.name == "jarvis"
+
+
+# ---------------------------------------------------------------------------
+# Per-file provider routing at the server/MCP boundary (Task 5, spec TSI-05)
+# ---------------------------------------------------------------------------
+
+
+def test_document_symbols_tool_reports_coverage_for_syntax_only_file(tmp_path: Path, monkeypatch):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    result = server.document_symbols(repo="combined-repo", path="toy/util.py")
+    assert "error" not in result
+    assert [s["displayName"] for s in result["symbols"]] == ["helper"]
+    assert result["symbols"][0]["source"] == "tree-sitter"
+    assert result["coverage"]["state"] == "complete"
+
+
+def test_document_symbols_tool_reports_error_and_coverage_for_unsupported_extension(
+    tmp_path: Path, monkeypatch
+):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    result = server.document_symbols(repo="combined-repo", path="toy/notes.txt")
+    assert "error" in result
+    assert result["coverage"]["state"] == "unsupported"
+    assert "symbols" not in result
+
+
+def test_go_to_definition_tool_routes_a_syntax_identifier(tmp_path: Path, monkeypatch):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    outline = server.document_symbols(repo="combined-repo", path="toy/util.py")
+    syntax_id = outline["symbols"][0]["symbol"]
+    result = server.go_to_definition(repo="combined-repo", symbol=syntax_id)
+    assert "error" not in result
+    assert "resolvedSymbol" not in result  # opaque id round-trips unchanged
+    assert result["definitions"][0]["source"] == "tree-sitter"
+    assert result["definitions"][0]["path"] == "toy/util.py"
+
+
+def test_find_references_tool_renders_required_capability_for_a_syntax_identifier(
+    tmp_path: Path, monkeypatch
+):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    outline = server.document_symbols(repo="combined-repo", path="toy/util.py")
+    syntax_id = outline["symbols"][0]["symbol"]
+    result = server.find_references(repo="combined-repo", symbol=syntax_id)
+    assert result["requiredCapability"] == "findReferences"
+    assert result["reason"]
+    assert result["recovery"]
+    assert "references" not in result
+
+
+def test_call_hierarchy_tool_renders_required_capability_when_scip_absent(tmp_path: Path, monkeypatch):
+    build_syntax_only_snapshot(tmp_path, config.PROJECT, "solo-repo", config.BRANCH)
+    result = server.call_hierarchy(repo="solo-repo", symbol="solo")
+    assert result["requiredCapability"] == "callHierarchy"
+    assert "incomingCalls" not in result
+    assert "outgoingCalls" not in result
+
+
+def test_get_index_status_reports_tool_and_syntax_capabilities_for_a_combined_snapshot(
+    tmp_path: Path, monkeypatch
+):
+    build_combined_snapshot(tmp_path, config.PROJECT, "combined-repo", config.BRANCH)
+    result = server.get_index_status(repo="combined-repo")
+
+    tools = result["capabilities"]["tools"]
+    assert set(tools) == {"documentSymbols", "goToDefinition", "findReferences", "callHierarchy", "typeHierarchy"}
+    for name in ("documentSymbols", "goToDefinition", "findReferences", "callHierarchy", "typeHierarchy"):
+        assert tools[name]["available"] is True
+        assert "providers" in tools[name] and "reason" in tools[name] and "recovery" in tools[name]
+    assert "scip" in tools["documentSymbols"]["providers"]
+    assert "tree-sitter" in tools["documentSymbols"]["providers"]
+    assert tools["findReferences"]["providers"] == ["scip"]
+
+    syntax_capability = result["capabilities"]["syntax"]
+    assert syntax_capability["available"] is True
+    assert syntax_capability["parsed"] >= 1
+    assert syntax_capability["extractionIdentity"] is not None
+
+    assert result["generation"] == "gen-combined"
+
+
+def test_get_index_status_reports_missing_scip_tool_capabilities_for_a_syntax_only_snapshot(
+    tmp_path: Path, monkeypatch
+):
+    build_syntax_only_snapshot(tmp_path, config.PROJECT, "solo-repo", config.BRANCH)
+    result = server.get_index_status(repo="solo-repo")
+
+    tools = result["capabilities"]["tools"]
+    assert tools["findReferences"]["available"] is False
+    assert tools["findReferences"]["providers"] == []
+    assert tools["findReferences"]["reason"]
+    assert tools["documentSymbols"]["available"] is True
+    assert tools["documentSymbols"]["providers"] == ["tree-sitter"]
+
+    assert result["capabilities"]["syntax"]["available"] is True
+
+
+def test_get_index_status_existing_keys_unchanged_for_a_legacy_snapshot():
+    """A legacy snapshot (this file's autouse `REPO` fixture) has no
+    syntax tables at all -- `capabilities.tools`/`capabilities.syntax`
+    must degrade honestly (no syntax providers) without disturbing any
+    existing key."""
+    result = server.get_index_status(repo=REPO)
+    assert result["indexed"] is True
+    assert result["capabilities"]["tools"]["documentSymbols"]["providers"] == ["scip"]
+    assert result["capabilities"]["syntax"]["available"] is False

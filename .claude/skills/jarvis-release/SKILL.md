@@ -50,9 +50,21 @@ New `## [X.Y.Z] - YYYY-MM-DD` section at the **top**, above the previous entry. 
 ```bash
 uv run pytest -m "not integration" -q          # must be green
 grep -qF "mcp-name: io.github.jarvis-intelligence/jarvis" README.md && echo "marker present"
+
 ```
 
 The second check matters because `publish-pypi.yml` hard-fails the release if this marker (which the MCP Registry uses to verify PyPI ownership) is ever missing from `README.md` — cheap to catch here instead of after a tag is already pushed.
+
+Since the tree-sitter syntax baseline (v0.8.0), the grammar packages are base
+dependencies, so the wheel build and smoke jobs exercise them automatically:
+the cibuildwheel test-command runs the real-parser tests inside every wheel,
+and `publish-pypi.yml`'s smoke step additionally parses `def f(): pass` with a
+real `ParserPool` in the installed-wheel env. When a grammar/runtime pin
+moves, rerun the wheel-only resolution matrix
+(`uv pip compile pyproject.toml --only-binary :all:` over CPython
+{3.12, 3.13, 3.14} × {aarch64/x86_64-apple-darwin, aarch64/x86_64-manylinux_2_28})
+— all 12 resolves must succeed with no source build before cutting the
+release.
 
 ## 5. Commit, branch, PR
 
@@ -61,6 +73,7 @@ git checkout -b chore/release-X.Y.Z
 git add CHANGELOG.md pyproject.toml server.json uv.lock
 git commit -m "chore: release X.Y.Z"
 git push -u origin chore/release-X.Y.Z
+
 gh pr create --base main --head chore/release-X.Y.Z --title "chore: release X.Y.Z" \
   --body "Patch/minor release for <one-line summary>. See CHANGELOG.md."
 ```

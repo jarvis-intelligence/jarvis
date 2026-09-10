@@ -35,25 +35,27 @@ jarvis/
 | `index_reader.py` | 160 | Vendored filestore reader from SCIP source; `IndexConnectionCache` — thread-safe, size-bounded cache of read-only immutable SQLite connections keyed by `(project, repo, branch, pointer_content)`, NFS-safe pointer invalidation | `IndexConnectionCache`, current pointer file handling |
 | `scip_pb2.py` | 119 | Generated protobuf from scip.proto v0.9.0 — regenerated from v0.7.0 because v0.7.0 lacked the `typed_range` oneof that `scip-swift` requires (do not edit, vendored codegen) | scip.Document, scip.SymbolInformation, scip.Occurrence, scip.Relationship |
 | `scip_decoder.py` | 326 | SCIP blob decoder (zstd+protobuf); isolation seam for protobuf dependency | `scip_range_to_positions()`, `kind_name()`, `parse_symbol_package()`, decode SCIP occurrences + relationships |
-| `query.py` | 462 | QueryService: 5 SCIP nav ops + `getIndexStatus` via raw SQL against `scip expt-convert` schema | `QueryService`, `FreshnessSnapshot`, nav result builders |
+| `query.py` | 462 | QueryService: 5 nav ops with per-file provider routing (SCIP outline/definitions when the file has coverage, else Tree-sitter syntax declarations from the same snapshot), SCIP-only tools raising `CapabilityUnavailableError` (`requiredCapability`/`reason`/`recovery`), `getIndexStatus` facts + `FreshnessSnapshot` carrying the snapshot `generation` | `QueryService`, `CapabilityUnavailableError`, `FreshnessSnapshot`, nav result builders |
+| `syntax.py` | — | Curated offline Tree-sitter grammar provider (`FACTORIES` maps 17 internal language names to 16 pinned grammar distributions; repository-supplied grammar code is never instantiated), `ParserPool` (per-worker parser cache), declaration extraction with an explicit non-recursive walk, byte-span slicing, deterministic opaque `syntax:` ids | `ParserPool`, `language_for_path()`, `extract_file()`, `grammar_identity()`, `SyntaxSymbol`, `Span` |
+| `syntax_index.py` | — | Immutable syntax/provider snapshot builder: git-tracked source capture/validate, incremental build keyed on file hash + `grammar_identity`, namespaced `syntax_files`/`syntax_symbols`/`jarvis_snapshot` schema, per-file SCIP provider-coverage derivation, snapshot facts reads | `capture_sources()`, `validate_sources()`, `build_syntax_index()`, `finalize_snapshot()`, `read_snapshot_facts()`, `file_symbols()`, `find_syntax_symbols()`, `file_coverage()`, `file_provider_coverage()` |
 | `search.py` | 183 | `searchCode` backend via real httpx client to zoekt-webserver; `ZoektLifecycle` lazy-spawns `zoekt-webserver -rpc`, pidfile-tracked | `searchCode()`, `ZoektLifecycle` |
-| `chunker.py` | 394 | Tree-sitter AST chunking into function/class-sized chunks (256-512 token target), fixed-window fallback for unparseable languages, content-hash dedup; admission filters (generated-file banner/long-line, `.gitignore` via batched `git check-ignore`, 1 MB size cap, `--semantic-include` escape hatch); appends a `# file:`/`# in class:` context header to every chunk as a final pass | `chunk_file()`, `Chunk`, `hash_file()`, `language_for()`, `skip_reason()`, `iter_source_files()`, `gitignored()`, `oversized_file_reason()`, `CONTENT_FORMAT` |
+| `chunker.py` | 394 | Tree-sitter AST chunking into function/class-sized chunks (256-512 token target) with byte-safe Unicode slicing (`CONTENT_FORMAT = 2`), accepts a supplied parse `tree` so the syntax baseline's parse is reused instead of reparsed, fixed-window fallback for unparseable languages, content-hash dedup; admission filters (generated-file banner/long-line, `.gitignore` via batched `git check-ignore`, 1 MB size cap, `--semantic-include` escape hatch); appends a `# file:`/`# in class:` context header to every chunk as a final pass | `chunk_file()`, `Chunk`, `hash_file()`, `language_for()`, `skip_reason()`, `iter_source_files()`, `gitignored()`, `oversized_file_reason()`, `CONTENT_FORMAT` |
 | `embeddings.py` | 149 | Lazy-loaded self-hosted embedding model wrapper (`BAAI/bge-m3`, 1024-dim, pinned revision), L2-normalized vectors; model-aware query/doc instruction prefixes (`MODEL_PREFIXES`, env-overridable); `SemanticExtraMissingError` for clean skip when the `semantic` extra isn't installed | `EmbeddingModel`, `default_model()`, `SemanticExtraMissingError` |
-| `semantic.py` | 340 | `SemanticStore` (one LanceDB table per repo), `index_semantic()` (chunk → dedup → embed → carry-over unchanged files → atomic overwrite), `reciprocal_rank_fusion()` (k=60), `semantic_search()`; `TableIdentity` (model + revision + prefixes + content format) gates carry-forward reuse | `SemanticStore`, `index_semantic()`, `semantic_search()`, `reciprocal_rank_fusion()`, `TableIdentity`, `TokenStats` |
+| `semantic.py` | 340 | `SemanticStore` (one LanceDB table per repo), `prepare_semantic()`/`finish_semantic()` split of the old `index_semantic()` (chunk reusing the syntax stage's parse input, then encode + publish), `reciprocal_rank_fusion()` (k=60), `semantic_search()`; `TableIdentity` (model + revision + prefixes + content format) gates carry-forward reuse | `SemanticStore`, `prepare_semantic()`, `finish_semantic()`, `semantic_search()`, `reciprocal_rank_fusion()`, `TableIdentity`, `TokenStats` |
 
 ### Graph & Registry
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
 | `graph.py` | 363 | Package dependency graph: sqlite3 CRUD on `packages`/`edges` tables in registry.db, `populate_graph_for_repo()` (rebuild-not-accumulate), `blast_radius()` 2-hop BFS | `GraphStore`, `extract_package_names()`, `populate_graph_for_repo()`, `blast_radius()` |
-| `registry.py` | 256 | sqlite3 CRUD on `repos` table: slug/path/language/commit_sha/last_indexed/status (indexed/indexing/failed/partial/search-only), plus `scheme_override`, `semantic_include`, and `language_override` columns for persisting Xcode scheme, force-included semantic paths, and `--language` overrides across reindex runs, and nullable `semantic_indexed_at` column (survives failed semantic reindexes); `SEARCH_ONLY_STATUS` constant for the new search-only status value | `Registry`, repo table operations, `mark_semantic_indexed()`, `SEARCH_ONLY_STATUS`, idempotent migrations |
+| `registry.py` | 256 | sqlite3 CRUD on `repos`: slug/path/language/commit_sha/last_indexed and the TSI-06 status vocabulary (`indexing`/`indexed`/`partial`/`degraded`/`failed`), persisted SCIP stage columns (`scip_enabled`, `scip_state` ∈ available/partial/failed/unavailable/unsupported/disabled, failure reason/stderr, `scip_failed_at_sha`, `status_origin`/`reason`/`stderr`), `scheme_override`/`semantic_include`/`language_override`/`semantic_indexed_at`/`semantic_declined` persistence, `recovery_for()` derived retry commands, and the one-time idempotent migration (TSI-08) from the superseded search-only columns | `Registry`, repo table operations, `mark_semantic_indexed()`, `SCIP_STATES`, `recovery_for()`, idempotent migrations |
 
 ### Server & CLI
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
-| `server.py` | 267 | MCP stdio server entry (`FastMCP("jarvis")`), registers 9 tools with thin wrappers around QueryService/ZoektLifecycle/GraphStore/semantic, uniform `{"error": ...}` error payload; reports search-only status explicitly to clients | MCP tool handlers: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius` |
-| `index_cli.py` | 932 | The `jarvis` CLI: `index_repo()` pipeline (language detection from git-tracked files (`detect_language()`, `_git_tracked_files()`) or a persisted `--language` override (`_resolve_language()`) → language indexer → scip expt-convert → populate graph → zoekt-index → non-fatal semantic indexing stage (`_run_semantic_stage()`) → automatic search-only fallback on recognized indexer failures (`_SEARCH_ONLY_SIGNATURES`, `_search_only_reason()`, `_publish_search_only()`) → atomic pointer swap → registry update), with xcodebuild build-tool selection for Swift repos with checked-in Xcode projects (`_prefers_xcodebuild()`, `_swift_indexer_cmd()`) and Xcode scheme persistence via registry (`_resolve_scheme()`); `_git_head()`/`_git_tracked_files()` raise `NotAGitRepositoryError` for non-git paths; `--search-only` flag enables upfront search-only publish; `_cmd_watch` wires Debouncer to watchdog.Observer; `forget` also drops the repo's LanceDB table | CLI commands: `index`, `list`, `status`, `reindex`, `forget`, `watch` (with `--scheme`/`--language`/`--semantic-include` flag support on index/watch; `--search-only` on both) |
+| `server.py` | — | MCP stdio server entry (`FastMCP("jarvis")`), registers 9 tools with thin wrappers around QueryService/ZoektLifecycle/GraphStore/semantic, uniform `{"error": ...}` error payload (`CapabilityUnavailableError` renders `requiredCapability`/`reason`/`recovery`); `getIndexStatus` adds `capabilities.tools` (per-tool providers for all five nav tools), `capabilities.syntax` (extraction counts + extraction identity), and the snapshot `generation` in freshness | MCP tool handlers: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius` |
+| `index_cli.py` | — | The `jarvis` CLI (`index`, `list`, `status`, `reindex`, `forget`, `watch`): `index_repo()` staged pipeline (validate → capture + syntax baseline → optional SCIP gated on the persisted `--scip`/`--no-scip` choice and the four-condition watch suppression predicate (`_scip_suppressed`) → zoekt → optional semantic (`prepare`/`finish` split) → revalidate + graph edges → publish/record/retire in strict order), `index-<sha>-<generation>.db` artifacts + atomic `current` pointer flip (`_publish_atomically`), removed-flag rejection (`--search-only` & co. fail loudly with their replacement), xcodebuild build-tool selection for Swift repos (`_prefers_xcodebuild()`, `_swift_indexer_cmd()`), and `forget` teardown (graph edges, zoekt pin + shards, artifacts) | `index_repo()`, `main()`, `build_parser()`, `detect_language()`, `_scip_suppressed()`, `_resolve_scip_enabled()`, `_publish_atomically()` |
 | `watch.py` | 55 | `Debouncer` (pure, thread-free, injectable clock) + `should_ignore_path` (.git/node_modules/.venv/__pycache__/dist/build) | `Debouncer`, `should_ignore_path()` |
 
 ### Root-Level Files
@@ -75,6 +77,8 @@ jarvis/
 | `test_query.py` | query.py | SQL execution, nav result builders |
 | `test_search.py` | search.py | Zoekt HTTP client, lifecycle management |
 | `test_chunker.py` | chunker.py | AST chunking, fixed-window fallback, dedup hashing |
+| `test_syntax.py` | syntax.py | Real ParserPool parsing (all 17 languages), declaration extraction rules, byte-span spans, `syntax:` id stability, `SyntaxDependencyError` on missing grammar |
+| `test_syntax_index.py` | syntax_index.py | Capture/validate, incremental reuse, schema + provider-coverage derivation, snapshot facts, publish |
 | `test_embeddings.py` | embeddings.py | Lazy model loading, normalization, missing-extra error |
 | `test_semantic.py` | semantic.py | SemanticStore CRUD, index_semantic(), reciprocal_rank_fusion() |
 | `test_graph.py` | graph.py | Dependency graph CRUD, blast_radius BFS |
@@ -138,7 +142,7 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 
 ## Dependencies & Imports
 
-- **Runtime:** mcp[cli], protobuf, zstandard, httpx, watchdog (optional)
+- **Runtime:** mcp[cli], protobuf, zstandard, httpx, tree-sitter + 16 curated grammar packages (base deps), watchdog (optional)
 - **No ORM:** Direct sqlite3 usage throughout
 - **No async framework:** Pure sync code, single-threaded query path
 - **Minimal third-party:** ~150 lines of pure-dataclass models, ~200 lines of CLI glue
@@ -146,21 +150,21 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 ## Module Call Graph (Key Paths)
 
 **Indexing pipeline (`index_cli.py`):**
-1. Language detection (count extensions across git-tracked files, or use a persisted `--language` override)
-2. Run language indexer (scip-python, scip-typescript, scip-java, scip-swift)
-3. `scip expt-convert` → SQLite
-4. `populate_graph_for_repo()` — extract package names, store edges
-5. `zoekt-index` → shards in `.zoekt/`
-6. `_run_semantic_stage()` — chunk/embed/store (non-fatal; skips or warns without blocking publish)
-7. Atomic `os.replace()` on `current` pointer
-8. `Registry.update_repo()` — mark indexed; `mark_semantic_indexed()` if the semantic stage succeeded
+1. Validate git input, slug ownership, persisted config (SCIP tooling deliberately not validated — it is optional)
+2. `syntax_index.capture_sources()` → `build_syntax_index()` (extract or reuse declarations into a scratch snapshot)
+3. Optional SCIP attempt (`_attempt_scip`): language indexer → `scip expt-convert`; gated on `_resolve_scip_enabled()` + `_scip_suppressed()`; expected failures degrade to exit-0 `degraded`
+4. `zoekt-git-index` → shards in `.zoekt/` (failure fails the run)
+5. `_prepare_semantic_stage()`/`_finish_semantic_stage()` — chunk (reusing the syntax parse), embed, store (non-fatal)
+6. `validate_sources()` + graph edge update (`populate_graph_for_repo()`, or edge-clearing for a syntax-only generation)
+7. Publish `index-<sha>-<generation>.db` + metadata sibling via `_publish_atomically()` (`os.replace` pointer flip) → registry terminal write → `_retire_superseded_snapshots()` — strictly in that order
 
-**Query path (`server.py` → `query.py`):**
+**Query path (`server.py` → `query.py`) — the per-file routing seam:**
 1. MCP tool handler unpacks `repo`, `symbol`/`path` args
-2. `QueryService._connection()` opens `index-<sha>.db` read-only
-3. Execute SQL against `documents/chunks/global_symbols/mentions` tables
-4. Build result dataclasses
-5. MCP handler converts to dict, returns `{"result": ...}` or `{"error": ...}`
+2. `QueryService._connection()` opens `index-<sha>-<generation>.db` read-only (cache keyed on pointer content)
+3. `read_snapshot_facts()` / `file_provider_coverage()` decide, per file and per operation, SCIP vs. Tree-sitter: SCIP-covered files use `documents/global_symbols/mentions`; uncovered files use `syntax_symbols` rows; bare names resolve across both providers (combined candidates)
+4. Build result dataclasses (`Location.source` = `"scip"` | `"tree-sitter"`, `positionEncoding`, syntax entries add `selectionRange`/`qualifiedName`/`parentSymbol`; `documentSymbols` adds a `coverage` object)
+5. SCIP-only tools (`findReferences`/`callHierarchy`/`typeHierarchy`) with no usable capability raise `CapabilityUnavailableError` → `requiredCapability`/`reason`/`recovery` payload, never an empty array
+6. MCP handler converts to dict, returns the payload or `{"error": ...}`
 
 **Search path (`server.py` → `search.py`):**
 1. First call to `searchCode` → `ZoektLifecycle.ensure_running()` spawns `zoekt-webserver -rpc` (pidfile-tracked)
@@ -184,7 +188,6 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 
 ## Size Profile
 
-- **Total LOC (src):** ~4,050 LOC (excluding generated scip_pb2.py, which adds ~119 LOC) — up from 3,762, mostly `index_cli.py` growth (search-only fallback signatures and publish path, explicit `--search-only` flag) and `registry.py` growth (`SEARCH_ONLY_STATUS` constant and search-only status value)
-- **Total LOC (tests):** ~5,220 LOC (across 16 test files; excluding fixtures) — up from 4,534 with addition of `test_check_versions.py`
-- **Largest module:** `index_cli.py` (932 LOC)
+- **Total LOC (src):** see `wc -l src/jarvis/*.py` for current counts — the tree-sitter syntax baseline added `syntax.py` (~1.1k LOC) and `syntax_index.py` (~850 LOC) and rewrote `index_cli.py`'s pipeline around the staged publish
+- **Largest module:** `index_cli.py`
 - **Smallest module:** `__init__.py` (2 LOC)

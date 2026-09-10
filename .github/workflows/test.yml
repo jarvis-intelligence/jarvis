@@ -15,6 +15,13 @@
 # use a fake in-process model, so nothing is downloaded from a model hub at run
 # time; only the dependency install cost applies, and setup-uv caches that.
 #
+# Why the grammars need no extra: every curated tree-sitter grammar package
+# (tree-sitter, tree-sitter-python, ... see pyproject.toml's base dependencies)
+# is a base dependency, so the matrix below exercises real grammar imports
+# implicitly -- `uv sync` here installs no grammar extra because there is
+# none, and `ParserPool` loads all 17 languages on every unit run, macOS and
+# Linux alike (spec TSI-02 wheel-only delivery contract).
+#
 # Why no lint step: there is no [tool.ruff] config, so ruff would apply its
 # defaults, against which the tree currently has pre-existing violations.
 # Adding that gate here would block unrelated pull requests. Configure ruff

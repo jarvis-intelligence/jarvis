@@ -176,6 +176,18 @@ jobs:
                         f"old readable wheel from PyPI instead of dist/")
           print("compiled-module check -> jarvis.query:", jarvis.query.__file__)
 
+          # Real parser coverage in the installed-wheel test job (spec §11,
+          # "Packaging"): the grammar packages are base dependencies, so the
+          # wheel-only resolve above already installed them -- prove one
+          # loads and parses against the wheel being published, not the
+          # repo checkout.
+          import jarvis.syntax
+          _pool = jarvis.syntax.ParserPool()
+          _tree = _pool.parse("python", b"def f():\n    pass\n")
+          if _tree.root_node.type != "module":
+              sys.exit(f"unexpected parse root: {_tree.root_node.type}")
+          print("grammar check -> python parse ok via tree-sitter")
+
           send({"jsonrpc": "2.0", "method": "notifications/initialized"})
           send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
           tools = expect("tools/list")["result"]["tools"]

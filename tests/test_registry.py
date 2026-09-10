@@ -209,34 +209,37 @@ def test_language_override_column_added_to_preexisting_db(tmp_path: Path):
 
 
 
-def test_upsert_round_trips_search_only(tmp_path):
+def test_upsert_round_trips_scip_enabled(tmp_path):
+    """The reversible user choice (spec TSI-06): default true; an
+    explicit scip_enabled on the upsert is the only writer besides the
+    `set_scip_enabled` setter."""
     from jarvis.registry import Registry
 
     registry = Registry(tmp_path / "registry.db")
     try:
-        registry.upsert("r", "/p", "java", None, "search-only", search_only=True)
+        registry.upsert("r", "/p", "java", None, "indexed")
         entry = registry.get("r")
         assert entry is not None
-        assert entry.search_only is True
+        assert entry.scip_enabled is True
+
+        registry.upsert("r", "/p", "java", None, "indexed", scip_enabled=False)
+        entry = registry.get("r")
+        assert entry is not None
+        assert entry.scip_enabled is False
+
+        registry.upsert("r", "/p", "java", None, "indexed", scip_enabled=True)
+        entry = registry.get("r")
+        assert entry is not None
+        assert entry.scip_enabled is True
     finally:
         registry.close()
 
 
-def test_search_only_defaults_false(tmp_path):
-    from jarvis.registry import Registry
-
-    registry = Registry(tmp_path / "registry.db")
-    try:
-        registry.upsert("r", "/p", "python", None, "indexed")
-        entry = registry.get("r")
-        assert entry is not None
-        assert entry.search_only is False
-    finally:
-        registry.close()
-
-
-def test_search_only_column_migrates_onto_an_existing_database(tmp_path):
-    """A registry created before this column must gain it without data loss."""
+def test_new_columns_migrate_onto_a_preexisting_database(tmp_path):
+    """A registry created before the SCIP stage columns existed gains them
+    additively on open; the legacy row keeps its facts and reads enabled
+    with no recorded stage state (TSI-08: preserve repo paths, schemes,
+    language choices, failure evidence)."""
     import sqlite3
 
     from jarvis.registry import Registry
@@ -260,7 +263,64 @@ def test_search_only_column_migrates_onto_an_existing_database(tmp_path):
     try:
         entry = registry.get("old")
         assert entry is not None
-        assert entry.search_only is False
+        assert entry.scip_enabled is True
+        assert entry.scip_state is None
+        assert entry.status == "indexed"
+    finally:
+        registry.close()
+
+
+def test_stage_fields_survive_transitional_writes_but_terminal_ones_decide(tmp_path):
+    """The stage-scoped field groups (spec TSI-06): a transitional
+    `indexing` upsert must never erase a prior failure record; the
+    terminal write replaces it wholesale; success clears it."""
+    from jarvis.registry import Registry, ScipStageFields
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("r", "/p", "python", "s1", "degraded", scip_enabled=True,
+                        scip_stage=ScipStageFields(
+                            state="failed", failure_reason="build broke",
+                            failure_stderr="full text", failed_at_sha="s1"))
+        # Transitional write preserves everything.
+        registry.upsert("r", "/p", "python", None, "indexing", scip_enabled=True)
+        entry = registry.get("r")
+        assert entry.scip_state == "failed"
+        assert entry.scip_failure_reason == "build broke"
+        assert entry.scip_failure_stderr == "full text"
+        assert entry.scip_failed_at_sha == "s1"
+        # A different terminal stage replaces the record wholesale.
+        registry.upsert("r", "/p", "python", "s2", "indexed", scip_enabled=True,
+                        scip_stage=ScipStageFields(state="available"))
+        entry = registry.get("r")
+        assert entry.scip_state == "available"
+        assert entry.scip_failure_reason is None
+        assert entry.scip_failure_stderr is None
+        assert entry.scip_failed_at_sha is None
+    finally:
+        registry.close()
+
+
+def test_scip_state_vocabulary_is_validated_on_write_and_normalized_on_read(tmp_path):
+    """Writers reject an unknown stage state (spec TSI-06); a historical
+    row carrying an unknown value normalizes to `unknown` at read time
+    without touching its failure text."""
+    import pytest
+    from jarvis.registry import Registry, ScipStageFields
+
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        with pytest.raises(ValueError, match="invalid scip_state"):
+            registry.upsert("r", "/p", "python", None, "indexed",
+                            scip_stage=ScipStageFields(state="bogus"))
+        registry.upsert("r", "/p", "python", None, "degraded",
+                        scip_stage=ScipStageFields(state="failed",
+                                                   failure_reason="kept"))
+        registry._conn.execute("UPDATE repos SET scip_state = 'curious' WHERE slug = 'r'")
+        registry._conn.commit()
+        entry = registry.get("r")
+        assert entry.scip_state == "unknown"
+        assert entry.scip_failure_reason == "kept"
     finally:
         registry.close()
 
@@ -342,44 +402,47 @@ def _entry(**overrides):
 
 
 def test_record_failure_creates_row_when_absent(tmp_path: Path):
-    """D-05: a hard-failed FIRST index must still leave a row -- nothing
-    else can explain the failure or make `jarvis reindex` work."""
+    """D-05: a hard-failed FIRST index must still leave a row via
+    record_failure's INSERT..ON CONFLICT -- nothing else can explain the
+    failure or make `jarvis reindex` resolve the slug."""
     from jarvis.registry import ORIGIN_FAILED_HARD, Registry
 
     registry = Registry(tmp_path / "registry.db")
     try:
-        assert registry.get("new") is None
-        entry = registry.record_failure(
-            "new", "/repos/new", "python", ORIGIN_FAILED_HARD,
-            "scip-python index failed (scip-python)",
-            "scip-python index failed (scip-python):\nboom",
+        returned = registry.record_failure(
+            "mine", "/repos/mine", "python", ORIGIN_FAILED_HARD,
+            "zoekt-git-index failed", "zoekt-git-index failed:\nboom",
         )
-        assert registry.get("new") == entry
-        assert entry.path == "/repos/new"
-        assert entry.language == "python"
+        assert returned.status == "failed"
+        entry = registry.get("mine")
+        assert entry is not None
         assert entry.status == "failed"
-        assert entry.commit_sha is None
         assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert entry.status_reason == "scip-python index failed (scip-python)"
-        assert entry.status_stderr == "scip-python index failed (scip-python):\nboom"
+        assert entry.status_reason == "zoekt-git-index failed"
+        assert entry.status_stderr == "zoekt-git-index failed:\nboom"
+        assert entry.commit_sha is None
     finally:
         registry.close()
 
 
-def test_record_failure_overwrites_existing_row_and_preserves_search_only(tmp_path: Path):
+def test_record_failure_overwrites_existing_row_and_preserves_choices(tmp_path: Path):
     """D-06: a failed reindex fully overwrites the run facts (commit_sha
     NULL, status failed, fresh last_indexed, failure fields stamped) while
-    search_only survives -- losing it would make _resolve_search_only
-    re-run a build that already proved un-indexable."""
+    the user's SCIP choice and the recorded stage state survive -- losing
+    the stage fields would break the watch suppression predicate's
+    four-condition consult (spec TSI-06/TSI-07)."""
     import time
     from datetime import UTC, datetime
 
-    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry, ScipStageFields
 
     registry = Registry(tmp_path / "registry.db")
     try:
         before = registry.upsert("mine", "/repos/mine", "python", "abc123",
-                                 "indexed", search_only=True)
+                                 "degraded", scip_enabled=True,
+                                 scip_stage=ScipStageFields(
+                                     state="failed", failure_reason="build broke",
+                                     failed_at_sha="abc123"))
         time.sleep(0.002)  # guarantee a strictly later last_indexed timestamp
         registry.record_failure(
             "mine", "/repos/mine", "python", ORIGIN_FAILED_HARD,
@@ -393,34 +456,33 @@ def test_record_failure_overwrites_existing_row_and_preserves_search_only(tmp_pa
         assert entry.status_origin == ORIGIN_FAILED_HARD
         assert entry.status_reason == "zoekt-git-index failed"
         assert entry.status_stderr == "zoekt-git-index failed:\nboom"
-        assert entry.search_only is True
+        # Stage fields and the user choice survive the hard failure.
+        assert entry.scip_enabled is True
+        assert entry.scip_state == "failed"
+        assert entry.scip_failure_reason == "build broke"
+        assert entry.scip_failed_at_sha == "abc123"
     finally:
         registry.close()
 
 
 def test_recovery_for_derives_per_origin_commands():
-    """D-09/D-11/D-12: recovery is derived from origin at read time, one
-    command per origin -- never persisted per-row."""
+    """D-09: recovery is derived at read time, never persisted. The new
+    status branches come first (spec TSI-06); the origin branches exist
+    for legacy rows the migration preserved verbatim."""
     from jarvis.registry import (
-        ORIGIN_FAILED_HARD,
         ORIGIN_MANUAL,
         ORIGIN_SIGNATURE,
         recovery_for,
     )
 
-    assert recovery_for(_entry(status_origin=ORIGIN_FAILED_HARD)) == "jarvis index /repos/mine"
-    assert recovery_for(_entry(status_origin=ORIGIN_SIGNATURE)) == "jarvis reindex mine"
-    assert recovery_for(_entry(status_origin=ORIGIN_MANUAL)) == (
-        "jarvis forget mine && jarvis index /repos/mine"
+    assert recovery_for(_entry(status="failed")) == "jarvis index /repos/mine"
+    assert recovery_for(_entry(status="failed", status_origin="failed_hard")) == (
+        "jarvis index /repos/mine"
     )
-
-
-def test_recovery_for_treats_legacy_search_only_as_manual():
-    """Pre-migration search_only=1 rows have a NULL origin; the D-10 escape
-    (forget + re-index) is valid for whichever path created them."""
-    from jarvis.registry import recovery_for
-
-    assert recovery_for(_entry(search_only=True, status="search-only")) == (
+    assert recovery_for(_entry(status="search-only", status_origin=ORIGIN_SIGNATURE)) == (
+        "jarvis reindex mine"
+    )
+    assert recovery_for(_entry(status="search-only", status_origin=ORIGIN_MANUAL)) == (
         "jarvis forget mine && jarvis index /repos/mine"
     )
 
@@ -429,7 +491,26 @@ def test_recovery_for_returns_none_for_successful_and_unknown_rows():
     from jarvis.registry import recovery_for
 
     assert recovery_for(_entry(status="indexed", commit_sha="abc")) is None
-    assert recovery_for(_entry(status_origin="from-the-future")) is None
+    assert recovery_for(_entry(status="search-only", status_origin="from-the-future")) is None
+
+
+def test_recovery_for_degraded_rows_map_to_the_reversible_cli():
+    """Spec TSI-06: recovery maps to the reversible CLI and stage states —
+    an enabled degraded row names the SCIP retry; a disabled one names the
+    baseline reindex first and the re-enable second; the legacy fallback
+    wording survives verbatim for migrated rows."""
+    from jarvis.registry import ORIGIN_FALLBACK, recovery_for
+
+    enabled = recovery_for(_entry(status="degraded", scip_enabled=True))
+    assert enabled == (
+        "fix the SCIP failure, then `jarvis index /repos/mine --scip` to retry enrichment"
+    )
+    disabled = recovery_for(_entry(status="degraded", scip_enabled=False))
+    assert "`jarvis reindex mine`" in disabled
+    assert "--scip" in disabled
+    legacy = recovery_for(_entry(status="degraded", scip_enabled=True,
+                                 status_origin=ORIGIN_FALLBACK))
+    assert "jarvis reindex mine" in legacy
 
 
 def test_upsert_clears_failure_fields_on_success(tmp_path: Path):
@@ -456,10 +537,12 @@ def test_upsert_clears_failure_fields_on_success(tmp_path: Path):
 
 
 def test_failure_columns_migrate_onto_an_existing_database(tmp_path: Path):
-    """SC5: a registry created before the three failure columns existed
-    opens via Registry, gains them additively, keeps its rows, and leaves
-    legacy search_only=1 semantics untouched (values are never rewritten)."""
-    from jarvis.registry import SEARCH_ONLY_STATUS, Registry
+    """SC5: a registry created before the failure columns existed opens
+    via Registry, gains them additively, keeps its rows, and maps the
+    legacy manual search-only row per TSI-08: intentional disable
+    (`scip_enabled=0` + `disabled`), remapped to `degraded` with the
+    migration note, its facts otherwise untouched."""
+    from jarvis.registry import Registry
 
     db = tmp_path / "registry.db"
     conn = sqlite3.connect(str(db))
@@ -491,15 +574,16 @@ def test_failure_columns_migrate_onto_an_existing_database(tmp_path: Path):
         assert indexed.status_origin is None
         assert indexed.status_reason is None
         assert indexed.status_stderr is None
+        assert indexed.scip_enabled is True
 
         legacy = registry.get("search-only-old")
         assert legacy is not None
-        assert legacy.status == SEARCH_ONLY_STATUS
-        assert legacy.search_only is True  # untouched by the migration (SC5)
-        assert legacy.tracked_files == 7
+        assert legacy.status == "degraded"  # remapped out of the dead vocabulary
+        assert legacy.scip_enabled is False
+        assert legacy.scip_state == "disabled"
+        assert "reindex" in (legacy.status_reason or "")
+        assert legacy.tracked_files == 7  # untouched by the migration
         assert legacy.status_origin is None
-        assert legacy.status_reason is None
-        assert legacy.status_stderr is None
     finally:
         registry.close()
 
@@ -507,6 +591,7 @@ def test_failure_columns_migrate_onto_an_existing_database(tmp_path: Path):
     try:
         cols = {row[1] for row in probe.execute("PRAGMA table_info(repos)")}
         assert {"status_origin", "status_reason", "status_stderr"} <= cols
+        assert "search_only" not in cols
     finally:
         probe.close()
 
@@ -521,7 +606,7 @@ def test_upsert_round_trips_origin_parameters(tmp_path: Path):
     registry = Registry(tmp_path / "registry.db")
     try:
         returned = registry.upsert("mine", "/repos/mine", "python", "abc123",
-                                   "search-only", search_only=True,
+                                   "search-only",
                                    status_origin=ORIGIN_MANUAL)
         entry = registry.get("mine")
         assert entry is not None
@@ -548,7 +633,7 @@ def test_upsert_origin_parameters_replace_a_prior_failure_record(tmp_path: Path)
         registry.record_failure("mine", "/repos/mine", "java", ORIGIN_FAILED_HARD,
                                 "scip-java index failed", "scip-java index failed:\nboom")
         registry.upsert("mine", "/repos/mine", "java", "abc123", "search-only",
-                        search_only=True, status_origin=ORIGIN_SIGNATURE,
+                        status_origin=ORIGIN_SIGNATURE,
                         status_reason="matched signature explanation")
         entry = registry.get("mine")
         assert entry is not None
@@ -574,10 +659,11 @@ def test_plain_upsert_leaves_failure_fields_null(tmp_path: Path):
         registry.close()
 
 
-def test_fallback_enabled_column_migrates_onto_an_existing_database(tmp_path: Path):
-    """FALL-02: a registry created before this column existed gains it on
-    first open via `_ensure_column`; the legacy row reads NULL — never set,
-    defer to the env tier — so existing registries keep working (SC5)."""
+def test_legacy_choice_columns_are_dropped_by_the_migration(tmp_path: Path):
+    """TSI-08 consolidation: a pre-migration registry (search_only +
+    fallback_enabled columns present) migrates in one transaction — facts
+    copied, obsolete columns dropped, no dual state models. Repeat opens
+    are idempotent."""
     db = tmp_path / "registry.db"
     conn = sqlite3.connect(str(db))
     conn.execute(
@@ -586,12 +672,18 @@ def test_fallback_enabled_column_migrates_onto_an_existing_database(tmp_path: Pa
         "status TEXT NOT NULL, scheme_override TEXT, semantic_indexed_at TEXT, "
         "semantic_include TEXT, language_override TEXT, "
         "search_only INTEGER NOT NULL DEFAULT 0, tracked_files INTEGER, "
-        "status_origin TEXT, status_reason TEXT, status_stderr TEXT)"
+        "status_origin TEXT, status_reason TEXT, status_stderr TEXT, "
+        "fallback_enabled INTEGER)"
     )
     conn.execute(
         "INSERT INTO repos VALUES ('old', '/p', 'python', 'abc', "
         "'2026-01-01T00:00:00+00:00', 'indexed', NULL, NULL, NULL, NULL, "
-        "0, 42, NULL, NULL, NULL)"
+        "0, 42, NULL, NULL, NULL, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO repos VALUES ('auto', '/q', 'kotlin', 'def', "
+        "'2026-01-02T00:00:00+00:00', 'search-only', NULL, NULL, NULL, NULL, "
+        "1, 7, 'signature', 'ABI mismatch', 'scip output', NULL)"
     )
     conn.commit()
     conn.close()
@@ -601,35 +693,53 @@ def test_fallback_enabled_column_migrates_onto_an_existing_database(tmp_path: Pa
         entry = registry.get("old")
         assert entry is not None
         assert entry.status == "indexed"
-        assert entry.fallback_enabled is None  # NULL = never set, defer to env
+        assert entry.tracked_files == 42
+        assert entry.scip_enabled is True
+        assert entry.scip_state is None
+        auto = registry.get("auto")
+        assert auto is not None
+        # Automatically classified fallback: enabled, failure copied to the
+        # stage fields, retry permitted on the next explicit run (TSI-08).
+        assert auto.scip_enabled is True
+        assert auto.scip_state == "failed"
+        assert auto.scip_failure_reason == "ABI mismatch"
+        assert auto.scip_failure_stderr == "scip output"
+        assert auto.scip_failed_at_sha == "def"
     finally:
         registry.close()
 
     probe = sqlite3.connect(str(db))
     try:
         cols = {row[1] for row in probe.execute("PRAGMA table_info(repos)")}
-        assert "fallback_enabled" in cols
+        assert "search_only" not in cols
+        assert "fallback_enabled" not in cols
+        assert "scip_enabled" in cols
     finally:
         probe.close()
 
+    # Repeat migration: a no-op that changes nothing (spec TSI-08).
+    registry = Registry(db)
+    try:
+        again = registry.get("auto")
+        assert again is not None
+        assert again.scip_state == "failed"
+        assert again.scip_failure_reason == "ABI mismatch"
+    finally:
+        registry.close()
 
-def test_fallback_enabled_tri_state_roundtrip(tmp_path: Path):
-    """FALL-02 tri-state: NULL default, explicit True/False via the
-    dedicated setter, and — critically — a plain upsert (the terminal-write
-    shape, no fallback argument) must leave the stored value untouched
-    (upsert's ON CONFLICT list never names the column)."""
+
+def test_set_scip_enabled_roundtrip(tmp_path: Path):
+    """The reversible choice (spec TSI-06/TSI-07): the dedicated setter
+    updates it directly; upserts carry the resolved value explicitly, so
+    the choice only changes when a run says so."""
     registry = Registry(tmp_path / "registry.db")
     try:
         registry.upsert("mine", "/repos/mine", "python", "abc", "indexing")
-        assert registry.get("mine").fallback_enabled is None
-        registry.set_fallback_enabled("mine", True)
-        assert registry.get("mine").fallback_enabled is True
-        registry.set_fallback_enabled("mine", False)
-        assert registry.get("mine").fallback_enabled is False
-        registry.set_fallback_enabled("mine", True)
-        # The terminal-write shape: no fallback argument rides the upsert.
-        registry.upsert("mine", "/repos/mine", "python", "def", "indexed")
-        assert registry.get("mine").fallback_enabled is True
+        assert registry.get("mine").scip_enabled is True
+        registry.set_scip_enabled("mine", False)
+        assert registry.get("mine").scip_enabled is False
+        registry.set_scip_enabled("mine", True)
+        assert registry.get("mine").scip_enabled is True
     finally:
         registry.close()
 
@@ -664,7 +774,7 @@ def test_semantic_declined_column_migrates_onto_an_existing_database(tmp_path: P
         assert entry is not None
         assert entry.status == "indexed"
         assert entry.tracked_files == 42
-        assert entry.fallback_enabled is None  # the phase-3 column is untouched
+        assert entry.scip_enabled is True
         assert entry.semantic_declined is False  # NULL = never answered
     finally:
         registry.close()

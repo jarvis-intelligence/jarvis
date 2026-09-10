@@ -4,12 +4,16 @@
 
 jarvis is a **local-first, single-user code intelligence MCP server** that combines structural navigation (SCIP-backed) with lexical search (Zoekt-backed) and natural-language semantic/vector search in a single stdio process. It bridges the SCIP indexing ecosystem with the MCP protocol, exposing 9 tools to Claude Code, Cursor, and other MCP clients: `documentSymbols`, `goToDefinition`, `findReferences`, `callHierarchy`, `typeHierarchy`, `getIndexStatus`, `searchCode`, `semanticSearch`, `blastRadius`.
 
-The system is built around four core engines:
+The system is built around five core engines:
 
-1. **Query Engine** — reads SCIP SQLite indexes, executes nav queries (go-to-definition, find-references, etc.)
+1. **Query Engine** — reads navigation snapshots (SCIP tables + Tree-sitter syntax
+   declarations in one SQLite db), executes nav queries (go-to-definition, find-references, etc.)
 2. **Search Engine** — manages embedded Zoekt instance, returns lexical search results
 3. **Graph Engine** — builds and queries package dependency relationships across indexed repos
 4. **Semantic Engine** — tree-sitter chunking + self-hosted embeddings into a per-repo LanceDB table, fused with Zoekt hits for natural-language `semanticSearch`
+5. **Syntax Engine** — the curated Tree-sitter grammar provider (`syntax.py`) and the immutable
+   syntax snapshot builder (`syntax_index.py`): declaration-level extraction for 17 languages on
+   every indexing run, no compiler or build system required
 
 ### Layered Architecture (primary view)
 
@@ -21,11 +25,11 @@ other contract.
 |---|---|
 | 1 · Clients | Claude Code, Cursor, any MCP host |
 | 2 · MCP Server | `server.py` — FastMCP over stdio, 9 tools |
-| 3 · Engines | Query (`query.py`), Search (`search.py`), Graph (`graph.py`), Semantic (`semantic.py`, `chunker.py`, `embeddings.py`, `symbol_search.py`) |
-| 4 · Storage | `index-<sha>.db` + pointer, `.zoekt/` shards, `registry.db`, `~/.jarvis/lancedb/` |
-| 5 · Indexing orchestration | `index_cli.py` — detect → run indexer → convert → graph/zoekt → atomic publish |
-| 6 · Language indexers | `scip-typescript`, `scip-python`, `scip-java`, `scip-swift` |
-| 7 · External toolchain | Node/npm, Python, JDK, and (Swift only) Xcode + iOS SDK |
+| 3 · Engines | Query (`query.py`), Search (`search.py`), Graph (`graph.py`), Semantic (`semantic.py`, `chunker.py`, `embeddings.py`, `symbol_search.py`), Syntax (`syntax.py`, `syntax_index.py`) |
+| 4 · Storage | `index-<sha>-<generation>.db` + `current` pointer, `.zoekt/` shards, `registry.db`, `~/.jarvis/lancedb/` |
+| 5 · Indexing orchestration | `index_cli.py` — capture → syntax baseline → optional SCIP → Zoekt → optional semantic → graph → atomic publish |
+| 6 · Language indexers & grammars | pip-installed Tree-sitter grammar wheels (base deps, always present) + optional `scip-typescript`, `scip-python`, `scip-java`, `scip-swift` |
+| 7 · External toolchain | Node/npm, Python, JDK, and (Swift only) Xcode + iOS SDK — SCIP enrichment only; the syntax baseline needs none of these |
 
 Layer 6→7 is where Swift differs from every other language: the other three indexers need only
 an ordinary runtime, while `scip-swift` needs Xcode and the iOS SDK, which Apple ships for macOS
@@ -37,11 +41,12 @@ Expanding layers 1–4 of the table above, the runtime path is:
 
 - **Client**: Claude Code / Cursor / any MCP client → MCP stdio
 - **Server** (`server.py`): FastMCP dispatcher → 9 tools
-- **Query Engine** (`query.py`): Reads SCIP index SQLite (documents/chunks/global_symbols)
+- **Query Engine** (`query.py`): reads the navigation snapshot SQLite (SCIP documents/chunks/global_symbols tables + namespaced `syntax_*` tables) and routes per file
 - **Search Engine** (`search.py`): HTTP client to embedded Zoekt webserver
 - **Graph Engine** (`graph.py`): Queries package edges in registry.db
 - **Semantic Engine** (`chunker.py` + `embeddings.py` + `semantic.py`): tree-sitter chunking → embeddings → per-repo LanceDB table, fused with Zoekt hits
-- **Storage**: SCIP indexes (index-<sha>.db), Zoekt shards (.zoekt/), registry (registry.db), LanceDB tables (~/.jarvis/lancedb/)
+- **Syntax Engine** (`syntax.py` + `syntax_index.py`): curated grammar provider + per-file provider facts read from the same snapshot connection
+- **Storage**: navigation snapshots (index-<sha>-<generation>.db), Zoekt shards (.zoekt/), registry (registry.db), LanceDB tables (~/.jarvis/lancedb/)
 
 ---
 
@@ -50,56 +55,95 @@ Expanding layers 1–4 of the table above, the runtime path is:
 The full indexing lifecycle, from file changes → published index (layers 5–7 of the table above,
 writing up into the storage seam):
 
-### The Pipeline (index_cli.py)
+### The Staged Pipeline (index_cli.py)
 
-1. **Language Detection**
-   - Count extensions across `git ls-files` (`_git_tracked_files()`), not a filesystem walk — a
-     walk also counts gitignored vendored checkouts, sibling clones, and worktrees, which can
-     outnumber the repo's own code and pick a language it doesn't use
-   - Select language with most files (tie-break by priority: .ts → .tsx → .py → .java → .kt → .swift)
-   - Skip: .git, node_modules, .venv, __pycache__, dist, build, DerivedData, .build (`_IGNORED_DIRS`
-     still applies on top, since git does not exclude build output a repo happens to commit)
-   - A non-git `repo_path` raises `NotAGitRepositoryError` before detection runs
-   - `--language <name>` bypasses detection entirely and persists to the registry
-     (`language_override` column, `_resolve_language()`) so `reindex`/`watch` reuse it automatically
+`index_repo()` runs seven stages in a fixed order (spec TSI-04 §5). Every stage
+has an explicit failure boundary; stage-1 validation failures and stage-4
+(Zoekt) and stage-6/7 (storage/publication) failures fail the run.
 
-2. **Run Language Indexer**
-   - Execute `scip-typescript`, `scip-python`, `scip-java`, or `scip-swift` on repo root
-   - Output: raw SCIP document (protobuf, optionally zstd-compressed)
-   - **Swift build-tool selection:** For Swift repos with a checked-in `.xcodeproj` or `.xcworkspace` (but no `Package.swift`-only setup), use `scip-swift --build-tool xcodebuild` instead of the default SwiftPM backend. Rationale: `scip-swift`'s own `BuildBackendDetector` picks SwiftPM whenever `Package.swift` exists, even for UIKit-only iOS packages with no macOS platform support, where plain `swift build` fails. This override forces xcodebuild for such repos. When a scheme is specified (via `--scheme` flag or persisted in registry), append it to the indexer command.
+1. **Validation** — git input, slug/path ownership, persisted configuration.
+   SCIP tooling is deliberately NOT validated here: it is optional enrichment,
+   so a machine without any indexer can still publish a baseline.
 
-3. **SCIP Conversion**
-   - Run `scip expt-convert` to convert SCIP document → SQLite
-   - Creates `documents`, `chunks`, `global_symbols`, `mentions`, `defn_enclosing_ranges` tables
-   - Contains occurrence metadata and symbol information
+2. **Syntax baseline (always runs)** — capture git-tracked source bytes
+   (`syntax_index.capture_sources()`), extract or reuse declaration rows
+   (`build_syntax_index()` keyed on file hash + grammar identity), build a
+   scratch snapshot. This stage replaces the old step-1 language detection as
+   the thing every run does: the baseline classifies every tracked file by its
+   own extension across 17 languages, independent of the repo's primary
+   language. A `--language` override (persisted, reused by `reindex`/`watch`)
+   now selects only the SCIP enrichment language — it never restricts syntax
+   coverage.
 
-4. **Package Graph Population**
-   - Extract package names from all symbols (e.g., "npm:@scope/name", "python:requests")
-   - Build edges in registry.db: source_repo → dependent_package
-   - Uses rebuild-not-accumulate (delete old edges for this repo, insert new ones)
+3. **Optional SCIP enrichment** — run the language indexer (`scip-typescript`,
+   `scip-python`, `scip-java`, or `scip-swift` — Swift with
+   `--build-tool xcodebuild` for Xcode-project repos) and `scip expt-convert`
+   (produces `documents`, `chunks`, `global_symbols`, `mentions`,
+   `defn_enclosing_ranges`). Gated on the reversible persisted
+   `--scip`/`--no-scip` choice and the watch suppression predicate (same-commit
+   retry of a known failure skips only this stage). Any expected failure —
+   missing binary, old `scip`, indexer crash — records the cause and degrades
+   the run to exit-0 `degraded`; the baseline still publishes. The old
+   signature-matching search-only fallback is gone (superseded, spec §12).
 
-5. **Lexical Indexing**
-   - Run `zoekt-index` against the same repo
-   - Creates Zoekt shards in `.zoekt/` directory
-   - Files are searchable by keyword, filename, content
+4. **Lexical indexing** — `zoekt-git-index` into `.zoekt/`. Its failure fails
+   the run (nothing publishes).
 
-6. **Automatic Search-Only Fallback (on recognized indexer failures)**
-   - If the language indexer stderr/stdout matches a recognized signature (Kotlin version mismatch, Android/AGP no-shards), `_search_only_reason()` returns a human-readable reason
-   - On detection, publishes Zoekt + semantic search only via `_publish_search_only()` instead of hard-failing; persists `search-only` status to registry
-   - Explicit `--search-only` flag enables this code path upfront, skipping SCIP indexing entirely
-   - Any unrecognized indexer failure is still a hard failure
+5. **Optional semantic stage** (`prepare_semantic` + `finish_semantic`,
+   splitting the old `index_semantic()` so the syntax stage can share one parse
+   per file) — chunks, embeds, writes the per-repo LanceDB table; non-fatal on
+   failure or missing `semantic` extra.
 
-7. **Semantic Indexing (non-fatal, `_run_semantic_stage()`)**
-   - Chunk source files (`chunker.py`), embed chunks (`embeddings.py`), write to a per-repo
-     LanceDB table (`semantic.index_semantic()`)
-   - Skips cleanly if the `semantic` extra isn't installed (`SemanticExtraMissingError`); any
-     other failure is caught and logged — neither case blocks the SCIP/Zoekt publish
-   - On success, `Registry.mark_semantic_indexed()` records `semantic_indexed_at`
+6. **Revalidate + graph** — `validate_sources()` re-scans for mid-run file
+   changes; graph edges update (a generation without usable SCIP data clears
+   the repo's outgoing edges and keeps package identities; no edges are
+   synthesized from Tree-sitter). Storage failures here are hard failures,
+   never degradation.
 
-8. **Atomic Publishing**
-   - Copy SCIP index to final location: `~/.jarvis/scip/_/<slug>/_/index-<sha>.db`
-   - Update `current` pointer file (small text file, atomic `os.replace()`)
-   - Update registry.db: mark repo as indexed, record commit SHA, timestamp
+7. **Publish, record, retire — strictly in that order** (see the diagram
+   below): one immutable snapshot becomes visible via a single pointer flip,
+   then the registry records the terminal status, then superseded snapshots
+   are deleted. A crash between any of the three leaves either the old or the
+   new snapshot live, never a half-published one.
+
+### Single-snapshot publication
+
+Every run publishes exactly one immutable SQLite navigation snapshot — syntax
+tables plus, when the SCIP stage succeeded, genuine SCIP tables in the same
+database — and readers select it through one `current` pointer:
+
+```
+ scratch build                     publish (atomic)                read path
+┌─────────────────────────┐   ┌───────────────────────────────┐   ┌──────────────────────┐
+│ syntax_index.build_     │   │ final name:                   │   │ IndexConnectionCache │
+│ syntax_index(...)       │   │   index-<sha>-<generation>.db │   │ opens mode=ro&       │
+│  + syntax tables        ├──►│   index-<sha>-<generation>.   ├──►│ immutable=1, keyed   │
+│  + copied SCIP tables   │   │     metadata.json (same stem) │   │ on pointer CONTENT;  │
+│  + jarvis_snapshot row  │   │ _publish_atomically():        │   │ a pointer change     │
+│    (generation, commit, │   │   write .current.tmp-<pid>    │   │ invalidates by key,  │
+│     scip_state, counts) │   │   os.replace → current        │   │ never by mtime       │
+└─────────────────────────┘   └───────────────────────────────┘   └──────────────────────┘
+```
+
+`<generation>` is a fresh `uuid4().hex` per publish, so a same-commit reindex
+never mutates or reuses a live filename. Retiring old snapshots happens only
+after the registry records the new terminal state.
+
+### Registry status vocabulary (spec TSI-06)
+
+| Status | Meaning | Exit |
+|---|---|---|
+| `indexing` | Transient marker written when a run starts; every terminal decision replaces it | — |
+| `indexed` | Baseline published; SCIP usable, disabled (`--no-scip`), or unsupported (no SCIP-indexable language — the baseline still covers the repo) | 0 |
+| `partial` | Published with documented syntax/SCIP extraction gaps (e.g. positions published but no navigable chunks) | 0 |
+| `degraded` | Published, but the enabled SCIP stage failed, is unavailable, or remains watch-suppressed at the same commit; cause + recovery recorded on the row | 0 |
+| `failed` | A required stage (Zoekt), storage, publication, or registry failure; nothing new published, previous snapshot stays live | nonzero |
+
+Each run also persists a SCIP stage state on the row: `available`, `partial`,
+`failed`, `unavailable`, `unsupported`, `disabled` — read-time normalized to
+`unknown` for historical rows with insufficient evidence (`SCIP_STATES` in
+`registry.py` is the single source of the vocabulary; the CLI writer and the
+MCP reader spell it identically).
 
 ### The Watch Loop (jarvis watch)
 
@@ -120,7 +164,11 @@ Runs in foreground using `watchdog` library:
    still trigger a debounce cycle.*
 
 3. **Reindex**
-   - Once debounce window closes, run the full indexing pipeline above
+   - Once debounce window closes, run the full staged pipeline above
+   - The syntax baseline, Zoekt, semantic stage, and publication all run every
+     time; the watch suppression predicate may skip ONLY the SCIP retry when
+     the persisted stage state is failed/unavailable at the same commit and the
+     caller passed no explicit `--scip`/`--language`/`--scheme` override
    - Atomically publish, zero query downtime
 
 ---
@@ -146,25 +194,25 @@ conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
 
 ### 2. Atomic Publishing (Zero Downtime Reindex)
 
-**The guarantee:** Publishing is atomic at the pointer boundary. A reindex writes a new versioned `.db`, populates the graph, and runs `zoekt-index` — only once *all* succeed does the pointer flip via `os.replace()`. A query already reading the old file keeps working; no partial-state window.
+**The guarantee:** Publishing is atomic at the pointer boundary. A reindex builds a new immutable `index-<sha>-<generation>.db` (fresh `<generation>` per publish, so a same-commit reindex never touches a live filename), populates the graph, and runs `zoekt-index` — only once *all* succeed does the pointer flip via `os.replace()`. A query already reading the old file keeps working; no partial-state window. The flip is pointer-content-only: superseded snapshots are retired strictly after the registry records the new terminal state, so cleanup can never destroy a live snapshot.
 
 **Implementation:**
 ```python
-# index_cli.py: Publish flow
-new_db_path = index_dir / f"index-{commit_sha}.db"
+# index_cli.py: publish flow (stage 7 of the staged pipeline)
+generation = uuid.uuid4().hex
+versioned_name = f"index-{sha}-{generation}.db"
 
-# Expensive operations (can fail, no risk to old index)
-populate_graph_for_repo(repo_slug, symbols)
-zoekt_index(repo_path, output=new_db_path)
+# Expensive operations (can fail, no risk to the old snapshot)
+#   ... SCIP conversion, graph edges, Zoekt shards ...
 
-# Only once all succeed, atomically swap
-current_pointer = index_dir / "current"
-os.replace(new_db_path, current_pointer)  # POSIX atomic rename(2)
+# Only once all succeed: pointer flip, then registry record, then retire
+_publish_atomically(index_dir, versioned_name)
+#   inside: write ".current.tmp-<pid>", then os.replace -> "current"
 ```
 
 **Why it matters:**
 - Zero query downtime across reindex
-- If anything fails (graph population, Zoekt indexing), old index stays live
+- If anything fails (graph population, Zoekt indexing), old snapshot stays live
 - No "half-indexed" state visible to queries
 - Clients never see "index not found" mid-query
 
@@ -197,26 +245,38 @@ def populate_graph_for_repo(repo_slug: str, symbols: list[str]):
 
 When a Claude Code user calls a tool like `goToDefinition`:
 
-1. **MCP Client** sends: `{"repo": "myrepo", "path": "src/main.ts", "line": 10, "character": 5}`
+1. **MCP Client** sends: `{"repo": "myrepo", "symbol": "Greeter.greet"}` (or
+   `{"repo": ..., "path": ...}` for `documentSymbols`)
 
 2. **server.py (MCP dispatcher)**
    - Unpacks args
-   - Calls `QueryService.go_to_definition(...)`
-   - Catches all exceptions → `{"error": "..."}`
+   - Calls the matching `QueryService` method (`resolve_definition`,
+     `get_document_symbols`, ...)
+   - Catches all exceptions → `{"error": "..."}`; a SCIP-only tool asked for
+     more than this snapshot can do renders `requiredCapability`/`reason`/
+     `recovery` alongside the error string (never an empty array)
 
-3. **query.py (Query Engine)**
+3. **query.py (Query Engine) — the per-file routing seam (spec TSI-05)**
    - Looks up repo in registry.db (validate it exists, get commit SHA)
-   - Opens `index-<sha>.db` read-only via `IndexConnectionCache`
-   - Executes SQL query against documents/chunks/global_symbols tables
-   - Builds result dataclass (Location, SymbolInfo, etc.)
+   - Opens `index-<sha>-<generation>.db` read-only via `IndexConnectionCache`
+   - Reads the snapshot's provider facts (`read_snapshot_facts()`:
+     per-file SCIP outline/definition coverage + syntax parse states)
+   - Routes per file: usable SCIP coverage → SCIP tables; otherwise the
+     namespaced `syntax_symbols` rows extracted by the Tree-sitter baseline
+   - A bare/qualified name resolves through both providers in parallel and
+     merges candidates; full SCIP symbols and opaque `syntax:` identifiers
+     resolve only through their own provider
+   - Builds result dataclasses (Location carries `source` and
+     `positionEncoding`; syntax outline entries add `selectionRange`)
 
 4. **server.py (Response)**
    - Converts result dataclass to dict via `dataclasses.asdict()`
-   - Returns `{"location": {...}, "symbol": {...}}` to MCP client
+   - Returns `{"symbol": ..., "definitions": [...], "resolvedSymbol"?,
+     "coverage"?, freshness...}` to MCP client
 
 5. **MCP Client** (Claude Code)
    - Receives JSON response
-   - Displays nav result to user (file, line, column, symbol)
+   - Displays nav result to user (file, line, column, symbol, provenance)
 
 ---
 
@@ -343,9 +403,10 @@ prevents silently mixing incompatible embedding spaces or wrong-prefix/wrong-hea
 │   └── _/
 │       └── <slug>/
 │           └── _/
-│               ├── current            # Pointer file (text, content: commit SHA or db name)
-│               ├── index-<sha1>.db    # SCIP SQLite (documents, chunks, global_symbols, ...)
-│               └── index-<sha2>.db    # (old versions, kept for GC later)
+│               ├── current                          # Pointer file (text, content: a versioned db filename)
+│               ├── index-<sha>-<generation>.db      # Navigation snapshot (SCIP + syntax tables); NEVER mutated
+│               ├── index-<sha>-<generation>.metadata.json  # Sibling metadata (same filename stem)
+│               └── index-<sha>-<generation2>.db     # (older generations, retired after the registry records the new state)
 ├── .zoekt/
 │   ├── zoekt.pid                      # Pidfile (zoekt-webserver PID)
 │   └── <shards>                       # Zoekt index shards (repo-specific)
@@ -354,16 +415,13 @@ prevents silently mixing incompatible embedding spaces or wrong-prefix/wrong-hea
 ```
 
 **registry.db schema:**
-- `repos(slug TEXT PRIMARY KEY, path TEXT, language TEXT, commit_sha TEXT, last_indexed TIMESTAMP, status TEXT, scheme_override TEXT, semantic_indexed_at TEXT, semantic_include TEXT, language_override TEXT)`
+- `repos(slug TEXT PRIMARY KEY, path TEXT, language TEXT, commit_sha TEXT, last_indexed TIMESTAMP, status TEXT, scheme_override TEXT, semantic_indexed_at TEXT, semantic_include TEXT, language_override TEXT, ...)` plus the stage/outcome columns (`tracked_files`, `status_origin`, `status_reason`, `status_stderr`, `scip_enabled`, `scip_state`, `scip_failure_reason`, `scip_failure_stderr`, `scip_failed_at_sha`, `semantic_declined`) written transactionally per terminal run decision; a one-time idempotent migration carries legacy search-only rows forward
 - `packages(id, repo_slug, package_name)`
 - `edges(source_repo TEXT, target_package TEXT, ...)`
 
-**index-<sha>.db schema** (from `scip expt-convert`):
-- `documents(document_id, path, text, relative_url, language)`
-- `chunks(chunk_id, document_id, range_start_line, range_start_char, range_end_line, range_end_char)`
-- `global_symbols(symbol_id, symbol, kind, display_name, ...)`
-- `mentions(symbol_id, range_id, is_definition, is_type_definition, is_reference, ...)`
-- `defn_enclosing_ranges(definition_id, enclosing_range_id, ...)`
+**index-<sha>-<generation>.db schema** — two namespaces in one immutable snapshot:
+- SCIP tables (from `scip expt-convert`): `documents(document_id, path, text, relative_url, language)`, `chunks(chunk_id, document_id, ...)`, `global_symbols(symbol_id, symbol, kind, display_name, ...)`, `mentions(symbol_id, range_id, ...)`, `defn_enclosing_ranges(definition_id, enclosing_range_id, ...)`
+- Jarvis-owned syntax tables (spec TSI-04 §5, prefixed `syntax_`): `syntax_files` (per-file parse state + provider coverage flags), `syntax_symbols` (declaration name/kind/span + opaque `syntax:` id), and the `jarvis_snapshot` singleton (format version, generation, commit, published time, source manifest hash, `scip_state`, per-file SCIP capability facts, extraction counts)
 
 ---
 
@@ -398,18 +456,25 @@ Indexing is exclusive — only one reindex can run at a time per slug (enforced 
 - **protobuf** — SCIP document decoding
 - **zstandard** — SCIP blob decompression
 - **httpx** — Zoekt webserver HTTP client
+- **tree-sitter** + 16 curated grammar packages (`tree-sitter-python`,
+  `tree-sitter-typescript`, ...) — **base dependencies** (spec TSI-02): the
+  syntax baseline parses offline from prebuilt abi3 wheels; nothing is
+  vendored into jarvis's own wheel and nothing is downloaded at index time.
+  `syntax.py`'s `FACTORIES` is the one curated map from internal language name
+  to (distribution, module, factory); repository-supplied grammar code is
+  never instantiated
 - **watchdog** (optional, `--extra watch`) — filesystem monitor for `jarvis watch`
-- **lancedb**, **sentence-transformers**, **tree-sitter**, **tree-sitter-language-pack**
-  (optional, `--extra semantic`) — chunking, embedding, and vector storage for `semanticSearch`.
-  Every import of these is deferred inside functions, never at module top-level, so a base
-  install (without the extra) is completely unaffected.
+- **lancedb**, **sentence-transformers** (optional, `--extra semantic`) —
+  embedding and vector storage for `semanticSearch`. Every import of the
+  extra's packages is deferred inside functions, never at module top-level,
+  so a base install is completely unaffected.
 
 ### External Binaries (Must be on PATH)
 
 - **Language indexers** (pick one or more):
   - `scip-typescript` — TypeScript/JavaScript indexing
   - `scip-python` — Python indexing
-  - `scip-java` — Java/Kotlin indexing. **Known limitations:** Android/AGP projects produce zero SCIP shards because scip-java's Gradle plugin relies on standard source sets that AGP replaces with variants (upstream scip-java#177); Kotlin versions other than the pinned release fail with AbstractMethodError or NoSuchMethodError because scip-kotlinc is compiled against exactly one Kotlin version and the compiler-plugin API is internal/unstable. Both trigger automatic fallback to `--search-only` (lexical search + semantic search only).
+  - `scip-java` — Java/Kotlin indexing. **Known limitations:** Android/AGP projects produce zero SCIP shards because scip-java's Gradle plugin relies on standard source sets that AGP replaces with variants (upstream scip-java#177); Kotlin versions other than the pinned release fail with AbstractMethodError or NoSuchMethodError because scip-kotlinc is compiled against exactly one Kotlin version and the compiler-plugin API is internal/unstable. Both are detected from the indexer's own failure output and degrade the run to exit-0 `degraded` (SCIP skipped; the syntax baseline still publishes).
   - `scip-swift` — Swift indexing ([phuongddx/scip-swift](https://github.com/phuongddx/scip-swift)).
     Exists, builds, and runs end-to-end via `jarvis index` without error, populating the
     symbol table. Requires a macOS host (Xcode + iOS SDK) for any repo importing Apple-platform frameworks.

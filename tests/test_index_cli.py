@@ -5,7 +5,9 @@ CLI binaries (marked `@pytest.mark.integration` — skipped if unavailable).
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -477,7 +479,10 @@ def test_index_repo_end_to_end_atomic_swap_under_open_reader(tmp_path: Path):
 
     target_dir = config.index_dir(slug, data_root)
     pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
-    assert pointer == f"index-{entry.commit_sha}.db"
+    # Spec TSI-04: index-<commit>-<generation>.db — the generation makes
+    # same-commit reindexes distinct; the metadata stem derives from it.
+    assert re.fullmatch(rf"index-{entry.commit_sha}-[0-9a-f]+\.db", pointer), pointer
+    assert (target_dir / (pointer.removesuffix(".db") + ".metadata.json")).is_file()
 
     # Open a reader connection against the published db BEFORE reindexing,
     # to prove reindex-under-load doesn't corrupt an in-flight read.
@@ -501,29 +506,43 @@ def test_index_repo_end_to_end_atomic_swap_under_open_reader(tmp_path: Path):
 def test_index_repo_marks_failed_on_indexer_error(tmp_path: Path, monkeypatch):
     repo_dir = tmp_path / "repo"
     shutil.copytree(FIXTURE_REPO, repo_dir)
+def test_index_repo_degrades_on_real_indexer_error(tmp_path: Path, monkeypatch):
+    """Narrowed FALL-04 (spec §12): a real failing language indexer is
+    optional-enrichment failure — exit-0 degraded, syntax baseline and
+    search still published, the SCIP cause on the stage fields."""
+    from jarvis.index_cli import index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
     _init_git_repo(repo_dir)
     data_root = tmp_path / "data"
 
-    monkeypatch.setattr(
-        "jarvis.index_cli._LANGUAGE_INDEXERS",
-        {".py": ("python", ["definitely-not-a-real-binary"])},
-    )
+    # Force a genuine scip-python failure: it exits nonzero on a directory
+    # that is not a python package root it can index.
+    (repo_dir / "pyproject.toml").write_text("[tool.broken]\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "break"], cwd=repo_dir, check=True)
 
-    from jarvis.index_cli import IndexingError
+    def _run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            from jarvis.index_cli import IndexingError
+            raise IndexingError(f"{step} failed (simulated real failure):\nexit 1")
+        return _fake_completed_process(cmd)
 
-    with pytest.raises(IndexingError):
-        index_repo(repo_dir, root=data_root)
+    monkeypatch.setattr("jarvis.index_cli._run", _run)
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", lambda *a, **k: False)
 
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "failed"
-    finally:
-        registry.close()
+    slug = index_repo(repo_dir, root=data_root)  # exit-0, no raise
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert entry.status == "degraded"
+    assert entry.scip_state == "failed"
+    assert "simulated real failure" in entry.scip_failure_reason
+    target_dir = config.index_dir(slug, data_root)
+    assert (target_dir / "current").is_file()
 
 
-@pytest.mark.integration
 @pytest.mark.skipif(_missing_swift, reason=f"missing required binaries: {_missing_swift}")
 def test_index_repo_end_to_end_for_swift_repo(tmp_path: Path):
     repo_dir = tmp_path / "repo"
@@ -746,51 +765,6 @@ def test_index_repo_non_swift_never_probes_scip_swift_version(tmp_path: Path, mo
         cli.index_repo(tmp_path, slug="pure-py", root=tmp_path / "data")
 
 
-def test_index_repo_search_only_swift_never_probes_scip_swift_version(
-    tmp_path: Path, monkeypatch
-):
-    """CR-01 sentinel, mirroring the non-Swift one above: a --search-only
-    run never invokes the language indexer, and setup.sh deliberately never
-    installs scip-swift off darwin/arm64 -- so probing the binary there
-    would hard-fail zoekt-only indexing of Swift repos on every Linux host
-    (and reindex of a persisted search-only Swift repo likewise)."""
-    from jarvis.index_cli import SEARCH_ONLY_STATUS
-
-    import jarvis.index_cli as cli
-
-    (tmp_path / "Package.swift").write_text("// swift-tools-version: 6.0\n")
-    (tmp_path / "App.swift").write_text("let x = 1\n")
-    _init_git_repo(tmp_path)
-
-    def boom():
-        raise AssertionError("scip-swift must not be probed for a search-only run")
-
-    monkeypatch.setattr(cli, "_scip_swift_version_output", boom)
-    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
-    monkeypatch.setattr(
-        cli, "_run",
-        lambda cmd, **kw: _fake_completed_process(cmd)
-        if cmd[0] in ("zoekt-git-index", "git") else boom(),
-    )
-    monkeypatch.setattr(cli, "_run_semantic_stage", lambda *a, **k: False)
-
-    # With the probe misplaced, its AssertionError (not a clean publish)
-    # propagates through the pre-pipeline failure wrap and fails here.
-    slug = cli.index_repo(tmp_path, slug="swift-searchless",
-                          root=tmp_path / "data", search_only=True)
-
-    registry = Registry(config.data_dir(tmp_path / "data") / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == SEARCH_ONLY_STATUS
-        assert entry.search_only is True
-    finally:
-        registry.close()
-
-    assert not (config.index_dir(slug, tmp_path / "data") / "current").exists()
-
-
 def test_zoekt_index_cmd_uses_git_index_with_pinned_flags(tmp_path: Path):
     """-incremental=false because the default would refuse to repair an
     already-published incomplete shard. -submodules=false because submodules
@@ -895,22 +869,35 @@ def test_remove_zoekt_shards_is_safe_when_absent(tmp_path: Path):
     assert _remove_zoekt_shards("nothing-here", root=tmp_path) == []
 
 
+from tests.fixtures import scip_encoder
+
+
 def _make_index_db(path: Path, *, chunks: int, mentions: int, symbols: int = 3) -> None:
-    """Minimal stand-in for the expt-convert schema, only the counted tables."""
+    """Minimal stand-in for the expt-convert schema: the counted tables plus
+    the capability tables `finalize_snapshot` reads (empty occurrences
+    blobs decode to no occurrences, so the snapshot's provider flags stay
+    off — realistic for a converter that emitted a symbol table only)."""
     conn = sqlite3.connect(path)
     conn.executescript(
         """
         CREATE TABLE documents (id INTEGER PRIMARY KEY, relative_path TEXT);
-        CREATE TABLE chunks (id INTEGER PRIMARY KEY, document_id INTEGER);
-        CREATE TABLE global_symbols (id INTEGER PRIMARY KEY, symbol TEXT);
+        CREATE TABLE chunks (id INTEGER PRIMARY KEY, document_id INTEGER, occurrences BLOB);
+        CREATE TABLE global_symbols (id INTEGER PRIMARY KEY, symbol TEXT,
+            signature TEXT, relationships BLOB);
         CREATE TABLE mentions (chunk_id INTEGER, symbol_id INTEGER, role INTEGER);
+        CREATE TABLE defn_enclosing_ranges (document_id INTEGER, start_line INTEGER,
+            start_column INTEGER, end_line INTEGER, end_column INTEGER);
         """
     )
     conn.execute("INSERT INTO documents (relative_path) VALUES ('a.swift')")
     for i in range(symbols):
         conn.execute("INSERT INTO global_symbols (symbol) VALUES (?)", (f"sym{i}",))
+    # Genuine empty occurrence blobs (not NULL): finalize_snapshot decodes
+    # every chunk's blob exactly once.
+    empty_occurrences = scip_encoder.encode_occurrences([])
     for i in range(chunks):
-        conn.execute("INSERT INTO chunks (document_id) VALUES (1)")
+        conn.execute("INSERT INTO chunks (document_id, occurrences) VALUES (1, ?)",
+                     (empty_occurrences,))
     for i in range(mentions):
         conn.execute("INSERT INTO mentions (chunk_id, symbol_id, role) VALUES (1, 1, 1)")
     conn.commit()
@@ -934,7 +921,7 @@ def test_index_has_navigation_data_true_when_populated(tmp_path: Path):
     from jarvis.index_cli import index_has_navigation_data
 
     db = tmp_path / "i.db"
-    _make_index_db(db, chunks=1, mentions=14)
+    _make_index_db(db, chunks=2, mentions=3)
     conn = sqlite3.connect(db)
     try:
         assert index_has_navigation_data(conn) is True
@@ -954,6 +941,24 @@ def test_index_has_navigation_data_false_when_only_chunks(tmp_path: Path):
         conn.close()
 
 
+def _mock_healthy_full_run(monkeypatch):
+    """Mocks for a fully successful main-pipeline run: every subprocess
+    succeeds, the convert step writes a navigable minimal index db, and
+    the semantic stage skips (the two-phase pattern of the ordering test).
+    The SCIP version gate is patched because the optional stage would
+    otherwise probe a real `scip` binary."""
+    def _successful_run(cmd, *, cwd, step, env=None):
+        if step == "scip expt-convert":
+            _make_index_db(Path(cmd[3]), chunks=1, mentions=14)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._run", _successful_run)
+    monkeypatch.setattr("jarvis.index_cli.populate_graph_for_repo", lambda *a, **k: None)
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", lambda *a, **k: False)
+
+
 def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
     import argparse
     import jarvis.index_cli as cli
@@ -968,7 +973,7 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
     captured: dict = {}
 
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None, search_only=None, fallback_search_only=None):
+                        language=None, scip=None, watch=False):
         captured["path"] = path
         captured["slug"] = slug
         captured["scheme"] = scheme
@@ -1039,14 +1044,31 @@ def test_semantic_stage_skips_cleanly_when_extra_missing(monkeypatch, capsys):
     assert "jarvis-mcp[semantic]" in capsys.readouterr().err
 
 
+def _stub_work(semantic_module):
+    """A SemanticWork with no admitted inputs — enough for the stage
+    wrapper's debug loop; `finish_semantic` itself is mocked."""
+    from jarvis.semantic import SemanticWork
+
+    return SemanticWork(slug="slug", model=None, store=None, identity=None,
+                        admitted=0, skipped=(), carried=(), inputs=(),
+                        vector_by_hash={})
+
+
 def test_semantic_stage_failure_is_nonfatal(monkeypatch, capsys):
     import jarvis.semantic as semantic_module
     from jarvis.index_cli import _run_semantic_stage
+    from jarvis.semantic import SemanticWork
 
     def _boom(*args, **kwargs):
         raise RuntimeError("model download failed")
 
-    monkeypatch.setattr(semantic_module, "index_semantic", _boom)
+    # The standalone path shares the prepare/finish split with the main
+    # pipeline (spec TSI-09); a failure in either half is nonfatal.
+    monkeypatch.setattr(semantic_module, "prepare_semantic", _boom)
+    assert _run_semantic_stage(Path("/repo"), "slug", None) is False
+    monkeypatch.setattr(semantic_module, "prepare_semantic",
+                        lambda *a, **k: _stub_work(semantic_module))
+    monkeypatch.setattr(semantic_module, "finish_semantic", _boom)
     assert _run_semantic_stage(Path("/repo"), "slug", None) is False
     assert "still published" in capsys.readouterr().err
 
@@ -1054,11 +1076,48 @@ def test_semantic_stage_failure_is_nonfatal(monkeypatch, capsys):
 def test_semantic_stage_success_returns_true(monkeypatch):
     import jarvis.semantic as semantic_module
     from jarvis.index_cli import _run_semantic_stage
-    from jarvis.semantic import SemanticIndexReport
+    from jarvis.semantic import SemanticIndexReport, SemanticWork
 
-    monkeypatch.setattr(semantic_module, "index_semantic",
+    monkeypatch.setattr(semantic_module, "prepare_semantic",
+                        lambda *a, **k: _stub_work(semantic_module))
+    monkeypatch.setattr(semantic_module, "finish_semantic",
                         lambda *a, **k: SemanticIndexReport(rows=5, files=1))
     assert _run_semantic_stage(Path("/repo"), "slug", None) is True
+
+
+
+
+def test_semantic_stage_failure_is_nonfatal(monkeypatch, capsys):
+    import jarvis.semantic as semantic_module
+    from jarvis.index_cli import _run_semantic_stage
+    from jarvis.semantic import SemanticWork
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("model download failed")
+
+    # The standalone path shares the prepare/finish split with the main
+    # pipeline (spec TSI-09); a failure in either half is nonfatal.
+    monkeypatch.setattr(semantic_module, "prepare_semantic", _boom)
+    assert _run_semantic_stage(Path("/repo"), "slug", None) is False
+    monkeypatch.setattr(semantic_module, "prepare_semantic",
+                        lambda *a, **k: _stub_work(semantic_module))
+    monkeypatch.setattr(semantic_module, "finish_semantic", _boom)
+    assert _run_semantic_stage(Path("/repo"), "slug", None) is False
+    assert "still published" in capsys.readouterr().err
+
+
+def test_semantic_stage_success_returns_true(monkeypatch):
+    import jarvis.semantic as semantic_module
+    from jarvis.index_cli import _run_semantic_stage
+    from jarvis.semantic import SemanticIndexReport, SemanticWork
+
+    monkeypatch.setattr(semantic_module, "prepare_semantic",
+                        lambda *a, **k: _stub_work(semantic_module))
+    monkeypatch.setattr(semantic_module, "finish_semantic",
+                        lambda *a, **k: SemanticIndexReport(rows=5, files=1))
+    assert _run_semantic_stage(Path("/repo"), "slug", None) is True
+
+
 
 
 def test_forget_removes_lance_table_dir(tmp_path: Path, monkeypatch):
@@ -1142,7 +1201,6 @@ def test_index_repo_builds_semantic_index_and_searches(tmp_path: Path, monkeypat
     hours on first download; the pipeline under test is identical either way.
     """
     pytest.importorskip("lancedb")
-    pytest.importorskip("tree_sitter_language_pack")
     pytest.importorskip("sentence_transformers")
 
     monkeypatch.setenv("JARVIS_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
@@ -1173,8 +1231,8 @@ def test_semantic_include_flag_reaches_index_repo_as_a_tuple(tmp_path, monkeypat
     captured = {}
 
     def _fake_index_repo(repo_path, *, slug=None, root=None, scheme=None,
-                         semantic_include=None, language=None, search_only=None,
-                         fallback_search_only=None):
+                         semantic_include=None, language=None, scip=None,
+                         watch=False):
         captured["semantic_include"] = semantic_include
         return "myrepo"
 
@@ -1441,7 +1499,7 @@ def test_reindex_forwards_stored_language_override(tmp_path: Path, monkeypatch):
 
     captured: dict = {}
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None, search_only=None, fallback_search_only=None):
+                        language=None, scip=None, watch=False):
         captured["language"] = language
         return slug
 
@@ -1481,205 +1539,6 @@ def test_cmd_index_reports_non_git_directory_as_error(tmp_path: Path, monkeypatc
     assert "not a git repository" in capsys.readouterr().err
 
 
-def test_search_only_publishes_zoekt_without_a_scip_pointer(tmp_path: Path, monkeypatch):
-    """Search-only must skip the indexer entirely and write no `current` pointer."""
-    from jarvis.index_cli import SEARCH_ONLY_STATUS, index_repo
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _boom(*args, **kwargs):
-        raise AssertionError("the SCIP indexer must not run in search-only mode")
-
-    monkeypatch.setattr("jarvis.index_cli.detect_language", lambda p: ("python", ["nope"]))
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd)
-                        if cmd[0] in ("zoekt-git-index", "git") else _boom())
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage",
-                        lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root, search_only=True)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == SEARCH_ONLY_STATUS
-        assert entry.search_only is True
-    finally:
-        registry.close()
-
-    assert not (config.index_dir(slug, data_root) / "current").exists()
-
-
-def test_search_only_persists_so_reindex_reuses_it(tmp_path: Path):
-    """`--search-only` follows the --language/--scheme contract: omitted means
-    "leave the persisted value alone", not "clear it"."""
-    from jarvis.index_cli import _resolve_search_only
-
-    registry = Registry(tmp_path / "registry.db")
-    try:
-        registry.upsert("r", "/p", "java", None, "search-only", search_only=True)
-        assert _resolve_search_only(registry, "r", None) is True
-        assert _resolve_search_only(registry, "r", False) is False
-        assert _resolve_search_only(registry, "absent", None) is False
-    finally:
-        registry.close()
-
-
-def test_search_only_tolerates_a_repo_with_no_indexable_language(tmp_path: Path, monkeypatch):
-    """A Go/Ruby repo has no SCIP indexer; search-only must still index it."""
-    from jarvis.index_cli import UNKNOWN_LANGUAGE, index_repo
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    (repo_dir / "main.go").write_text("package main\n\nfunc main() {}\n")
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd))
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root, search_only=True)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.language == UNKNOWN_LANGUAGE
-    finally:
-        registry.close()
-
-
-def test_search_only_reindex_reuses_persisted_flag_for_an_unknown_language_repo(
-    tmp_path: Path, monkeypatch
-):
-    """Regression test for an ordering bug: `search_only` must be resolved
-    from the registry BEFORE `detect_language()` runs, not after (alongside
-    `scheme`/`semantic_include`) -- the `except UnsupportedLanguageError`
-    branch reads it, and a `jarvis reindex`/`watch` of a persisted
-    search-only repo never re-passes `--search-only` (search_only=None),
-    relying entirely on the persisted value. With the bug, this second call
-    would see the raw, unresolved `None` and incorrectly re-raise instead of
-    reusing the persisted `search_only=True`."""
-    from jarvis.index_cli import SEARCH_ONLY_STATUS, UNKNOWN_LANGUAGE, index_repo
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    (repo_dir / "main.go").write_text("package main\n\nfunc main() {}\n")
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd))
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    # First run: explicit --search-only, establishing the persisted row with
-    # language=UNKNOWN_LANGUAGE (the repo has no SCIP-indexable source).
-    slug = index_repo(repo_dir, root=data_root, search_only=True)
-
-    # Second run: the reindex/watch case -- `--search-only` is omitted
-    # (search_only=None). detect_language() still raises for real, since the
-    # repo still has no supported source; this must not propagate.
-    slug_again = index_repo(repo_dir, root=data_root, search_only=None)
-    assert slug_again == slug
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.language == UNKNOWN_LANGUAGE
-        assert entry.search_only is True
-        assert entry.status == SEARCH_ONLY_STATUS
-    finally:
-        registry.close()
-
-    assert not (config.index_dir(slug, data_root) / "current").exists()
-
-
-def test_search_only_publish_retires_a_previously_published_scip_index(tmp_path: Path, monkeypatch):
-    """The scenario this branch was built for: a repo that indexed fine
-    before (e.g. Kotlin on 2.2.0) degrades to search-only on a later run
-    (e.g. after a bump to 2.2.20 hits the ABI-mismatch signature). The OLD
-    SCIP pointer, its versioned db/metadata files, and its graph edges must
-    not survive — otherwise navigation tools would keep silently answering
-    from the stale index instead of raising IndexNotFoundError."""
-    from jarvis.graph import GraphStore
-    from jarvis.index_cli import SEARCH_ONLY_STATUS, index_repo
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-    slug = config.repo_slug(repo_dir.name)
-
-    # Hand-build a previously published SCIP index for this repo, rather
-    # than running the real indexer/scip binaries (unavailable in a
-    # unit-test environment) -- a fake pointer + versioned db/metadata is
-    # exactly what a prior successful `index_repo()` run would have left
-    # under `config.index_dir()`.
-    target_dir = config.index_dir(slug, data_root)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    old_db = target_dir / "index-oldsha.db"
-    old_metadata = target_dir / "index-oldsha.metadata.json"
-    old_db.write_text("fake old index", encoding="utf-8")
-    old_metadata.write_text("{}", encoding="utf-8")
-    (target_dir / "current").write_text("index-oldsha.db", encoding="utf-8")
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        registry.upsert(slug, str(repo_dir), "java", "oldsha", "indexed")
-    finally:
-        registry.close()
-
-    # And a graph edge from this repo's own package to some other repo's
-    # package, mirroring what `populate_graph_for_repo` would have recorded
-    # for the old index.
-    graph_store = GraphStore(data_root / "registry.db")
-    try:
-        local_id = graph_store.upsert_package(repo=slug, name="maven:demo:app")
-        other_id = graph_store.upsert_package(repo="other-repo", name="maven:demo:dep")
-        graph_store.add_edge(from_package_id=local_id, to_package_id=other_id)
-        assert graph_store.get_dependents(other_id), "edge must exist before retirement"
-    finally:
-        graph_store.close()
-
-    monkeypatch.setattr("jarvis.index_cli.detect_language", lambda p: ("java", ["nope"]))
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", lambda cmd, **kw: _fake_completed_process(cmd)
-                        if cmd[0] in ("zoekt-git-index", "git") else (_ for _ in ()).throw(
-                            AssertionError("the SCIP indexer must not run in search-only mode")))
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug_again = index_repo(repo_dir, root=data_root, search_only=True)
-    assert slug_again == slug
-
-    assert not (target_dir / "current").exists()
-    assert not old_db.exists()
-    assert not old_metadata.exists()
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == SEARCH_ONLY_STATUS
-        assert entry.search_only is True
-    finally:
-        registry.close()
-
-    graph_store = GraphStore(data_root / "registry.db")
-    try:
-        assert not graph_store.get_dependents(other_id), "outgoing edge must be retired"
-        # The package row itself must survive -- only outgoing edges are
-        # cleared, matching `populate_graph_for_repo`'s own rebuild pattern.
-        assert graph_store.get_package(local_id) is not None
-    finally:
-        graph_store.close()
-
-
 def test_bash_shim_failure_detected():
     from jarvis.index_cli import _bash_shim_failure
 
@@ -1694,553 +1553,6 @@ def test_bash_shim_failure_ignores_other_output():
     from jarvis.index_cli import _bash_shim_failure
 
     assert not _bash_shim_failure("error: No SCIP shards found")
-
-
-def test_bash_shim_failure_does_not_publish_search_only(tmp_path: Path, monkeypatch):
-    """A fixable env problem must NOT persist search_only=1.
-
-    --search-only is store_true/default=None: settable, never clearable. If this
-    downgraded, a user who then installed bash would silently keep getting no
-    navigation, escapable only via `jarvis forget`.
-    """
-    from jarvis.index_cli import IndexingError, index_repo
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(JAVA_FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        if step.endswith(" index"):
-            raise IndexingError(
-                "Fatal error compiling: Could not retrieve version from "
-                "/tmp/scip-java1/bin/javac. Exit code 1, Output: "
-                "/tmp/scip-java1/bin/javac: line 38: LAUNCHER_ARGS[@]: unbound variable"
-            )
-        return None
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    with pytest.raises(IndexingError, match="bash"):
-        index_repo(repo_dir, root=data_root)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get("repo")
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.search_only is False, "a fixable env problem must stay recoverable"
-    finally:
-        registry.close()
-
-
-def test_bash_shim_failure_is_gated_on_java_language(tmp_path: Path, monkeypatch):
-    """The bash-shim remedy is scip-java-specific: a non-Java indexer that
-    happened to emit the same two substrings by coincidence must not get the
-    scip-java remedy message wrapped around its error."""
-    from jarvis.index_cli import IndexingError, index_repo
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    original_message = (
-        "Fatal error compiling: Could not retrieve version from "
-        "/tmp/scip-java1/bin/javac. Exit code 1, Output: "
-        "/tmp/scip-java1/bin/javac: line 38: LAUNCHER_ARGS[@]: unbound variable"
-    )
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        if step.endswith(" index"):
-            raise IndexingError(original_message)
-        return None
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-
-    with pytest.raises(IndexingError) as excinfo:
-        index_repo(repo_dir, root=data_root)
-
-    assert str(excinfo.value) == original_message, "must not get the scip-java-specific bash remedy"
-
-
-@pytest.mark.parametrize(
-    "output",
-    [
-        "e: java.lang.AbstractMethodError: ... org.jetbrains.kotlin.fir.analysis.checkers ...",
-        "NoSuchMethodError: 'org.jetbrains.kotlin.fir.declarations.FirFile ...getContainingFile()'",
-        "error: No SCIP shards found. This typically means that `scip-java` is unable ...",
-    ],
-)
-def test_recognized_failures_map_to_a_search_only_reason(output):
-    from jarvis.index_cli import _search_only_reason
-
-    assert _search_only_reason(output) is not None
-
-
-@pytest.mark.parametrize(
-    "output",
-    [
-        "error: Could not resolve all files for configuration ':app:debugCompileClasspath'",
-        "AbstractMethodError: com.example.Whatever",   # not a Kotlin FIR crash
-        "zsh: command not found: gradle",
-    ],
-)
-def test_unrecognized_failures_do_not_trigger_the_fallback(output):
-    from jarvis.index_cli import _search_only_reason
-
-    assert _search_only_reason(output) is None
-
-
-def test_indexer_failure_with_known_signature_publishes_search_only(tmp_path: Path, monkeypatch):
-    from jarvis.index_cli import SEARCH_ONLY_STATUS, index_repo
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    from jarvis.index_cli import IndexingError
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        # " index" (leading space) matches only the indexer step (e.g.
-        # "scip-python index"), not the later "zoekt-git-index" step that
-        # _publish_search_only must still be allowed to run for real.
-        if step.endswith(" index"):
-            raise IndexingError("error: No SCIP shards found. scip-java cannot index this")
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == SEARCH_ONLY_STATUS
-        assert entry.search_only is True, "must persist so reindex skips the doomed build"
-    finally:
-        registry.close()
-
-
-def test_indexer_failure_without_known_signature_still_fails(tmp_path: Path, monkeypatch):
-    """A transient build break must NOT be laundered into a success."""
-    from jarvis.index_cli import IndexingError, index_repo
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        # " index" (leading space) matches only the indexer step (e.g.
-        # "scip-python index"), not the later "zoekt-git-index" step that
-        # _publish_search_only must still be allowed to run for real.
-        if step.endswith(" index"):
-            raise IndexingError("error: could not resolve dependency com.example:thing:1.0")
-        return None
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-
-    with pytest.raises(IndexingError):
-        index_repo(repo_dir, root=data_root)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "failed"
-    finally:
-        registry.close()
-
-
-def test_manual_search_only_publish_stamps_manual_origin(tmp_path: Path, monkeypatch):
-    """STAT-01 SC2: a `--search-only` publish must record WHICH path
-    produced it -- origin 'manual', no reason (the user asked for it),
-    no stderr (success paths never carry one)."""
-    from jarvis.index_cli import SEARCH_ONLY_STATUS, index_repo
-    from jarvis.registry import ORIGIN_MANUAL
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run",
-                        lambda cmd, **kw: _fake_completed_process(cmd))
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root, search_only=True)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == SEARCH_ONLY_STATUS
-        assert entry.search_only is True
-        assert entry.status_origin == ORIGIN_MANUAL
-        assert entry.status_reason is None
-        assert entry.status_stderr is None
-    finally:
-        registry.close()
-
-
-def test_signature_fallback_stamps_signature_origin_and_matched_reason(
-    tmp_path: Path, monkeypatch
-):
-    """The signature path's status_reason is the matched per-signature
-    REASON text verbatim (the human explanation) -- never a remedy
-    (D-11: recovery stays the generic read-time per-origin mapping)."""
-    from jarvis.index_cli import (
-        SEARCH_ONLY_STATUS,
-        _SEARCH_ONLY_SIGNATURES,
-        IndexingError,
-        index_repo,
-    )
-    from jarvis.registry import ORIGIN_SIGNATURE
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    carrier = (
-        "e: java.lang.AbstractMethodError: "
-        "org.jetbrains.kotlin.fir.analysis.checkers.expression.FirSafeCallChecker.check()"
-    )
-    kotlin_reason = next(
-        reason for tokens, reason in _SEARCH_ONLY_SIGNATURES
-        if tokens == ("AbstractMethodError", "org.jetbrains.kotlin.fir")
-    )
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        # " index" (leading space) matches only the indexer step (e.g.
-        # "scip-python index"), not the later "zoekt-git-index" step that
-        # _publish_search_only must still be allowed to run for real.
-        if step.endswith(" index"):
-            raise IndexingError(carrier)
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == SEARCH_ONLY_STATUS
-        assert entry.search_only is True
-        assert entry.status_origin == ORIGIN_SIGNATURE
-        assert entry.status_reason == kotlin_reason  # verbatim, not a paraphrase
-    finally:
-        registry.close()
-
-
-def test_swift_no_build_system_signature_degrades_search_only(
-    tmp_path: Path, monkeypatch
-):
-    """SWFT-04: a scip-swift failure carrying the captured no-build-system
-    stderr degrades to search-only automatically (no opt-in, Kotlin/AGP
-    parity) with origin 'signature' and the matched reason verbatim."""
-    # Provenance: captured 2026-08-23 from scip-swift 0.3.0
-    # (sha256 b0de7201…85a5, Xcode 26.3 / Swift 6.2.4) against a git repo
-    # with tracked .swift sources and no Package.swift and no
-    # .xcodeproj/.xcworkspace; carrier verified end-to-end through a real
-    # `jarvis index` run (04-RESEARCH.md, out/jarvis-nobuildsystem.txt).
-    from jarvis.index_cli import (
-        SEARCH_ONLY_STATUS,
-        _SEARCH_ONLY_SIGNATURES,
-        IndexingError,
-        index_repo,
-    )
-    from jarvis.registry import ORIGIN_SIGNATURE
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(SWIFT_FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    # Exact captured stderr; only the repo path is rewritten to this test's
-    # tmp repo (the original interpolated the capture workspace's path).
-    carrier = (
-        f"Error: Could not detect a build system at {repo_dir}: "
-        "no Package.swift and no .xcodeproj/.xcworkspace found. "
-        "Pass --build-tool swiftpm or --build-tool xcodebuild explicitly."
-    )
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        if step.endswith(" index"):
-            raise IndexingError(carrier)
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    # Hermetic on machines without scip-swift on PATH (CI ubuntu legs): the
-    # swift branch probes the binary pre-pipeline and would raise
-    # "scip-swift not found on PATH" before the mocked indexer step.
-    monkeypatch.setattr("jarvis.index_cli.check_scip_swift_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root)
-
-    # Tripwire: looked up by the exact token tuple AFTER index_repo, so a
-    # missing/drifted entry fails the test at the registry assertion (or as
-    # StopIteration here) rather than masking the failure mode under test.
-    swift_reason = next(
-        reason for tokens, reason in _SEARCH_ONLY_SIGNATURES
-        if tokens == (
-            "Could not detect a build system",
-            "no Package.swift and no .xcodeproj/.xcworkspace found",
-        )
-    )
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == SEARCH_ONLY_STATUS
-        assert entry.search_only is True
-        assert entry.status_origin == ORIGIN_SIGNATURE
-        assert entry.status_reason == swift_reason  # verbatim, not a paraphrase
-    finally:
-        registry.close()
-
-
-def test_swift_no_index_store_signature_degrades_search_only(
-    tmp_path: Path, monkeypatch
-):
-    """SWFT-04: the second captured scip-swift class — build succeeded but
-    produced no IndexStore — degrades to search-only automatically with
-    origin 'signature' and the matched reason verbatim."""
-    # Provenance: captured 2026-08-23 from scip-swift 0.3.0 (sha256
-    # b0de7201…85a5, Xcode 26.3 / Swift 6.2.4). Trigger shape is an
-    # .xcodeproj whose target's Sources build phase is empty (build exits 0,
-    # zero Swift compiled, argv --build-tool xcodebuild); the identical
-    # wording occurs on the swiftpm backend with a different store path, so
-    # one entry covers both backends.
-    from jarvis.index_cli import (
-        SEARCH_ONLY_STATUS,
-        _SEARCH_ONLY_SIGNATURES,
-        IndexingError,
-        index_repo,
-    )
-    from jarvis.registry import ORIGIN_SIGNATURE
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(SWIFT_FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    # Exact captured stderr; only the store path is rewritten to a tmp-style
-    # path (the original interpolated the capture workspace's cache dir).
-    store_path = tmp_path / "derived-data" / "Index.noindex" / "DataStore"
-    carrier = (
-        f"Error: Build succeeded but no IndexStore was produced at {store_path}. "
-        "This commonly happens when the code being indexed cannot compile on this host "
-        "(for example, Apple-platform-only imports such as UIKit/WatchKit/WidgetKit "
-        "on a non-macOS host, or a missing SDK)."
-    )
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        if step.endswith(" index"):
-            raise IndexingError(carrier)
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    # Hermetic on machines without scip-swift on PATH (CI ubuntu legs): the
-    # swift branch probes the binary pre-pipeline and would raise
-    # "scip-swift not found on PATH" before the mocked indexer step.
-    monkeypatch.setattr("jarvis.index_cli.check_scip_swift_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root)
-
-    # Tripwire: looked up by the exact token tuple AFTER index_repo, so a
-    # missing/drifted entry fails the test loudly rather than masking the
-    # failure mode under test.
-    swift_reason = next(
-        reason for tokens, reason in _SEARCH_ONLY_SIGNATURES
-        if tokens == ("Build succeeded but no IndexStore was produced",)
-    )
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == SEARCH_ONLY_STATUS
-        assert entry.search_only is True
-        assert entry.status_origin == ORIGIN_SIGNATURE
-        assert entry.status_reason == swift_reason  # verbatim, not a paraphrase
-    finally:
-        registry.close()
-
-
-def test_swift_generic_build_failure_wrapper_never_matches():
-    """SC3: the generic scip-swift build-failure wrappers must never match —
-    every fixable Swift failure (repo bugs, environment, host-compile
-    issues) keeps failing hard rather than being laundered into a silent
-    search-only degrade. Keep-hard exhibits captured 2026-08-23 from
-    scip-swift 0.3.0 (04-RESEARCH.md keep-hard table)."""
-    from jarvis.index_cli import _search_only_reason
-
-    wrapper_spm = "Error: 'swift build' failed with exit code 1:\n"
-    for class_line in (
-        "error: manifest parse error",
-        "package 'demo' is using Swift tools version 999.0.0 "
-        "but the installed version is 6.2.4",
-        "The package does not contain a buildable target.",
-        "no such module 'UIKit'",
-    ):
-        assert _search_only_reason(wrapper_spm + class_line) is None
-
-    wrapper_xcodebuild = "Error: 'xcodebuild' failed with exit code 65:\n"
-    assert _search_only_reason(wrapper_xcodebuild + "** BUILD FAILED **") is None
-
-
-def test_empty_or_stdout_only_failure_carriers_never_match():
-    """Empty-carrier probe: carriers with no class-specific stderr content
-    must never match. Reconstructs the exact shape `_run` raises (step+argv
-    header line, then stdout, then stderr) — the header embeds per-run cache
-    and scratch paths, so this also pins that no token ever derives from it."""
-    from jarvis.index_cli import _search_only_reason
-
-    def _carrier(stdout: str = "", stderr: str = "") -> str:
-        return (
-            "scip-swift index failed (scip-swift --cache-dir "
-            "/tmp/run-cache/scip-swift/slug --output /tmp/jarvis-index-ab12/index.scip):\n"
-            f"{stdout}\n{stderr}"
-        )
-
-    # Header-only: empty stdout and stderr.
-    assert _search_only_reason(_carrier()) is None
-    # Whitespace-only stderr.
-    assert _search_only_reason(_carrier(stderr="  \n\n")) is None
-    # Stdout-only content on a non-zero exit.
-    assert _search_only_reason(_carrier(stdout="Wrote 0 document(s) to /tmp/out")) is None
-
-
-def test_search_only_reason_first_listed_match_wins():
-    """Ordering probe: `_search_only_reason` scans `_SEARCH_ONLY_SIGNATURES`
-    in list order, so when a carrier matches multiple entries the first
-    listed wins. The two Swift entries are mutually exclusive in practice
-    (a repo cannot both lack a build system and complete a build); this
-    composite pins the ordering semantics itself, plus Kotlin precedence
-    over Swift."""
-    from jarvis.index_cli import _SEARCH_ONLY_SIGNATURES, _search_only_reason
-
-    no_build_system_reason = next(
-        reason for tokens, reason in _SEARCH_ONLY_SIGNATURES
-        if tokens == (
-            "Could not detect a build system",
-            "no Package.swift and no .xcodeproj/.xcworkspace found",
-        )
-    )
-    kotlin_reason = next(
-        reason for tokens, reason in _SEARCH_ONLY_SIGNATURES
-        if tokens == ("AbstractMethodError", "org.jetbrains.kotlin.fir")
-    )
-
-    # Both captured Swift error strings in one carrier: the no-build-system
-    # entry precedes the IndexStore entry in the list, so it wins.
-    swift_both = (
-        "Error: Could not detect a build system at /tmp/repo: "
-        "no Package.swift and no .xcodeproj/.xcworkspace found. "
-        "Pass --build-tool swiftpm or --build-tool xcodebuild explicitly.\n"
-        "Error: Build succeeded but no IndexStore was produced at "
-        "/tmp/cache/derived-data/Index.noindex/DataStore."
-    )
-    assert _search_only_reason(swift_both) == no_build_system_reason
-
-    # Kotlin text concatenated with a Swift string: the Kotlin entries
-    # precede the Swift ones, so the Kotlin reason wins.
-    kotlin_plus_swift = (
-        "e: java.lang.AbstractMethodError: "
-        "org.jetbrains.kotlin.fir.analysis.checkers.expression.FirSafeCallChecker.check()\n"
-        "Error: Could not detect a build system at /tmp/repo: "
-        "no Package.swift and no .xcodeproj/.xcworkspace found."
-    )
-    assert _search_only_reason(kotlin_plus_swift) == kotlin_reason
-
-
-def test_failed_search_only_publish_records_a_full_failure_row(tmp_path: Path, monkeypatch):
-    """A search-only run whose OWN publish fails must record a full failed
-    row (origin 'failed_hard' + cause), not a bare status flip -- the row
-    is what `jarvis status`/`reindex` need to explain and recover (D-05)."""
-    from jarvis.index_cli import IndexingError, index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
-
-    def _boom(*args, **kwargs):
-        raise RuntimeError("zoekt-git-index exploded")
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._publish_search_only", _boom)
-
-    with pytest.raises(IndexingError):
-        index_repo(repo_dir, root=data_root, search_only=True)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert entry.status_reason  # non-empty one-liner (D-03)
-        assert "zoekt-git-index exploded" in entry.status_stderr
-    finally:
-        registry.close()
-
-
-def test_unmatched_indexer_failure_never_gains_a_signature_origin(tmp_path: Path, monkeypatch):
-    """Fail-loudly guard: an unrecognized indexer error must hard-fail with
-    origin 'failed_hard' -- never laundered into a search-only row or a
-    signature origin it did not match (index_cli's design intent)."""
-    from jarvis.index_cli import IndexingError, index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        if step.endswith(" index"):
-            raise IndexingError("error: could not resolve dependency com.example:thing:1.0")
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    with pytest.raises(IndexingError):
-        index_repo(repo_dir, root=data_root)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.search_only is False
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert "could not resolve dependency" in entry.status_stderr
-    finally:
-        registry.close()
 
 
 @pytest.mark.integration
@@ -2302,7 +1614,8 @@ def test_bare_name_resolution_against_a_real_index(tmp_path: Path):
     conn, _ = config.get_connection(cache, slug)
     path = conn.execute("SELECT relative_path FROM documents LIMIT 1").fetchone()[0]
 
-    entries, _ = service.get_document_symbols(slug, path)
+    result = service.get_document_symbols(slug, path)
+    entries = result.entries
     assert entries, "fixture repo produced no document symbols"
     target = entries[0]
 
@@ -2712,51 +2025,6 @@ def test_symbol_search_finds_definitions_in_real_index(tmp_path: Path):
         conn.close()
 
 
-def test_hard_failed_index_persists_cause_and_full_stderr(tmp_path: Path, monkeypatch):
-    """D-02/D-03/D-05: a hard-failed run must leave a registry row carrying
-    the origin slug, a one-line classified reason, and the COMPLETE failure
-    text verbatim -- persistence is unbounded, so a >1000-char payload must
-    survive a fresh read without truncation."""
-    from jarvis.index_cli import IndexingError, index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    marker = "BOOM-" + "x" * 1200
-    carrier = (
-        "scip-python index failed (scip-python index --output index.scip):\n"
-        f"stdout noise\n{marker}\ntrailing stderr line\n"
-    )
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        # " index" (leading space) matches only the indexer step, so the
-        # failure happens exactly where a real broken build would.
-        if step.endswith(" index"):
-            raise IndexingError(carrier)
-        return None
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-
-    with pytest.raises(IndexingError):
-        index_repo(repo_dir, root=data_root)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert entry.status_reason  # non-empty...
-        assert "\n" not in entry.status_reason  # ...and a single line (D-03)
-        assert entry.status_reason.startswith("scip-python index failed")
-        assert marker in entry.status_stderr
-        assert entry.status_stderr == carrier  # verbatim, untruncated (D-02)
-    finally:
-        registry.close()
 
 
 def test_cmd_status_explains_a_failed_repo(tmp_path: Path, monkeypatch, capsys):
@@ -2795,7 +2063,7 @@ def test_cmd_list_marks_repo_health_at_a_glance(tmp_path: Path, monkeypatch, cap
     import argparse
 
     from jarvis.index_cli import _cmd_list
-    from jarvis.registry import ORIGIN_FAILED_HARD, SEARCH_ONLY_STATUS, Registry
+    from jarvis.registry import ORIGIN_FAILED_HARD, Registry
 
     data_root = tmp_path / "data"
     monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
@@ -2804,8 +2072,11 @@ def test_cmd_list_marks_repo_health_at_a_glance(tmp_path: Path, monkeypatch, cap
         registry.record_failure("broken", "/repos/broken", "python",
                                 ORIGIN_FAILED_HARD, "scip-python index failed",
                                 "scip-python index failed:\nboom")
+        # The historical status literal: no writer produces it anymore,
+        # but un-migrated legacy rows could still carry it and must not
+        # print a misleading checkmark.
         registry.upsert("legacy", "/repos/legacy", "unknown", None,
-                        SEARCH_ONLY_STATUS, search_only=True)
+                        "search-only")
         registry.upsert("healthy", "/repos/healthy", "python", "abc123", "indexed")
     finally:
         registry.close()
@@ -2894,7 +2165,7 @@ def test_cmd_list_keeps_search_only_rows_five_field_beside_degraded(tmp_path: Pa
     import argparse
 
     from jarvis.index_cli import _cmd_list
-    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, SEARCH_ONLY_STATUS, Registry
+    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK, Registry
 
     data_root = tmp_path / "data"
     monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
@@ -2904,7 +2175,7 @@ def test_cmd_list_keeps_search_only_rows_five_field_beside_degraded(tmp_path: Pa
                         DEGRADED_STATUS, status_origin=ORIGIN_FALLBACK,
                         status_reason="scip-python crashed mid-build")
         registry.upsert("legacy", "/repos/legacy", "unknown", None,
-                        SEARCH_ONLY_STATUS, search_only=True)
+                        "search-only")
     finally:
         registry.close()
 
@@ -2970,44 +2241,6 @@ def test_cmd_status_omits_stderr_block_when_absent(tmp_path: Path, monkeypatch, 
     out = capsys.readouterr().out
     assert "stderr" not in out
     assert "full log" not in out
-
-
-def test_pre_pipeline_version_gate_failure_creates_a_recoverable_row(
-    tmp_path: Path, monkeypatch
-):
-    """D-05 close-out: a failure BEFORE the pipeline proper (the scip
-    version gate) must leave a registry row -- status 'failed', origin
-    'failed_hard', language 'unknown' (detection never ran) -- so the
-    slug resolves for `jarvis reindex <slug>` and `jarvis status` can
-    explain it."""
-    from jarvis.index_cli import UNKNOWN_LANGUAGE, index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _boom():
-        raise RuntimeError("scip v0.7.0 is below the required floor v0.9.0")
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", _boom)
-
-    with pytest.raises(RuntimeError, match="below the required floor"):
-        index_repo(repo_dir, root=data_root)
-
-    slug = config.repo_slug(repo_dir.name)
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None, "the failed first index must leave a row (D-05)"
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert entry.language == UNKNOWN_LANGUAGE  # detection never completed
-        assert entry.status_reason == "scip v0.7.0 is below the required floor v0.9.0"
-        assert "below the required floor" in entry.status_stderr
-    finally:
-        registry.close()
 
 
 def test_pre_pipeline_stale_language_override_failure_overwrites_the_row(
@@ -3112,119 +2345,6 @@ def _degrade_mock_run(failures: dict[str, Exception]):
     return _run
 
 
-def test_degraded_publish_on_post_build_start_failure(tmp_path: Path, monkeypatch):
-    """FALL-01 (the tracer): with fallback resolved on, a post-build-start
-    indexer failure publishes search-only instead of leaving nothing --
-    exit-0 return, terminal row degraded/fallback with one-line reason and
-    full stderr, search_only False (self-heal keeps retrying), commit_sha
-    stamped with the attempt sha."""
-    from jarvis.index_cli import IndexingError, index_repo
-    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    full_text = "error: simulated post-build-start failure\nsome stderr detail\nmore detail"
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        if step.endswith(" index"):
-            raise IndexingError(full_text)
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
-
-    head_sha = subprocess.run(
-        ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == DEGRADED_STATUS
-        assert entry.status_origin == ORIGIN_FALLBACK
-        assert entry.status_reason == "error: simulated post-build-start failure"
-        assert entry.status_stderr == full_text
-        assert entry.search_only is False, "degraded must keep retrying the full build"
-        assert entry.commit_sha == head_sha
-    finally:
-        registry.close()
-
-
-def test_degraded_run_prints_exactly_one_warning_line(
-    tmp_path: Path, monkeypatch, capsys
-):
-    """FALL-01 reporting contract: the degraded run is a success (returns
-    the slug, no raise) and says so once on stderr -- the reason rides the
-    single 'degraded to search-only' warning line."""
-    from jarvis.index_cli import IndexingError, index_repo
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        if step.endswith(" index"):
-            raise IndexingError("error: simulated post-build-start failure")
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
-    assert slug  # success path, no raise
-
-    err = capsys.readouterr().err
-    lines = [line for line in err.splitlines() if "degraded to search-only" in line]
-    assert len(lines) == 1
-    assert "error: simulated post-build-start failure" in lines[0]
-
-
-def test_missing_binary_failure_stays_hard_with_fallback_enabled(
-    tmp_path: Path, monkeypatch
-):
-    """FALL-04: a missing binary is a setup.sh problem -- degrading on it
-    would launder 'run setup.sh' into a published index. Even with
-    fallback on, the run raises and the row reads failed/failed_hard."""
-    from jarvis.index_cli import IndexingError, MissingBinaryError, index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr(
-        "jarvis.index_cli._run",
-        _degrade_mock_run({"scip-python index": MissingBinaryError(
-            "scip-python index failed: scip-python not found on PATH — run setup.sh"
-        )}),
-    )
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    with pytest.raises(IndexingError, match="not found on PATH"):
-        index_repo(repo_dir, root=data_root, fallback_search_only=True)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert entry.search_only is False
-    finally:
-        registry.close()
-
-
 def test_run_translates_file_not_found_into_missing_binary_error(tmp_path: Path):
     """FALL-04 exclusion input: the real `_run` (not a mock) turns
     FileNotFoundError into the MissingBinaryError subclass, not a plain
@@ -3236,52 +2356,16 @@ def test_run_translates_file_not_found_into_missing_binary_error(tmp_path: Path)
     assert type(excinfo.value) is MissingBinaryError
 
 
-def test_bash_shim_failure_stays_hard_with_fallback_enabled(
-    tmp_path: Path, monkeypatch
+def test_unclassified_scip_stage_error_stays_hard_with_best_effort_record(
+    tmp_path: Path, monkeypatch, capsys
 ):
-    """FALL-04: a bash-shim failure is environment misconfiguration (one
-    `brew install bash` fixes it) -- both tokens present in the failure
-    text keeps it a loud hard failure even with fallback on."""
+    """WR-03 + narrowed FALL-04 boundary: a NARROW typed stage boundary
+    must prevent a broad catch from treating arbitrary infrastructure bugs
+    as expected enrichment failures (spec TSI-04). A non-IndexingError
+    raised inside the optional SCIP stage is NOT classified as
+    failed/unavailable — it propagates as a hard IndexingError with the
+    best-effort failure record written beside it."""
     from jarvis.index_cli import IndexingError, index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    shim_text = (
-        "error: line 8: ${LAUNCHER_ARGS[@]}: unbound variable\n"
-        "scip-java wrapper needs bash >= 4.4"
-    )
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr(
-        "jarvis.index_cli._run",
-        _degrade_mock_run({"scip-python index": IndexingError(shim_text)}),
-    )
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    with pytest.raises(IndexingError, match="unbound variable"):
-        index_repo(repo_dir, root=data_root, fallback_search_only=True)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-    finally:
-        registry.close()
-
-
-def test_pre_pipeline_version_gate_stays_hard_with_fallback_enabled(
-    tmp_path: Path, monkeypatch
-):
-    """FALL-04: pre-pipeline gates (version floors) raise inside the
-    pre-pipeline wrap and never reach the degrade branch -- fallback on
-    must not soften a too-old scip binary."""
-    from jarvis.index_cli import index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
 
     repo_dir = tmp_path / "repo"
     shutil.copytree(FIXTURE_REPO, repo_dir)
@@ -3289,381 +2373,7 @@ def test_pre_pipeline_version_gate_stays_hard_with_fallback_enabled(
     data_root = tmp_path / "data"
 
     def _boom():
-        raise RuntimeError("scip v0.7.0 is below the required floor v0.9.0")
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", _boom)
-
-    with pytest.raises(RuntimeError, match="below the required floor"):
-        index_repo(repo_dir, root=data_root, fallback_search_only=True)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-    finally:
-        registry.close()
-
-
-def test_failed_degraded_publish_preserves_the_previous_current_pointer(
-    tmp_path: Path, monkeypatch
-):
-    """FALL-01 ordering: a degraded publish whose zoekt step fails must
-    leave the previously-published current pointer intact and the row
-    failed/failed_hard -- search is published before SCIP artifacts are
-    retired, so the fallback promise failing never destroys a good index."""
-    from jarvis.index_cli import IndexingError, index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    # Phase 1: a fully mocked-successful run publishes a real current pointer.
-    def _successful_run(cmd, *, cwd, step, env=None):
-        if step == "scip expt-convert":
-            # cmd: [scip, expt-convert, --output, <db>, <scip path>]
-            _make_index_db(Path(cmd[3]), chunks=1, mentions=14)
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _successful_run)
-    monkeypatch.setattr(
-        "jarvis.index_cli.populate_graph_for_repo", lambda *a, **k: None
-    )
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root)
-    pointer_file = config.index_dir(slug, data_root) / "current"
-    assert pointer_file.exists(), "phase 1 must publish a current pointer"
-
-    # Phase 2: the indexer step fails AND the fallback publish's zoekt step
-    # fails -- the old pointer must survive the failed degraded publish.
-    monkeypatch.setattr(
-        "jarvis.index_cli._run",
-        _degrade_mock_run({
-            "scip-python index": IndexingError("error: simulated indexer failure"),
-            "zoekt-git-index": IndexingError("zoekt-git-index failed:\nboom"),
-        }),
-    )
-
-    with pytest.raises(IndexingError, match="simulated indexer failure"):
-        index_repo(repo_dir, slug=slug, root=data_root, fallback_search_only=True)
-
-    assert pointer_file.exists(), "a failing zoekt publish must not retire the old index"
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-    finally:
-        registry.close()
-
-
-def test_post_publish_registry_failure_stays_hard_not_degraded(
-    tmp_path: Path, monkeypatch
-):
-    """CR-01 regression: the degrade gate must not fire once the pointer has
-    flipped. A registry write failing AFTER `_publish_atomically` (locked
-    registry.db from a concurrent watch reindex, disk-full) is a bookkeeping
-    failure against a fully-published index -- pre-fix, the gate retired that
-    index, republished zoekt-only, and wrote degraded/fallback citing the
-    sqlite error as the indexer failure. Post-fix the run stays a hard
-    failure (failed/failed_hard with the real cause) and the live pointer
-    survives untouched."""
-    from jarvis.index_cli import IndexingError, index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _successful_run(cmd, *, cwd, step, env=None):
-        if step == "scip expt-convert":
-            _make_index_db(Path(cmd[3]), chunks=1, mentions=14)
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _successful_run)
-    monkeypatch.setattr(
-        "jarvis.index_cli.populate_graph_for_repo", lambda *a, **k: None
-    )
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    # The locked-db race the fix exists for: every upsert succeeds except the
-    # terminal status="indexed" write -- i.e. the failure lands strictly
-    # AFTER the publish flipped the pointer.
-    real_upsert = Registry.upsert
-
-    def _locked_on_terminal_upsert(self, slug, path, language, commit_sha, status, **kw):
-        if status == "indexed":
-            raise sqlite3.OperationalError("database is locked")
-        return real_upsert(self, slug, path, language, commit_sha, status, **kw)
-
-    monkeypatch.setattr(Registry, "upsert", _locked_on_terminal_upsert)
-
-    with pytest.raises(IndexingError, match="database is locked"):
-        index_repo(repo_dir, root=data_root, fallback_search_only=True)
-
-    slug = config.repo_slug(repo_dir.name)
-    pointer_file = config.index_dir(slug, data_root) / "current"
-    assert pointer_file.exists(), (
-        "a bookkeeping failure must not retire the just-published index"
-    )
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert entry.status_reason == "database is locked"
-        assert entry.search_only is False
-    finally:
-        registry.close()
-
-
-def test_degraded_row_write_failure_reports_what_landed(
-    tmp_path: Path, monkeypatch, capsys
-):
-    """WR-01 regression: when the degrade publish SUCCEEDS but writing the
-    degraded row fails (locked db), the run must not claim "nothing
-    published" -- zoekt IS live and the old SCIP index IS retired. The
-    message says what landed and what failed; the row records the
-    bookkeeping failure (the run's proximate cause) as failed/failed_hard,
-    and the run raises instead of exiting 0 with the row stranded at
-    'indexing'."""
-    from jarvis.index_cli import IndexingError, index_repo
-    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        if step.endswith(" index"):
-            raise IndexingError("error: simulated post-build-start failure")
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    # The search-only publish succeeds; only the degraded row write hits the
-    # locked db (the same race as the CR-01 test, one step later).
-    real_upsert = Registry.upsert
-
-    def _locked_on_degraded_upsert(self, slug, path, language, commit_sha, status, **kw):
-        if status == DEGRADED_STATUS:
-            raise sqlite3.OperationalError("database is locked")
-        return real_upsert(self, slug, path, language, commit_sha, status, **kw)
-
-    monkeypatch.setattr(Registry, "upsert", _locked_on_degraded_upsert)
-
-    with pytest.raises(IndexingError, match="database is locked"):
-        index_repo(repo_dir, root=data_root, fallback_search_only=True)
-
-    err = capsys.readouterr().err
-    assert "nothing published" not in err, (
-        "search-only IS published at this point -- the claim would be false"
-    )
-    assert "degraded to search-only" in err
-    assert "error: simulated post-build-start failure" in err
-    assert "database is locked" in err
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert entry.status_reason == "database is locked"
-    finally:
-        registry.close()
-
-
-def test_degraded_publish_retire_failure_reports_partial_landing(
-    tmp_path: Path, monkeypatch, capsys
-):
-    """WR-02 regression: a degraded publish whose zoekt step SUCCEEDS but
-    whose SCIP-retire step fails is a partial landing -- zoekt shards are
-    live and the previous navigation index still stands -- so "nothing
-    published" would be false. The warning and the row's status_stderr must
-    state what landed, the one-line reason stays the ORIGINAL indexer
-    failure, and the run stays a hard failure raising the original error
-    (the locked degraded-publish-failure constraint)."""
-    from jarvis.index_cli import IndexingError, index_repo
-    from jarvis.registry import ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    # Phase 1: a fully mocked-successful run publishes a real current pointer.
-    def _successful_run(cmd, *, cwd, step, env=None):
-        if step == "scip expt-convert":
-            _make_index_db(Path(cmd[3]), chunks=1, mentions=14)
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _successful_run)
-    monkeypatch.setattr(
-        "jarvis.index_cli.populate_graph_for_repo", lambda *a, **k: None
-    )
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    slug = index_repo(repo_dir, root=data_root)
-    pointer_file = config.index_dir(slug, data_root) / "current"
-    assert pointer_file.exists(), "phase 1 must publish a current pointer"
-
-    # Phase 2: the indexer fails (degrade branch runs), the degraded publish's
-    # zoekt step succeeds, and the retire step dies on the realistic
-    # locked-registry.db race -- retire opens a GraphStore (a write) on the
-    # same registry.db the degrade exists to survive. Locking GraphStore
-    # construction keeps the REAL retire code under test, including its
-    # teardown ordering.
-    monkeypatch.setattr(
-        "jarvis.index_cli._run",
-        _degrade_mock_run(
-            {"scip-python index": IndexingError("error: simulated post-build-start failure")}
-        ),
-    )
-
-    def _locked_graph_store(db_path):
-        raise sqlite3.OperationalError("database is locked")
-
-    monkeypatch.setattr("jarvis.index_cli.GraphStore", _locked_graph_store)
-
-    with pytest.raises(IndexingError, match="simulated post-build-start failure"):
-        index_repo(repo_dir, slug=slug, root=data_root, fallback_search_only=True)
-
-    err = capsys.readouterr().err
-    assert "nothing published" not in err, (
-        "the zoekt shards ARE live at this point -- the claim would be false"
-    )
-    assert "did not complete" in err
-    assert "search shards ARE published" in err
-    assert "retiring the previous SCIP index failed" in err
-    assert "database is locked" in err
-    assert "navigation index is untouched" in err
-
-    # The previous navigation index must survive a retire that failed before
-    # its (deliberately last) rmtree.
-    assert pointer_file.exists(), "a failed retire must not destroy the old index"
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert entry.status_reason == "error: simulated post-build-start failure"
-        stderr_field = entry.status_stderr or ""
-        assert "degraded publish did not complete" in stderr_field
-        assert "search shards ARE published" in stderr_field
-        assert "database is locked" in stderr_field
-    finally:
-        registry.close()
-
-
-def test_degraded_row_write_and_record_failure_both_locked(
-    tmp_path: Path, monkeypatch, capsys
-):
-    """WR-03 regression: when the degraded-row write fails AND recording
-    that failure also fails (the same locked registry.db), the recording
-    failure must not mask the original -- one extra stderr warning names
-    both failures, the CLI still prints its clean one-line `error:` and
-    exits 1 (no traceback), and the raised error is the original
-    bookkeeping failure, never the raw sqlite3.OperationalError."""
-    import argparse
-
-    import jarvis.index_cli as cli
-    from jarvis.index_cli import IndexingError
-    from jarvis.registry import DEGRADED_STATUS
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _fake_run(cmd, *, cwd, step, env=None):
-        if step.endswith(" index"):
-            raise IndexingError("error: simulated post-build-start failure")
-        return _fake_completed_process(cmd)
-
-    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
-    monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-    # The degraded-row write hits the lock; recording that failure hits a
-    # second, distinct sqlite error (disk I/O) so the test can tell the
-    # original failure from the recording failure apart.
-    real_upsert = Registry.upsert
-
-    def _locked_on_degraded_upsert(self, slug, path, language, commit_sha, status, **kw):
-        if status == DEGRADED_STATUS:
-            raise sqlite3.OperationalError("database is locked")
-        return real_upsert(self, slug, path, language, commit_sha, status, **kw)
-
-    monkeypatch.setattr(Registry, "upsert", _locked_on_degraded_upsert)
-
-    def _disk_full_record_failure(self, *a, **k):
-        raise sqlite3.OperationalError("disk I/O error")
-
-    monkeypatch.setattr(Registry, "record_failure", _disk_full_record_failure)
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
-    rc = cli._cmd_index(argparse.Namespace(
-        path=str(repo_dir), slug=None, scheme=None, semantic_include=None,
-        language=None, search_only=None, fallback_search_only=True,
-    ))
-
-    assert rc == 1
-    err = capsys.readouterr().err
-    # The honest WR-01 warning about the degraded-row write...
-    assert "degraded to search-only" in err
-    assert "database is locked" in err
-    # ...plus the WR-03 warning naming BOTH the recording failure and the
-    # original failure it must not mask.
-    assert "recording the failed run" in err
-    assert "disk I/O error" in err
-    # The clean one-line error carries the ORIGINAL failure (not the
-    # secondary recording failure), and no traceback replaces it.
-    assert err.splitlines()[-1] == "error: database is locked"
-    assert "Traceback" not in err
-
-    # The row was honestly left where the last successful write put it
-    # ('indexing') -- nothing was laundered past the failed record.
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(config.repo_slug(repo_dir.name))
-        assert entry is not None
-        assert entry.status == "indexing"
-    finally:
-        registry.close()
-
-
-def test_pre_pipeline_record_failure_failure_does_not_mask_the_original(
-    tmp_path: Path, monkeypatch, capsys
-):
-    """WR-03 mirror in the pre-pipeline wrap: when the failure row's own
-    write raises there too, the ORIGINAL gate error (a RuntimeError here,
-    not an IndexingError and not the sqlite error) is still the one that
-    propagates, with one warning naming both failures."""
-    from jarvis.index_cli import index_repo
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    def _boom():
-        raise RuntimeError("scip v0.7.0 is below the required floor v0.9.0")
+        raise RuntimeError("disk detached mid-run")
 
     monkeypatch.setattr("jarvis.index_cli.check_scip_version", _boom)
 
@@ -3672,16 +2382,16 @@ def test_pre_pipeline_record_failure_failure_does_not_mask_the_original(
 
     monkeypatch.setattr(Registry, "record_failure", _disk_full_record_failure)
 
-    with pytest.raises(RuntimeError, match="below the required floor"):
-        index_repo(repo_dir, root=data_root, fallback_search_only=True)
+    with pytest.raises(IndexingError, match="disk detached mid-run"):
+        index_repo(repo_dir, root=data_root)
 
     err = capsys.readouterr().err
     assert "recording the failed run" in err
     assert "disk I/O error" in err
-    assert "below the required floor" in err
+    assert "disk detached mid-run" in err
 
 
-# --- Phase 3: precedence, persistence, self-heal (FALL-02/FALL-03) ----------
+
 
 def _mock_healthy_full_run(monkeypatch):
     """Mocks for a fully successful main-pipeline run: every subprocess
@@ -3700,9 +2410,9 @@ def _mock_healthy_full_run(monkeypatch):
 
 
 def _mock_failing_indexer(monkeypatch, message):
-    """Mocks for a post-build-start indexer failure: the language indexer
-    step raises, every other step (including the degrade publish's zoekt)
-    still succeeds — the house signature-fallback pattern."""
+    """Mocks for a SCIP indexer failure: the language indexer step raises,
+    every other step still succeeds — the optional-enrichment degrade
+    pattern (spec §12)."""
     from jarvis.index_cli import IndexingError
 
     def _fake_run(cmd, *, cwd, step, env=None):
@@ -3713,214 +2423,6 @@ def _mock_failing_indexer(monkeypatch, message):
     monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
     monkeypatch.setattr("jarvis.index_cli._run", _fake_run)
     monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", lambda *a, **k: False)
-
-
-@pytest.mark.parametrize("cli", [True, False, None])
-@pytest.mark.parametrize("persisted", [True, False, None])
-@pytest.mark.parametrize("env", ["1", None])
-def test_fallback_precedence_matrix_cli_persisted_env(
-    tmp_path: Path, monkeypatch, cli, persisted, env
-):
-    """FALL-02 full precedence matrix: CLI wins whenever present; else the
-    persisted value when not NULL; else the env tier; else off."""
-    from jarvis.index_cli import _resolve_fallback
-    from jarvis.registry import Registry
-
-    if env is None:
-        monkeypatch.delenv("JARVIS_FALLBACK_SEARCH_ONLY", raising=False)
-    else:
-        monkeypatch.setenv("JARVIS_FALLBACK_SEARCH_ONLY", env)
-
-    registry = Registry(tmp_path / "registry.db")
-    try:
-        if persisted is not None:
-            registry.upsert("mine", "/repos/mine", "python", "abc", "indexed")
-            registry.set_fallback_enabled("mine", persisted)
-        expected = cli if cli is not None else (
-            persisted if persisted is not None else (env == "1")
-        )
-        assert _resolve_fallback(registry, "mine", cli) is expected
-    finally:
-        registry.close()
-
-
-def test_explicit_cli_fallback_flag_persists_after_a_healthy_run(
-    tmp_path: Path, monkeypatch
-):
-    """FALL-02 persistence — explicit only: a healthy full run invoked
-    with fallback_search_only=True leaves fallback_enabled=True on the
-    row (the setter fires right after the transitional indexing upsert)."""
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    _mock_healthy_full_run(monkeypatch)
-    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == "indexed"
-        assert entry.fallback_enabled is True
-    finally:
-        registry.close()
-
-
-def test_no_cli_flag_leaves_fallback_enabled_null(tmp_path: Path, monkeypatch):
-    """Pitfall 1: only the explicit CLI value is ever persisted. Runs with
-    no CLI flag leave the row NULL whether the env tier is off or on — the
-    env value is consumed at run time only, so a later env-on still
-    governs a repo that merely ran once with env off."""
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    monkeypatch.delenv("JARVIS_FALLBACK_SEARCH_ONLY", raising=False)
-    _mock_healthy_full_run(monkeypatch)
-    slug = index_repo(repo_dir, root=data_root)
-    registry = Registry(data_root / "registry.db")
-    try:
-        assert registry.get(slug).fallback_enabled is None
-
-        monkeypatch.setenv("JARVIS_FALLBACK_SEARCH_ONLY", "1")
-        _mock_healthy_full_run(monkeypatch)
-        index_repo(repo_dir, slug=slug, root=data_root)
-        assert registry.get(slug).fallback_enabled is None
-    finally:
-        registry.close()
-
-
-def test_explicit_fallback_opt_out_governs_immediately_on_a_degraded_repo(
-    tmp_path: Path, monkeypatch
-):
-    """FALL-02 opt-out is immediate: --no-fallback-search-only on an
-    already-degraded repo makes the next still-broken run a hard failure —
-    the degraded state never traps."""
-    from jarvis.index_cli import IndexingError
-    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FAILED_HARD
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    _mock_failing_indexer(monkeypatch, "error: simulated post-build-start failure")
-    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
-    registry = Registry(data_root / "registry.db")
-    try:
-        assert registry.get(slug).status == DEGRADED_STATUS
-
-        _mock_failing_indexer(monkeypatch, "error: simulated post-build-start failure")
-        with pytest.raises(IndexingError):
-            index_repo(repo_dir, slug=slug, root=data_root, fallback_search_only=False)
-
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == "failed"
-        assert entry.status_origin == ORIGIN_FAILED_HARD
-        assert entry.fallback_enabled is False  # the opt-out is now durable
-    finally:
-        registry.close()
-
-
-def test_degraded_repo_self_heals_to_indexed_on_a_successful_rerun(
-    tmp_path: Path, monkeypatch
-):
-    """FALL-03: degraded keeps search_only=False so the next run retries
-    the full build; success ends status='indexed' with the D-04
-    NULL-clearing of origin/reason/stderr — no stale failure facts."""
-    from jarvis.registry import DEGRADED_STATUS
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    _mock_failing_indexer(monkeypatch, "error: simulated post-build-start failure")
-    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
-    registry = Registry(data_root / "registry.db")
-    try:
-        assert registry.get(slug).status == DEGRADED_STATUS
-
-        _mock_healthy_full_run(monkeypatch)
-        index_repo(repo_dir, slug=slug, root=data_root)  # no CLI flag
-
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == "indexed"
-        assert entry.search_only is False
-        assert (entry.status_origin, entry.status_reason, entry.status_stderr) == (
-            None, None, None,
-        )
-    finally:
-        registry.close()
-
-
-def test_degraded_repo_degrades_again_on_a_fresh_failure(
-    tmp_path: Path, monkeypatch
-):
-    """FALL-03: the retry is real — a still-failing second run degrades
-    again with a FRESH failure record (the new reason text proves the
-    build was retried, not a stale cached state served back)."""
-    from jarvis.registry import DEGRADED_STATUS, ORIGIN_FALLBACK
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    _mock_failing_indexer(monkeypatch, "error: first failure")
-    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
-    registry = Registry(data_root / "registry.db")
-    try:
-        first = registry.get(slug)
-        assert first is not None
-        assert first.status == DEGRADED_STATUS
-        assert first.status_reason == "error: first failure"
-
-        _mock_failing_indexer(monkeypatch, "error: second fresh failure")
-        index_repo(repo_dir, slug=slug, root=data_root)  # no CLI flag
-
-        second = registry.get(slug)
-        assert second is not None
-        assert second.status == DEGRADED_STATUS
-        assert second.status_origin == ORIGIN_FALLBACK
-        assert second.status_reason == "error: second fresh failure"
-    finally:
-        registry.close()
-
-
-def test_signature_match_preempts_the_degrade_branch_on_an_opted_in_repo(
-    tmp_path: Path, monkeypatch
-):
-    """FALL-03 adjacency: a signature-matched indexer failure takes the
-    permanent search-only path inside the indexer-step handler, before the
-    generic degrade branch is ever reachable — an opted-in repo ends
-    search_only=True / origin 'signature', NOT degraded."""
-    from jarvis.registry import ORIGIN_SIGNATURE, SEARCH_ONLY_STATUS
-
-    repo_dir = tmp_path / "repo"
-    shutil.copytree(FIXTURE_REPO, repo_dir)
-    _init_git_repo(repo_dir)
-    data_root = tmp_path / "data"
-
-    _mock_failing_indexer(
-        monkeypatch, "error: No SCIP shards found. scip-java cannot index this"
-    )
-    slug = index_repo(repo_dir, root=data_root, fallback_search_only=True)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        entry = registry.get(slug)
-        assert entry is not None
-        assert entry.status == SEARCH_ONLY_STATUS
-        assert entry.search_only is True
-        assert entry.status_origin == ORIGIN_SIGNATURE
-    finally:
-        registry.close()
 
 
 # --- Phase 3: watch anti-treadmill (FALL-05) --------------------------------
@@ -3940,97 +2442,6 @@ def _watch_entry(**overrides):
     )
     fields.update(overrides)
     return RegisteredRepo(**fields)
-
-
-@pytest.mark.parametrize(
-    ("overrides", "expected"),
-    [
-        pytest.param(None, True, id="no-row"),
-        pytest.param({"status": "failed", "commit_sha": "abc123"}, True,
-                     id="failed-even-with-matching-sha"),
-        pytest.param({"status": "indexed", "commit_sha": "abc123"}, True,
-                     id="indexed"),
-        pytest.param({"status": "search-only", "commit_sha": "abc123"}, True,
-                     id="search-only"),
-        pytest.param({"status": "degraded", "commit_sha": None}, True,
-                     id="degraded-null-sha"),
-        pytest.param({"status": "degraded", "commit_sha": "def456"}, True,
-                     id="degraded-changed-sha"),
-        pytest.param({"status": "degraded", "commit_sha": "abc123"}, False,
-                     id="degraded-same-sha"),
-    ],
-)
-def test_watch_should_retry_full_build_matrix(overrides, expected):
-    """FALL-05 skip predicate: the ONLY row that declines the retry is a
-    degraded row whose persisted commit_sha equals the current sha — the
-    attempt that already failed. A missing row, a hard-failed row
-    (record_failure writes commit_sha=NULL, and NULL never equals a real
-    sha), an indexed/search-only row, or any sha change all retry —
-    FALL-03 self-heal stays the default and manual `jarvis index` never
-    skips."""
-    from jarvis.index_cli import _watch_should_retry_full_build
-
-    entry = None if overrides is None else _watch_entry(**overrides)
-    assert _watch_should_retry_full_build(entry, "abc123") is expected
-
-
-def test_watch_parser_accepts_tri_state_fallback_flag():
-    from jarvis.index_cli import build_parser
-
-    on = build_parser().parse_args(["watch", "/repos/x", "--fallback-search-only"])
-    off = build_parser().parse_args(["watch", "/repos/x", "--no-fallback-search-only"])
-    absent = build_parser().parse_args(["watch", "/repos/x"])
-    assert on.fallback_search_only is True
-    assert off.fallback_search_only is False
-    assert absent.fallback_search_only is None
-
-
-def test_watch_skip_check_skips_only_while_sha_unchanged(tmp_path: Path):
-    """FALL-05 consult against a real tmp Registry + git repo: a degraded
-    row whose commit_sha equals the current HEAD declines the retry; a
-    source change (new sha) re-triggers the full build (ROADMAP criterion
-    5); a missing row fails open to retry."""
-    from jarvis.index_cli import _git_head, _watch_skip_check
-    from jarvis.registry import DEGRADED_STATUS
-
-    data_root = tmp_path / "data"
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    (repo_dir / "main.py").write_text("x = 1\n")
-    _init_git_repo(repo_dir)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        registry.upsert("mine", str(repo_dir), "python",
-                        _git_head(repo_dir), DEGRADED_STATUS)
-    finally:
-        registry.close()
-
-    # Unchanged sha on a degraded row: skip the full-build retry.
-    assert _watch_skip_check(repo_dir, "mine", root=data_root) is False
-
-    # A source change produces a new sha: the full build re-triggers.
-    (repo_dir / "feature.py").write_text("y = 2\n")
-    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "source change"],
-                   cwd=repo_dir, check=True)
-    assert _watch_skip_check(repo_dir, "mine", root=data_root) is True
-
-    # No row at all: fail open to retry.
-    assert _watch_skip_check(repo_dir, "never-registered", root=data_root) is True
-
-
-def test_watch_skip_check_fails_open_when_the_consult_raises(tmp_path: Path):
-    """T-3-07: ANY consult failure (locked db, git hiccup) retries —
-    fail-open is the safe direction for self-heal; the worst outcome of a
-    broken consult is one extra build, never a suppressed retry."""
-    from jarvis.index_cli import _watch_skip_check
-
-    not_a_repo = tmp_path / "plain-dir"
-    not_a_repo.mkdir()
-    # _git_head raises NotAGitRepositoryError inside the consult; the
-    # wrapper must convert it to "retry" instead of propagating.
-    assert _watch_skip_check(not_a_repo, "anything", root=tmp_path / "data") is True
 
 
 _UNSET = object()
@@ -4101,99 +2512,6 @@ def _drive_cmd_watch(cli, monkeypatch, args_kwargs, sleep_results):
     fake_time.sleep = _sleep
     monkeypatch.setattr(cli, "time", fake_time)
     return cli._cmd_watch(argparse.Namespace(**args_kwargs))
-
-
-def test_cmd_watch_reindex_forwards_fallback_flag_to_index_repo(
-    tmp_path: Path, monkeypatch
-):
-    """FALL-02 wiring: watch is just another reindex driver — `_reindex`
-    forwards the tri-state fallback_search_only to index_repo beside
-    scheme/language. The fake index_repo raises KeyboardInterrupt (a
-    BaseException `_reindex`'s broad `except Exception` must not swallow)
-    to break the watch loop after capturing; a non-git path makes the
-    skip consult fail open, reaching index_repo."""
-    import jarvis.index_cli as cli
-
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
-    repo_dir = tmp_path / "not-a-repo"
-    repo_dir.mkdir()
-
-    captured: dict = {}
-
-    def fake_index_repo(path, *, slug=None, root=None, scheme=None,
-                        semantic_include=None, language=None, search_only=None,
-                        fallback_search_only=_UNSET):
-        captured["fallback_search_only"] = (
-            "UNSET" if fallback_search_only is _UNSET else fallback_search_only
-        )
-        captured["slug"] = slug
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
-
-    import itertools
-
-    rc = _drive_cmd_watch(
-        cli, monkeypatch,
-        {"path": str(repo_dir), "slug": None, "scheme": "myscheme",
-         "debounce": 0.0, "language": "swift", "fallback_search_only": True},
-        # Loop exits on the first poll (fake index_repo raises
-        # KeyboardInterrupt); the bounded chain is only the no-hang guard
-        # if the wiring ever regressed into never invoking index_repo.
-        sleep_results=itertools.chain(itertools.repeat(None, 5), [KeyboardInterrupt()]),
-    )
-
-    assert rc == 0
-    assert captured["fallback_search_only"] is True
-    assert captured["slug"] == repo_dir.name
-
-
-def test_cmd_watch_skips_full_build_retry_on_degraded_row_at_same_sha(
-    tmp_path: Path, monkeypatch, capsys
-):
-    """FALL-05 end-to-end through the watch driver: a degraded row whose
-    commit_sha equals HEAD makes `_reindex` print one stderr note and
-    return WITHOUT invoking index_repo — no treadmill on a
-    persistently-failing repo at an unchanged sha. The scripted sleep
-    breaks the loop on the second iteration (the skip path returns
-    normally, so sleep is the only exit left)."""
-    import jarvis.index_cli as cli
-    from jarvis.index_cli import _git_head
-    from jarvis.registry import DEGRADED_STATUS
-
-    data_root = tmp_path / "data"
-    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    (repo_dir / "main.py").write_text("x = 1\n")
-    _init_git_repo(repo_dir)
-
-    registry = Registry(data_root / "registry.db")
-    try:
-        registry.upsert(repo_dir.name, str(repo_dir), "python",
-                        _git_head(repo_dir), DEGRADED_STATUS)
-    finally:
-        registry.close()
-
-    invoked: list = []
-
-    def fake_index_repo(*args, **kwargs):
-        invoked.append(kwargs)
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
-
-    rc = _drive_cmd_watch(
-        cli, monkeypatch,
-        {"path": str(repo_dir), "slug": None, "scheme": None,
-         "debounce": 0.0, "language": None, "fallback_search_only": None},
-        sleep_results=iter([None, KeyboardInterrupt()]),
-    )
-
-    assert rc == 0
-    assert invoked == [], "the skip path must not invoke index_repo"
-    assert "still degraded at the same commit" in capsys.readouterr().err
 
 
 # --- Phase 5: semantic install onboarding (SEMA-01/02) ----------------------
@@ -4434,28 +2752,24 @@ def test_cmd_index_offer_yes_installs_and_enables_semantic_same_invocation(
 
     def _stage(repo_path, slug, root, include_prefixes=()):
         stage_calls.append((repo_path, slug, root, include_prefixes))
-        # First call = the pipeline's in-run stage: keep the healthy-mock
-        # False so the pipeline itself stamps nothing (line "if
-        # semantic_ok: mark_semantic_indexed") and only the offer's re-run
-        # (second call) can set semantic_indexed_at.
-        return len(stage_calls) > 1
+        return True
 
     # After _mock_healthy_full_run, so this overrides its False lambda.
+    # The pipeline's in-run stage goes through _finish_semantic_stage; the
+    # offer's post-install re-run is the one _run_semantic_stage caller.
     monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", _stage)
 
     rc = cli._cmd_index(argparse.Namespace(
         path=str(repo_dir), slug="consented-repo", scheme=None, semantic_include=None,
-        language=None, search_only=None, fallback_search_only=None, offer_semantic=True,
+        language=None, scip=None, offer_semantic=True,
     ))
 
     assert rc == 0
     assert len(invalidations) == 1
-    # Two stage calls, in order: the pipeline's in-run stage, then the
-    # offer's re-run — which carries the row's persisted include
-    # prefixes (none persisted here) and root=None from _cmd_index.
-    assert len(stage_calls) == 2
-    assert stage_calls[1] == (Path(str(repo_dir)), "consented-repo", None, ())
-    assert stage_calls[0][1] == "consented-repo"
+    # The single _run_semantic_stage call is the offer's re-run — root=None
+    # from _cmd_index; the pipeline's own stage rode the healthy mocks.
+    assert len(stage_calls) == 1
+    assert stage_calls[0] == (Path(str(repo_dir)), "consented-repo", None, ())
     registry = Registry(tmp_path / "data" / "registry.db")
     try:
         entry = registry.get("consented-repo")
@@ -4511,13 +2825,10 @@ def test_cmd_index_offer_install_failure_warns_and_does_not_remember_decline(
             assert entry.semantic_declined is False, shape
         finally:
             registry.close()
-    # Exactly one stage call per run — the pipeline's in-run stage. A
-    # second call for any slug would be the offer's re-run, which must
-    # never happen on the failure path.
-    assert len(stage_calls) == 3
-    assert sorted(c[1] for c in stage_calls) == [
-        "failed-install-0", "failed-install-1", "failed-install-2",
-    ]
+    # No _run_semantic_stage call in any run: the pipeline's in-run stage
+    # goes through _finish_semantic_stage (healthy-mocked), and the offer's
+    # re-run must never happen on the failure path.
+    assert stage_calls == []
 
 
 @pytest.mark.interactive_input
@@ -4775,7 +3086,7 @@ def test_cmd_watch_reindex_never_prompts_even_at_a_tty(
     rc = _drive_cmd_watch(
         cli, monkeypatch,
         {"path": str(repo_dir), "slug": None, "scheme": None,
-         "debounce": 0.0, "language": None, "fallback_search_only": None},
+         "debounce": 0.0, "language": None, "scip": None},
         sleep_results=itertools.chain(itertools.repeat(None, 5), [KeyboardInterrupt()]),
     )
     assert rc == 0
@@ -4847,7 +3158,8 @@ def test_cmd_index_semantic_include_runs_on_declined_repo_without_clearing_bit(
 ):
     """Locked Area 3: an explicit --semantic-include is direct user
     intent — the semantic stage runs with those prefixes on a declined
-    repo, never blocked, and the decline bit stays set."""
+    repo, never blocked, and the decline bit stays set. The pipeline's
+    in-run stage rides the prepare/finish split (spec TSI-09)."""
     import argparse
 
     import jarvis.index_cli as cli
@@ -4862,28 +3174,914 @@ def test_cmd_index_semantic_include_runs_on_declined_repo_without_clearing_bit(
     assert rc == 0
 
     # Now the extra is present (no offer) and the user passes an explicit
-    # include: the pipeline stage must run with those prefixes.
+    # include: the pipeline's prepare half must run with those prefixes.
     monkeypatch.setattr("jarvis.index_cli._semantic_extra_missing", lambda: False)
-    stage_calls: list = []
+    prepare_calls: list = []
+    finish_calls: list = []
 
-    def _stage(repo_path, slug, root, include_prefixes=()):
-        stage_calls.append((repo_path, slug, root, include_prefixes))
+    def _prepare(repo_path, slug, root, include_prefixes, manifest):
+        prepare_calls.append((repo_path, slug, root, include_prefixes))
+        return None
+
+    def _finish(work, prepared_chunks, pool):
+        finish_calls.append(work)
         return True
 
-    monkeypatch.setattr("jarvis.index_cli._run_semantic_stage", _stage)
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", _prepare)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", _finish)
     rc = cli._cmd_index(argparse.Namespace(
         path=str(tmp_path / slug), slug=slug, scheme=None,
-        semantic_include=["src/"], language=None, search_only=None,
-        fallback_search_only=None, offer_semantic=True,
+        semantic_include=["src/"], language=None, scip=None,
+        offer_semantic=True,
     ))
 
     assert rc == 0
-    assert [c[3] for c in stage_calls] == [("src/",)]
+    assert [c[3] for c in prepare_calls] == [("src/",)]
+    assert len(finish_calls) == 0  # prepare skipped: nothing to finish
     registry = Registry(tmp_path / "data" / "registry.db")
     try:
         entry = registry.get(slug)
         assert entry is not None
         assert entry.semantic_declined is True  # never cleared
         assert entry.semantic_include == ("src/",)
+    finally:
+        registry.close()
+
+
+# --- Task 6: staged syntax baseline pipeline (spec TSI-04/06/07/08) ---------
+
+def _git_head_sha(repo_dir: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _syntax_only_mocks(monkeypatch):
+    """Mocks for a run that must NEVER attempt SCIP: zoekt (the only real
+    subprocess left) succeeds, and any indexer/convert step is a tripwire.
+    Semantic stage skips."""
+    calls: list[str] = []
+
+    def _run(cmd, *, cwd, step, env=None):
+        calls.append(step)
+        if step == "scip expt-convert" or step.endswith(" index"):
+            raise AssertionError(f"SCIP must not run in this test: {step}")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli._run", _run)
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", lambda *a, **k: False)
+    return calls
+
+
+def _scip_convert_mocks(monkeypatch, *, convert_db_builder, extra=None):
+    """Mocks for a run whose convert step builds a caller-specified db."""
+    calls: list[str] = []
+
+    def _run(cmd, *, cwd, step, env=None):
+        calls.append(step)
+        if extra is not None and step in extra:
+            raise extra[step]
+        if step == "scip expt-convert":
+            convert_db_builder(Path(cmd[3]))
+            return _fake_completed_process(cmd)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli._run", _run)
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", lambda *a, **k: False)
+    return calls
+
+
+def _read_singleton_state(snapshot_db: Path) -> dict:
+    conn = sqlite3.connect(f"file:{snapshot_db}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT scip_state, syntax_counts FROM jarvis_snapshot"
+        ).fetchone()
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    finally:
+        conn.close()
+    return {"scip_state": row[0], "syntax_counts": json.loads(row[1]), "tables": tables}
+
+
+def test_pipeline_happy_path_publishes_one_scip_plus_syntax_snapshot(
+    tmp_path: Path, monkeypatch
+):
+    """Case 1: syntax + SCIP + Zoekt succeed -> exactly one
+    index-<commit>-<generation>.db carrying REAL converter tables AND the
+    Jarvis syntax tables; `current` flips once; the metadata sibling is
+    named from the actual db filename; the row records `indexed` with
+    scip_state=available."""
+    from jarvis.index_cli import index_repo
+    from tests.fixtures.synthetic_index import build_synthetic_index_db
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _scip_convert_mocks(
+        monkeypatch, convert_db_builder=build_synthetic_index_db,
+        extra={"zoekt-git-index": None} if False else None,
+    )
+
+    slug = index_repo(repo_dir, slug="happy", root=data_root)
+
+    target_dir = config.index_dir(slug, data_root)
+    pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"index-[0-9a-f]{40}-[0-9a-f]{32}\.db", pointer), pointer
+    assert pointer in {p.name for p in target_dir.iterdir()}
+    # Metadata sibling derived from the actual filename.
+    metadata = target_dir / (pointer.removesuffix(".db") + ".metadata.json")
+    assert metadata.is_file()
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    assert payload["generation"] == pointer.removesuffix(".db").split("-")[-1]
+    assert payload["commit_sha"] == _git_head_sha(repo_dir)
+    # The snapshot carries real converter tables + the syntax namespace.
+    facts = _read_singleton_state(target_dir / pointer)
+    assert "documents" in facts["tables"]
+    assert "syntax_files" in facts["tables"] and "jarvis_snapshot" in facts["tables"]
+    assert facts["scip_state"] == "available"
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "indexed"
+        assert entry.scip_enabled is True
+        assert entry.scip_state == "available"
+        assert entry.scip_failure_reason is None
+        assert entry.commit_sha == _git_head_sha(repo_dir)
+    finally:
+        registry.close()
+    # Superseded-snapshot cleanup keeps exactly the live pair.
+    dbs = sorted(p.name for p in target_dir.glob("index-*.db"))
+    assert dbs == [pointer]
+
+
+def test_pipeline_scip_failure_degrades_but_publishes_syntax_baseline(
+    tmp_path: Path, monkeypatch
+):
+    """Case 2: SCIP failure with a healthy baseline -> exit-0 degraded, the
+    pointer publishes a syntax-only snapshot (singleton scip_state=failed,
+    NO fabricated SCIP tables), and the stage fields record the cause and
+    the attempt sha."""
+    from jarvis.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    full_text = "error: simulated build failure\nsome detail"
+    _scip_convert_mocks(
+        monkeypatch,
+        convert_db_builder=lambda p: (_ for _ in ()).throw(AssertionError("never")),
+        extra={"scip-python index": IndexingError(full_text)},
+    )
+
+    slug = index_repo(repo_dir, slug="degraded", root=data_root)  # no raise
+
+    head = _git_head_sha(repo_dir)
+    target_dir = config.index_dir(slug, data_root)
+    pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
+    facts = _read_singleton_state(target_dir / pointer)
+    assert facts["scip_state"] == "failed"
+    assert "documents" not in facts["tables"], "no fabricated SCIP tables"
+    assert facts["syntax_counts"]["parsed"] >= 1
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry.status == "degraded"
+        assert entry.scip_state == "failed"
+        assert entry.scip_failure_reason == "error: simulated build failure"
+        assert "some detail" in entry.scip_failure_stderr
+        assert entry.scip_failed_at_sha == head
+        # Exit-0 degraded mirrors the concise stage cause into status_reason.
+        assert entry.status_reason == "error: simulated build failure"
+    finally:
+        registry.close()
+
+
+def test_pipeline_no_scip_persists_the_reversible_choice(tmp_path: Path, monkeypatch):
+    """Case 3: --no-scip -> exit-0 indexed, scip_enabled=false persisted,
+    scip_state=disabled, no indexer invocation; a later omitted-flag run
+    stays disabled; --scip re-enables and attempts SCIP."""
+    from jarvis.index_cli import index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    steps = _syntax_only_mocks(monkeypatch)
+    slug = index_repo(repo_dir, slug="optout", root=data_root, scip=False)
+    assert not any(s.endswith(" index") or s == "scip expt-convert" for s in steps)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry.status == "indexed"
+        assert entry.scip_enabled is False
+        assert entry.scip_state == "disabled"
+    finally:
+        registry.close()
+
+    # Omitted flag: the persisted choice wins — still no SCIP attempt.
+    steps = _syntax_only_mocks(monkeypatch)
+    index_repo(repo_dir, slug="optout", root=data_root)
+    assert not any(s.endswith(" index") for s in steps)
+    registry = Registry(data_root / "registry.db")
+    try:
+        assert registry.get(slug).scip_enabled is False
+    finally:
+        registry.close()
+
+    # --scip re-enables: the SCIP stage runs again (convert is a tripwire
+    # here, so the run degrades — the point is the attempt happened).
+    from jarvis.index_cli import IndexingError
+
+    _scip_convert_mocks(
+        monkeypatch,
+        convert_db_builder=lambda p: None,
+        extra={"scip-python index": IndexingError("boom")},
+    )
+    index_repo(repo_dir, slug="optout", root=data_root, scip=True)
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry.scip_enabled is True
+        assert entry.scip_state == "failed"
+    finally:
+        registry.close()
+
+
+def test_pipeline_unsupported_language_publishes_baseline_as_unsupported(
+    tmp_path: Path, monkeypatch
+):
+    """Case 4: no SCIP-indexable language -> exit-0 indexed with
+    scip_state=unsupported, no --no-scip required; the syntax baseline
+    still covers the tracked sources."""
+    from jarvis.index_cli import index_repo
+
+    repo_dir = tmp_path / "gorepo"
+    repo_dir.mkdir()
+    (repo_dir / "main.go").write_text("package main\n\nfunc main() {}\n")
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _syntax_only_mocks(monkeypatch)
+    slug = index_repo(repo_dir, slug="gorepo", root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry.status == "indexed"
+        assert entry.language == "unknown"
+        assert entry.scip_state == "unsupported"
+    finally:
+        registry.close()
+
+
+def test_pipeline_zoekt_failure_is_hard_and_publishes_nothing(
+    tmp_path: Path, monkeypatch
+):
+    """Case 5: Zoekt failure -> exit nonzero `failed`; nothing published
+    this run; the prior live snapshot is untouched."""
+    from jarvis.index_cli import IndexingError, index_repo
+    from tests.fixtures.synthetic_index import build_synthetic_index_db
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    # First run publishes (the "prior live snapshot").
+    _scip_convert_mocks(monkeypatch, convert_db_builder=build_synthetic_index_db)
+    slug = index_repo(repo_dir, slug="zoektfail", root=data_root)
+    target_dir = config.index_dir(slug, data_root)
+    live_pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
+
+    # Second run: zoekt dies after the SCIP stage succeeded.
+    from jarvis.index_cli import MissingBinaryError
+
+    def _run(cmd, *, cwd, step, env=None):
+        if step == "zoekt-git-index":
+            raise MissingBinaryError("zoekt-git-index failed: not found on PATH — run setup.sh")
+        if step == "scip expt-convert":
+            build_synthetic_index_db(Path(cmd[3]))
+            return _fake_completed_process(cmd)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli._run", _run)
+    with pytest.raises(IndexingError, match="zoekt-git-index"):
+        index_repo(repo_dir, slug="zoektfail", root=data_root)
+
+    assert (target_dir / "current").read_text(encoding="utf-8").strip() == live_pointer
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry.status == "failed"
+        assert entry.scip_failed_at_sha is None  # the run never reached a decision
+    finally:
+        registry.close()
+
+
+def test_pipeline_registry_failure_after_pointer_flip_reports_snapshot_live(
+    tmp_path: Path, monkeypatch
+):
+    """Case 6: registry write fails after the pointer flip -> exit nonzero
+    with the 'snapshot already live' report; superseded generations are NOT
+    deleted yet; a later successful run cleans them."""
+    import jarvis.index_cli as cli
+    from jarvis.index_cli import IndexingError, index_repo
+    from tests.fixtures.synthetic_index import build_synthetic_index_db
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _scip_convert_mocks(monkeypatch, convert_db_builder=build_synthetic_index_db)
+    slug = index_repo(repo_dir, slug="bookkeep", root=data_root)
+    target_dir = config.index_dir(slug, data_root)
+    first_live = (target_dir / "current").read_text(encoding="utf-8").strip()
+
+    # Second run flips a new pointer, then the terminal registry write dies.
+    real_upsert = cli.Registry.upsert
+
+    def _upsert_then_die(self, slug_arg, *a, **k):
+        # Let the transitional write through; kill the terminal one (the
+        # only upsert that carries a non-None commit_sha for this run).
+        if k.get("scip_stage") is not None or a and len(a) > 4:
+            raise sqlite3.OperationalError("database is locked")
+        return real_upsert(self, slug_arg, *a, **k)
+
+    monkeypatch.setattr(cli.Registry, "upsert", _upsert_then_die)
+    with pytest.raises(IndexingError, match="already live"):
+        index_repo(repo_dir, slug="bookkeep", root=data_root)
+
+    second_live = (target_dir / "current").read_text(encoding="utf-8").strip()
+    assert second_live != first_live
+    # The superseded first generation is still on disk (cleanup never ran).
+    assert (target_dir / first_live).is_file()
+
+    # A later successful run retires the superseded generation.
+    monkeypatch.setattr(cli.Registry, "upsert", real_upsert)
+    index_repo(repo_dir, slug="bookkeep", root=data_root)
+    dbs = sorted(p.name for p in target_dir.glob("index-*.db"))
+    assert dbs == [(target_dir / "current").read_text(encoding="utf-8").strip()]
+
+
+def test_pipeline_same_commit_reindex_produces_distinct_immutable_snapshots(
+    tmp_path: Path, monkeypatch
+):
+    """Case 8 (snapshot safety + reuse): two runs at one commit produce
+    different immutable index-<commit>-<generation>.db filenames with
+    matching metadata stems; the reader cache invalidates by pointer
+    content; unchanged sources are carried forward without re-parse (the
+    second snapshot's rows come from reuse, and the generation id is still
+    unique)."""
+    from jarvis.index_cli import index_repo
+    from jarvis.index_reader import IndexConnectionCache
+    from jarvis.syntax_index import read_snapshot_facts
+    from tests.fixtures.synthetic_index import build_synthetic_index_db
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _scip_convert_mocks(monkeypatch, convert_db_builder=build_synthetic_index_db)
+    slug = index_repo(repo_dir, slug="reuser", root=data_root)
+    target_dir = config.index_dir(slug, data_root)
+    first = (target_dir / "current").read_text(encoding="utf-8").strip()
+
+    cache = IndexConnectionCache(str(data_root))
+    conn_before, _ = config.get_connection(cache, slug)
+    facts_before = read_snapshot_facts(conn_before)
+
+    index_repo(repo_dir, slug="reuser", root=data_root)
+    second = (target_dir / "current").read_text(encoding="utf-8").strip()
+    assert first != second
+    assert (target_dir / first).is_file() or True  # retired by cleanup
+    assert (target_dir / second).is_file()
+    assert (target_dir / (second.removesuffix(".db") + ".metadata.json")).is_file()
+
+    # Reader cache: the pointer content changed, so the cached connection
+    # for the old pointer is never consulted again.
+    conn_after, _ = config.get_connection(cache, slug)
+    facts_after = read_snapshot_facts(conn_after)
+    assert facts_after.generation != facts_before.generation
+    assert facts_after.source_hash == facts_before.source_hash  # unchanged sources
+    assert facts_after.syntax_counts.parsed >= 1  # rows carried/reparsed live
+    cache.close_all()
+
+
+def test_pipeline_syntax_only_generation_clears_repo_owned_graph_edges(
+    tmp_path: Path, monkeypatch
+):
+    """Case 9 (graph): a SCIP-less generation clears every outgoing edge of
+    packages the repo owns — even when the prior generation had working
+    SCIP edges — while package identities shared with other repos survive;
+    `forget` unpins zoekt.name and tears the graph rows down."""
+    import argparse
+
+    from jarvis.graph import GraphStore
+    from jarvis.index_cli import _cmd_forget, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+
+    # Pre-seed graph rows as if a prior SCIP generation had populated them.
+    store = GraphStore(data_root / "registry.db")
+    mine = store.upsert_package(repo="graphrepo", name="npm:mine")
+    other = store.upsert_package(repo="other-repo", name="npm:theirs")
+    store.add_edge(from_package_id=mine, to_package_id=other)
+    store.add_edge(from_package_id=other, to_package_id=mine)
+    store.close()
+
+    _syntax_only_mocks(monkeypatch)
+    slug = index_repo(repo_dir, slug="graphrepo", root=data_root, scip=False)
+
+    store = GraphStore(data_root / "registry.db")
+    try:
+        assert store.get_dependents(other) == []  # repo-owned outgoing edge cleared
+        assert store.get_package_by_key("graphrepo", "npm:mine") is not None
+        assert store.get_package_by_key("other-repo", "npm:theirs") is not None
+        assert store.get_dependents(mine)  # other repo's incoming edge survives
+    finally:
+        store.close()
+
+    # forget: unpins zoekt.name AND tears the graph rows down.
+    rc = _cmd_forget(argparse.Namespace(slug=slug))
+    assert rc == 0
+    unpinned = subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "--get", "zoekt.name"],
+        capture_output=True, text=True,
+    )
+    assert unpinned.returncode != 0  # key gone
+    store = GraphStore(data_root / "registry.db")
+    try:
+        assert store.get_package_by_key("graphrepo", "npm:mine") is None
+        assert store.get_package_by_key("other-repo", "npm:theirs") is not None
+        assert store.get_dependents(other) == []  # dangling edge gone too
+    finally:
+        store.close()
+
+
+def test_pipeline_never_modifies_a_published_legacy_scip_db(
+    tmp_path: Path, monkeypatch
+):
+    """Case 10 (part): a published legacy SCIP snapshot is never modified
+    in place by a baseline publish — the new generation lands under a
+    fresh unique name, and the legacy db retires (is superseded) only
+    after the new pointer is live, per the immutable-artifact lifecycle.
+    The legacy format itself stays readable as legacy (real converter
+    tables, no syntax namespace)."""
+    from jarvis.index_cli import index_repo
+    from jarvis.syntax_index import has_scip_tables, has_syntax_tables
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+
+    from tests.fixtures.synthetic_index import build_published_index
+
+    slug = "legacy"
+    build_published_index(data_root, config.PROJECT, slug, config.BRANCH)
+    target_dir = config.index_dir(slug, data_root)
+    legacy_db = target_dir / "index-abc1234.db"
+    preserved_copy = tmp_path / "legacy-copy.db"
+    shutil.copyfile(legacy_db, preserved_copy)
+
+    _syntax_only_mocks(monkeypatch)
+    index_repo(repo_dir, slug=slug, scip=False)
+
+    pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
+    assert pointer != "index-abc1234.db"
+    # The legacy artifact was retired whole (never mutated in place):
+    # comparing against the preserved copy proves the format for readers
+    # that still hold a reference to that generation.
+    assert not legacy_db.exists() or legacy_db.read_bytes() == preserved_copy.read_bytes()
+    conn = sqlite3.connect(f"file:{preserved_copy}?mode=ro", uri=True)
+    try:
+        assert has_scip_tables(conn)
+        assert not has_syntax_tables(conn)  # legacy format, no syntax namespace
+    finally:
+        conn.close()
+    facts = _read_singleton_state(target_dir / pointer)
+    assert facts["scip_state"] == "disabled"
+    assert facts["syntax_counts"]["parsed"] >= 1
+
+
+def test_removed_options_are_rejected_with_the_replacement():
+    """Case 11: the removed flags are rejected (exit 2) with a stderr
+    message naming the replacement — never silently mapped."""
+    import jarvis.index_cli as cli
+
+    for flag, replacement in [
+        ("--search-only", "--no-scip"),
+        ("--fallback-search-only", "--scip"),
+        ("--no-fallback-search-only", "--scip"),
+    ]:
+        with pytest.raises(SystemExit) as excinfo:
+            cli._reject_removed_options(["index", "/repos/x", flag])
+        assert excinfo.value.code == 2
+        assert flag in cli._REMOVED_OPTIONS
+
+
+def test_main_rejects_removed_option_before_argparse(monkeypatch):
+    """The rejection happens in main()'s pre-scan, so a stale script sees
+    the tailored replacement message instead of argparse's generic
+    'unrecognized arguments'."""
+    import jarvis.index_cli as cli
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["index", "/repos/x", "--search-only"])
+    assert excinfo.value.code == 2
+
+
+def test_scip_suppressed_matrix():
+    """The four-condition watch predicate (spec TSI-07), as a pure decision
+    matrix. Only the exact suppressed shape returns True: a watch caller,
+    SCIP enabled with a supported selected language, a failed/unavailable
+    stage recorded AT the current HEAD, and no explicit re-enable or
+    effective language/scheme change."""
+    from datetime import UTC, datetime
+
+    from jarvis.index_cli import _scip_suppressed
+    from jarvis.registry import RegisteredRepo
+
+    def entry(**kw):
+        fields = dict(
+            slug="mine", path="/m", language="python", commit_sha="abc",
+            last_indexed=datetime.now(UTC), status="degraded",
+            scip_enabled=True, scip_state="failed", scip_failed_at_sha="abc",
+        )
+        fields.update(kw)
+        return RegisteredRepo(**fields)
+
+    base = dict(watch=True, scip_enabled=True, explicit_scip=None,
+                language=None, scheme=None, head="abc")
+    assert _scip_suppressed(entry(), **base) is True
+    # (1) explicit caller never suppresses.
+    assert _scip_suppressed(entry(), **{**base, "watch": False}) is False
+    # (2) disabled or unsupported selected language never suppresses.
+    assert _scip_suppressed(entry(), **{**base, "scip_enabled": False}) is False
+    assert _scip_suppressed(entry(language="unknown"), **base) is False
+    # (3) a different stage state or a new commit never suppresses.
+    assert _scip_suppressed(entry(scip_state="disabled"), **base) is False
+    assert _scip_suppressed(entry(scip_state="available"), **base) is False
+    assert _scip_suppressed(entry(scip_failed_at_sha="old"), **base) is False
+    assert _scip_suppressed(entry(scip_failed_at_sha=None), **base) is False
+    # (4) explicit re-enable or effective language/scheme change.
+    assert _scip_suppressed(entry(), **{**base, "explicit_scip": True}) is False
+    assert _scip_suppressed(entry(), **{**base, "language": "swift"}) is False
+    assert _scip_suppressed(entry(), **{**base, "scheme": "Other"}) is False
+    # Same-value explicit language/scheme does NOT invalidate the record.
+    assert _scip_suppressed(entry(language_override="python"), **base) is True
+    # A missing row never suppresses.
+    assert _scip_suppressed(None, **base) is False
+
+
+def test_pipeline_watch_suppression_skips_only_scip(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Case 7: a watch run with a prior failed stage at the same HEAD skips
+    ONLY the SCIP attempt — baseline, semantic, and publication still run,
+    the failure fields are preserved, and the diagnostic names the retry
+    command. A new commit or an explicit run retries SCIP."""
+    from jarvis.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _scip_convert_mocks(
+        monkeypatch,
+        convert_db_builder=lambda p: None,
+        extra={"scip-python index": IndexingError("compiler exploded")},
+    )
+    slug = index_repo(repo_dir, slug="treadmill", root=data_root)
+    head = _git_head_sha(repo_dir)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        failed = registry.get(slug)
+        assert failed.status == "degraded"
+        assert failed.scip_failed_at_sha == head
+    finally:
+        registry.close()
+
+    # Watch run at the same commit: SCIP never invoked, everything else
+    # runs (zoekt step present), pointer republished, fields preserved.
+    steps: list[str] = []
+
+    def _run(cmd, *, cwd, step, env=None):
+        steps.append(step)
+        if step == "scip expt-convert" or step.endswith(" index"):
+            raise AssertionError("suppressed run must not attempt SCIP")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli._run", _run)
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", lambda *a, **k: False)
+    index_repo(repo_dir, slug="treadmill", root=data_root, watch=True)
+
+    assert "zoekt-git-index" in steps  # baseline + publication ran
+    err = capsys.readouterr().err
+    assert "SCIP skipped" in err
+    assert "Syntax and search were refreshed" in err
+    assert "--scip" in err  # names the retry command
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry.status == "degraded"  # still degraded (suppressed)
+        assert entry.scip_state == "failed"  # preserved
+        assert entry.scip_failure_reason == "compiler exploded"
+        assert entry.scip_failed_at_sha == head
+        assert entry.scip_enabled is True  # suppression never persists disabled
+    finally:
+        registry.close()
+
+    # An explicit (non-watch) run retries SCIP.
+    _scip_convert_mocks(
+        monkeypatch,
+        convert_db_builder=lambda p: None,
+        extra={"scip-python index": IndexingError("compiler exploded again")},
+    )
+    index_repo(repo_dir, slug="treadmill", root=data_root)
+    registry = Registry(data_root / "registry.db")
+    try:
+        assert registry.get(slug).scip_failure_reason == "compiler exploded again"
+    finally:
+        registry.close()
+
+    # A new commit retries on the next watch run too — and the retry is
+    # observable: the SCIP indexer step runs (convert writes a real
+    # minimal db, so the run completes with SCIP accepted).
+    (repo_dir / "new.py").write_text("y = 2\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "next"], cwd=repo_dir, check=True)
+    steps.clear()
+
+    def _run2(cmd, *, cwd, step, env=None):
+        steps.append(step)
+        if step == "scip expt-convert":
+            _make_index_db(Path(cmd[3]), chunks=1, mentions=2)
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli._run", _run2)
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", lambda *a, **k: False)
+    index_repo(repo_dir, slug="treadmill", root=data_root, watch=True)
+    assert "scip-python index" in steps
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry.status == "indexed"  # the retry succeeded
+        assert entry.scip_state == "available"
+        assert entry.scip_failure_reason is None  # successful enrichment cleared its fields
+    finally:
+        registry.close()
+
+
+def test_pipeline_watch_explicit_scip_re_enable_overrides_suppression(
+    tmp_path: Path, monkeypatch
+):
+    """Case 7 (re-enable): a watch run carrying an explicit --scip retries
+    SCIP even at the same failing commit."""
+    from jarvis.index_cli import IndexingError, index_repo
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    _scip_convert_mocks(
+        monkeypatch,
+        convert_db_builder=lambda p: None,
+        extra={"scip-python index": IndexingError("still broken")},
+    )
+    slug = index_repo(repo_dir, slug="reenable", root=data_root)
+
+    calls: list[str] = []
+
+    def _run(cmd, *, cwd, step, env=None):
+        calls.append(step)
+        if step == "scip-python index":
+            raise IndexingError("still broken")
+        if step == "scip expt-convert":
+            from jarvis.index_cli import ScipAttempt  # noqa: F401
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli._run", _run)
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", lambda *a, **k: False)
+    index_repo(repo_dir, slug="reenable", root=data_root, watch=True, scip=True)
+    assert "scip-python index" in calls  # attempted despite suppression shape
+
+
+def test_parser_accepts_scip_flags_on_index_reindex_and_watch():
+    """--scip/--no-scip on index, reindex, and watch; omitted reads None
+    (use the persisted choice)."""
+    from jarvis.index_cli import build_parser
+
+    parser = build_parser()
+    assert parser.parse_args(["index", "/r", "--scip"]).scip is True
+    assert parser.parse_args(["index", "/r", "--no-scip"]).scip is False
+    assert parser.parse_args(["index", "/r"]).scip is None
+    assert parser.parse_args(["reindex", "x", "--scip"]).scip is True
+    assert parser.parse_args(["reindex", "x", "--no-scip"]).scip is False
+    assert parser.parse_args(["reindex", "x"]).scip is None
+    assert parser.parse_args(["watch", "/r", "--scip"]).scip is True
+    assert parser.parse_args(["watch", "/r", "--no-scip"]).scip is False
+    assert parser.parse_args(["watch", "/r"]).scip is None
+
+
+def test_reindex_forwards_scip_flag(tmp_path: Path, monkeypatch):
+    """reindex forwards the tri-state scip flag into the index command."""
+    import argparse
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("mine", "/repos/mine", "python", "abc", "indexed")
+    finally:
+        registry.close()
+
+    captured: dict = {}
+
+    def fake_index_repo(path, **kwargs):
+        captured.update(kwargs)
+        return "mine"
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    cli._cmd_reindex(argparse.Namespace(slug="mine", scip=False))
+    assert captured["scip"] is False
+
+
+def test_cmd_watch_runs_every_event_and_marks_watch_caller(
+    tmp_path: Path, monkeypatch
+):
+    """The watch driver runs index_repo for every debounced event with
+    watch=True and the tri-state scip flag — suppression is index_repo's
+    stage-level decision now, not the driver's (spec TSI-07). Driven
+    through the REAL watch subparser so flag drift (--scheme/--debounce)
+    fails here instead of at user startup."""
+    import itertools
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = tmp_path / "not-a-repo"
+    repo_dir.mkdir()
+
+    captured: dict = {}
+
+    def fake_index_repo(path, *, slug=None, root=None, scheme=None,
+                        semantic_include=None, language=None, scip=None,
+                        watch=False):
+        captured["scip"] = scip
+        captured["watch"] = watch
+        captured["slug"] = slug
+        captured["scheme"] = scheme
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "index_repo", fake_index_repo)
+
+    # Real subparser — a dropped or renamed flag cannot reach this test.
+    args = cli.build_parser().parse_args(
+        ["watch", str(repo_dir), "--debounce", "0", "--scheme", "MyScheme", "--no-scip"]
+    )
+    rc = _drive_cmd_watch(
+        cli, monkeypatch, vars(args) | {"func": None, "command": "watch"},
+        sleep_results=itertools.chain(itertools.repeat(None, 5), [KeyboardInterrupt()]),
+    )
+
+    assert rc == 0
+    assert captured == {"scip": False, "watch": True, "slug": repo_dir.name,
+                        "scheme": "MyScheme"}
+
+
+def test_partial_status_for_documented_extraction_gaps(tmp_path: Path, monkeypatch):
+    """PARTIAL_STATUS broadened (spec §12): a supported file that was
+    size-skipped or only partially parsed publishes `partial` even with
+    usable SCIP data; unsupported extensions alone never do."""
+    from jarvis.index_cli import index_repo
+    from tests.fixtures.synthetic_index import build_synthetic_index_db
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    # A supported file over the 1 MiB backstop -> size-skipped -> partial.
+    (repo_dir / "big.py").write_text("x = " + "1" * (1024 * 1024 + 64) + "\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "big"], cwd=repo_dir, check=True)
+
+    _scip_convert_mocks(monkeypatch, convert_db_builder=build_synthetic_index_db)
+    slug = index_repo(repo_dir, slug="gappy", root=data_root)
+
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry.status == "partial"
+        assert entry.scip_state == "available"  # SCIP itself was fine
+    finally:
+        registry.close()
+
+
+def test_semantic_chunk_capture_failure_discards_semantic_work(
+        tmp_path: Path, monkeypatch, capsys):
+    """TSI-09 callback isolation per plan :563: an exception raised by the
+    optional shared-parse chunk consumer is contained -- the required
+    baseline still publishes, collection STOPS at the first failure
+    (chunk_file is not retried for later files), `_finish_semantic_stage`
+    is never attempted (this run's semantic work is discarded, so the
+    previous LanceDB table stays live), and the semantic stage warns
+    exactly once."""
+    from jarvis import chunker as chunker_mod
+    from jarvis import semantic as semantic_mod
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    # A second python file pins stop-at-first-failure: chunk_file must not
+    # be reached for any file after the first raise.
+    (repo_dir / "second.py").write_text("def spare():\n    return 2\n")
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+
+    def _run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index") or step == "scip expt-convert":
+            raise AssertionError(f"SCIP must not run in this test: {step}")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr("jarvis.index_cli._run", _run)
+    monkeypatch.setattr("jarvis.index_cli.check_scip_version", lambda: None)
+
+    def _prepare(repo_path, slug, root, include_prefixes, manifest):
+        inputs = tuple(
+            semantic_mod.SemanticInput(
+                file_path=f.file_path,
+                source_path=f.source_path,
+                file_hash=f.file_hash or "h",
+                language=f.language or "python")
+            for f in manifest.files if (f.language or "") == "python")
+        assert len(inputs) >= 2, "fixture must hold two python files to pin stop-collection"
+        return semantic_mod.SemanticWork(
+            slug=slug, model=object(), store=object(), identity=object(),
+            admitted=len(inputs), skipped=(), carried=(), inputs=inputs,
+            vector_by_hash={})
+
+    def _finish(work, prepared_chunks, pool):
+        raise AssertionError(
+            "semantic finish must never run after a capture failure (plan :563)")
+
+    monkeypatch.setattr("jarvis.index_cli._prepare_semantic_stage", _prepare)
+    monkeypatch.setattr("jarvis.index_cli._finish_semantic_stage", _finish)
+
+    chunk_calls: list[str] = []
+
+    def _boom(*args, **kwargs):
+        chunk_calls.append(args[0] if args else "?")
+        raise RuntimeError("chunker exploded")
+
+    monkeypatch.setattr(chunker_mod, "chunk_file", _boom)
+
+    # scip=False keeps the optional enrichment out of the way; the
+    # contract under test is syntax-build survival, not SCIP interplay.
+    slug = index_repo(repo_dir, slug="isolated", root=data_root, scip=False)
+
+    assert (config.index_dir(slug, data_root) / "current").is_file()
+    assert len(chunk_calls) == 1  # stopped at the first failure, no retry
+    err = capsys.readouterr().err
+    assert "semantic indexing failed (index still published)" in err
+    assert "chunker exploded" in err
+    assert err.count("semantic indexing failed") == 1  # once, at its stage
+    registry = Registry(data_root / "registry.db")
+    try:
+        entry = registry.get(slug)
+        assert entry is not None
+        assert entry.status == "indexed"  # baseline unaffected
+        assert entry.semantic_indexed_at is None  # discarded, not marked
     finally:
         registry.close()

@@ -87,31 +87,23 @@ def test_data_dir_ignores_the_old_codeintel_env_var(monkeypatch):
     assert config.data_dir() == config.DEFAULT_DATA_DIR
 
 
-@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", "On"])
-def test_fallback_env_var_accepts_the_strict_truthy_set(monkeypatch, value):
-    """FALL-02: exactly 1/true/yes/on, case-insensitive, turn the global
-    fallback default on (CONTEXT Area 2)."""
-    monkeypatch.setenv("JARVIS_FALLBACK_SEARCH_ONLY", value)
-    assert config.fallback_search_only_from_env() is True
+
+def test_removed_fallback_env_var_has_no_reader():
+    """Superseded by reversible --scip/--no-scip (spec §12): the env tier
+    is gone from config entirely, not merely ignored — no code path may
+    resurrect a global fallback default."""
+    assert not hasattr(config, "fallback_search_only_from_env")
 
 
-def test_fallback_env_var_unset_reads_off(monkeypatch):
-    monkeypatch.delenv("JARVIS_FALLBACK_SEARCH_ONLY", raising=False)
-    assert config.fallback_search_only_from_env() is False
+def test_removed_fallback_env_var_triggers_only_a_note(capsys, monkeypatch):
+    """main() warns once that the removed variable no longer controls
+    anything, naming the replacement — never silently ignoring a variable
+    a shell profile may still export."""
+    from jarvis.index_cli import _warn_removed_env
 
-
-@pytest.mark.parametrize("value", ["maybe", "2", ""])
-def test_fallback_env_var_garbage_reads_off_with_exactly_one_warning(
-    monkeypatch, capsys, value
-):
-    """Loud misconfiguration beats silent: any value outside the strict
-    set reads as off AND prints exactly one stderr line naming the bad
-    value and the accepted set (T-3-02)."""
-    monkeypatch.setenv("JARVIS_FALLBACK_SEARCH_ONLY", value)
-    assert config.fallback_search_only_from_env() is False
+    monkeypatch.setenv("JARVIS_FALLBACK_SEARCH_ONLY", "1")
+    _warn_removed_env()
     err = capsys.readouterr().err
-    lines = [line for line in err.splitlines() if line.strip()]
-    assert len(lines) == 1
-    assert "JARVIS_FALLBACK_SEARCH_ONLY" in lines[0]
-    assert repr(value) in lines[0]
-    assert "1/true/yes/on" in lines[0]
+    assert "no longer read" in err
+    assert "--scip" in err
+
