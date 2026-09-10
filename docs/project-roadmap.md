@@ -296,6 +296,16 @@ reset and is **not** recoverable from `git log`, which now starts at the single 
 the `0.x` version numbers referenced in earlier sections refer to those deleted tags, not to
 anything currently published. `CHANGELOG.md` retains the full pre-reset entries.
 
+### 2026-09-10 — Server-side auto-index
+
+`indexRepo` MCP tool: an agent can now bootstrap a missing index itself
+instead of receiving prose only a human can act on. Spawns `jarvis index` as
+a detached child, reports progress through `getIndexStatus`'s new `indexing`
+block, and terminates the poll loop in every failure mode. Adds a per-slug
+`flock` build lock covering registry and artifact writes for CLI, watch, and
+MCP writers alike, plus `--no-semantic`. Fixes a pre-existing hole where two
+repos with the same basename silently overwrote each other's index.
+
 ---
 
 ## Explicitly Out of Scope (Not Planned)
