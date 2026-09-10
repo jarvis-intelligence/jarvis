@@ -216,33 +216,40 @@ immediately after `indexRepo` returns would see `indexed: false` with nothing
 running, and a naive agent would spawn again in a loop.
 
 A bounded ready-handshake in the tool would paper over this at the cost of
-added latency and a magic timeout that a loaded machine can still exceed. The
-durable alternative needs two properties naive launch-record schemes lack:
-ownership (so no participant deletes or recreates another's state) and real
-exit observation (so a dead child is provably dead).
+added latency and a magic timeout that a loaded machine can still exceed.
 
-#### Token-owned launch protocol
+An earlier draft of this spec used a token plus a "compare-and-set" of the
+child's pid into the record. **That was not atomic** — it was read, check,
+write, with a window in both directions: the parent could read a matching
+token, the child could unlink, and the parent's `os.replace` would then
+recreate a record nobody will ever remove; symmetrically, a child could read a
+matching token and unlink a *newer* launch's record written in between.
 
-`~/.jarvis/index-<slug>.launch`, JSON `{token, started_at, log, pid?}`.
+Rather than serialize those under a second, short-held metadata mutex, the
+design **removes the shared mutable handoff entirely.** No mutex is needed
+because no participant ever reads-then-mutates.
 
-1. Parent generates `token = uuid4().hex`.
-2. Parent writes the record **before `Popen`**, write-temp-then-`os.replace`,
-   matching the publish idiom.
-3. Parent spawns the child with `JARVIS_LAUNCH_TOKEN=<token>` in its env.
-4. Parent compare-and-sets `pid` into the record: re-read; if the file is
-   absent or its token differs, the child has *already* registered and cleaned
-   up — do nothing. Otherwise write it back.
-5. Parent retains the `Popen` in a module-level `dict[str, Popen]` keyed by
+#### Single-writer launch record
+
+`~/.jarvis/index-<slug>.launch`, JSON `{started_at, log}`.
+
+1. The parent writes it **before `Popen`**, write-temp-then-`os.replace` —
+   atomic, and matching the publish idiom.
+2. The parent retains the `Popen` in a module-level `dict[str, Popen]` keyed by
    slug.
-6. The child unlinks the record after acquiring the lock and writing the
-   transitional row — **only if the on-disk token matches its own**.
+3. **That is the entire protocol.** The parent never re-reads or mutates it.
+   The child never reads, writes, or unlinks it.
 
-Writing before `Popen` closes the race where a fast child (tiny repo, warm
-caches) acquires the lock, registers, and attempts cleanup *before* the parent
-has written anything — which would otherwise leave the parent recreating a
-record no one will ever remove. Step 4's compare-and-set is what makes that
-ordering safe, and the token guarantees a stale child can never delete a newer
-launch's record.
+No token, and no `pid` in the file: nothing branches on either, because
+liveness comes from reaping (below). The only writer of a given record is the
+one parent that created it, via a single atomic `os.replace`. The next launch
+overwrites it the same way; `jarvis forget` removes it along with the lock and
+log. There is no interleaving to reason about because there is no second
+writer.
+
+A leftover record is harmless because it is consulted **only** when the lock is
+free, nothing is published, and no registry row explains the state — see §9's
+evaluation order. In every other case a stronger signal wins.
 
 #### Exit observation, not pid liveness
 
@@ -263,11 +270,10 @@ Liveness therefore comes from reaping, in two tiers:
   the launching server is gone.
 
 The age fallback is a heuristic, but a bounded one confined to the
-server-restart case rather than the primary mechanism. `pid` in the record is
-diagnostic only — nothing branches on its liveness.
+server-restart case rather than the primary mechanism.
 
 **Division of labour:** flock is exclusion plus steady-state liveness; the
-token-owned record plus `Popen.poll()` covers the startup window only.
+single-writer record plus `Popen.poll()` covers the startup window only.
 
 New helpers in `config.py`, alongside `swift_cache_dir`:
 `index_lockfile(slug, root)`, `index_launchfile(slug, root)`, and
@@ -318,24 +324,31 @@ writes a transitional `"indexing"` row **carrying the path**.
 | `status: "degraded"` | Baseline published, SCIP stage failed; nav tools capability-gated |
 | `status: "failed"` + `cause` / `recovery` | Run failed and recorded why |
 
-The addition is the loop's terminating condition. Every observation **reaps
-first** (§7), then combines the lock probe with the launch record to yield four
-`indexing.state` values:
+The addition is the loop's terminating condition. Because the launch record is
+never deleted (§7), the state is **not** a lookup keyed on the record's
+presence — it is an ordered evaluation where the first match wins. Every
+observation reaps first:
 
-| Lock | Launch record | Child | `indexing.state` | Agent |
-|---|---|---|---|---|
-| held | — | — | `"running"` | keep polling |
-| free | present | tracked, `poll()` is None | `"starting"` | keep polling |
-| free | present | tracked, `poll()` returned | `"failed-at-startup"` + `exitCode` + `log` | **stop** — died before registering |
-| free | present | untracked, age < `STARTUP_GRACE` | `"starting"` | keep polling |
-| free | present | untracked, age ≥ `STARTUP_GRACE` | `"failed-at-startup"` + `log` | **stop** — launching server is gone |
-| free | absent, but `status == "indexing"` | — | `"abandoned"` + `log` | **stop** — died mid-run without recording a failure |
+| # | Condition | Result | Agent |
+|---|---|---|---|
+| 0 | reap: `poll()` every retained handle | — | — |
+| 1 | lock held | `indexing.state = "running"` | keep polling |
+| 2 | `indexed: true` | terminal success | proceed |
+| 3 | row `status == "failed"` | terminal failure + `cause` / `recovery` | stop |
+| 4 | row `status == "indexing"`, lock free | `"abandoned"` + `log` | **stop** — registered, then died mid-run |
+| 5 | record present, tracked child running | `"starting"` | keep polling |
+| 6 | record present, tracked child exited | `"failed-at-startup"` + `exitCode` + `log` | **stop** |
+| 7 | record present, untracked, age < `STARTUP_GRACE` | `"starting"` | keep polling |
+| 8 | record present, untracked, age ≥ `STARTUP_GRACE` | `"failed-at-startup"` + `log` | **stop** — launching server gone |
+| 9 | otherwise | not indexing | — |
+
+**The order is what makes a leftover record harmless.** Rows 2-4 are stronger
+signals and are checked first, so a record left behind by a completed or
+registered run is never read as `starting`. A record is consulted only in rows
+5-8, which by construction are exactly the pre-registration window.
 
 No branch consults pid liveness; `os.kill(pid, 0)` would report an unreaped
 zombie as alive and wedge the loop in `"starting"` permanently.
-
-A free lock with no launch record and no `"indexing"` row is simply not
-indexing — the pre-existing behavior, unchanged.
 
 Without the terminating rows the poll loop has no bound — the acknowledged
 cost of choosing the non-blocking model (AI-02).
@@ -349,15 +362,14 @@ subprocess.Popen(
     [jarvis_bin, "index", str(resolved), *flags],
     stdout=subprocess.DEVNULL, stderr=log_file,
     stdin=subprocess.DEVNULL, start_new_session=True,
-    env={**os.environ, "JARVIS_DATA_DIR": str(config.data_dir()),
-         "JARVIS_LAUNCH_TOKEN": token},
+    env={**os.environ, "JARVIS_DATA_DIR": str(config.data_dir())},
 )
 ```
 
 Ordering inside the tool is fixed and load-bearing: pre-flight → **write the
-launch record** → `Popen` → compare-and-set `pid` → retain the handle → return
-the payload. Record-before-spawn is what prevents a fast child's cleanup from
-racing the parent's write (§7).
+launch record** → `Popen` → retain the handle → return the payload. There is no
+post-spawn mutation of the record, which is what removes the read-then-write
+race entirely (§7).
 
 Five load-bearing details:
 
@@ -407,12 +419,13 @@ want.
 | Repo moved (old path gone) | Allowed; `upsert` updates `path` |
 | Concurrent `indexRepo` | Live lock → `alreadyRunning: true`, no second spawn |
 | Lock race lost by the child | rc 1, registry and artifacts untouched; the agent's poll correctly observes the *other* live job |
-| Child killed mid-run, after registering | Lock released by kernel, `status` still `"indexing"`, no launch record → `state: "abandoned"` + log; loop terminates |
-| Child dies before registering | Reaped `poll()` yields its exit code, no lock, nothing published → `state: "failed-at-startup"` + `exitCode` + log; loop terminates |
-| Child exited but not yet reaped | Observation reaps before deciding, so the zombie is never read as `"starting"` |
-| Poll issued immediately after spawn | Launch record already on disk (written pre-spawn), child alive → `state: "starting"`; never mistaken for "not indexed" |
-| Child registers before the parent's CAS | Record already unlinked, so the compare-and-set finds nothing and writes nothing — no stale record recreated |
-| MCP server restarted mid-index | Handle lost; record age vs `STARTUP_GRACE` decides `"starting"` or `"failed-at-startup"` |
+| Child killed mid-run, after registering | Lock released by kernel, `status` still `"indexing"` → §9 row 4, `state: "abandoned"` + log; loop terminates |
+| Child dies before registering | Reaped `poll()` yields its exit code → §9 row 6, `state: "failed-at-startup"` + `exitCode` + log |
+| Child exited but not yet reaped | Observation reaps at row 0 before deciding, so the zombie is never read as `"starting"` |
+| Poll issued immediately after spawn | Record already on disk (written pre-spawn) → row 5, `"starting"`; never mistaken for "not indexed" |
+| Child registers before the parent returns | Nothing to race: the parent never touches the record after `Popen`, and the child never touches it at all |
+| Record left over from a completed run | Rows 2-4 match first, so it is never read as `"starting"`; the next launch overwrites it via `os.replace` |
+| MCP server restarted mid-index | Handle lost; record age vs `STARTUP_GRACE` decides rows 7 vs 8 |
 | `semantic=true`, extra absent | Child prints the existing hint; baseline still publishes (`index_cli.py:781-786`) |
 | SCIP toolchain absent | Already degrades; `status: "degraded"` |
 
@@ -443,19 +456,28 @@ test.
   never `poll()` it, then observe — must report `failed-at-startup`, not
   `starting`. This is the zombie regression and it cannot be caught with a
   mocked `Popen`.
-- **Child-ready-before-parent-write**: a child that acquires the lock,
-  registers, and unlinks before the parent's compare-and-set leaves **no**
-  launch record behind, and the next poll reports `running`, not `starting`.
+- **Child-ready-before-parent-returns**: a real child that acquires the lock
+  and registers before the tool returns; the poll must report `running`
+  (row 1), and the record must be exactly what the parent wrote — proving no
+  post-spawn mutation exists to interleave with.
+- **Leftover record does not mask a later state**: with a record on disk from a
+  prior run, assert a published index reports success (row 2), a `"failed"` row
+  reports failure (row 3), and an `"indexing"` row with a free lock reports
+  `abandoned` (row 4) — never `starting`.
 - Untracked record past `STARTUP_GRACE` reports `failed-at-startup`; within it,
   `starting`.
+
+No test pauses a participant "between a token check and a mutation," because
+after this revision no such check-then-mutate sequence exists — that is the
+property under test, asserted by the child-ready case above.
 
 **`tests/test_index_cli.py`**
 - Lock acquired before the transitional `upsert`; loser exits rc 1 with the
   registry unmodified.
 - Lock released on normal exit and on exception.
-- Launch record unlinked by the child at the lock+row handoff **only** when the
-  on-disk token matches `JARVIS_LAUNCH_TOKEN`; a mismatched token leaves a
-  newer launch's record intact.
+- The child never reads, writes, or unlinks the launch record: assert its
+  bytes are unchanged across a full successful index.
+- `jarvis forget` removes the lock, launch record, and log alongside the index.
 - `resolve_slug_for_path`: reuse of an existing custom slug; rejection on
   same-slug/different-existing-path; **acceptance** when the registered path no
   longer exists (the moved-repo case).
