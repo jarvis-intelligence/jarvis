@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.9.0] - 2026-09-10
+
+Minor rather than patch: jarvis gains its tenth MCP tool — an agent can now
+bootstrap a missing index itself instead of receiving prose only a human can
+act on — plus the run-coordination machinery that makes concurrent index
+writers safe.
+
+### Added
+
+- **`indexRepo` MCP tool.** Called with a local git repo `path`, it runs
+  pre-flight checks (jarvis binary resolution, Zoekt availability, git
+  work-tree check, slug resolution against the registry), then spawns
+  `jarvis index` as a detached child and returns immediately with
+  `{slug, state, pid, log}`. Ordering is load-bearing: the launch record is
+  written to disk *before* `Popen` (write-once — tempfile + `os.replace`),
+  so an immediate poll can never see "nothing running"; the child's stdout
+  is `DEVNULL` because one inherited write would corrupt the live JSON-RPC
+  stream; `--slug` is always explicit because registry lookup may return a
+  custom slug the child would never derive from the basename. `semantic`
+  defaults to false — an agent tool call must never implicitly download
+  embedding weights (~2 GB).
+- **`getIndexStatus` reports an `indexing` block with a terminating poll
+  contract.** Observation reaps the child first (an exited-but-unreaped
+  child is a zombie whose pid still answers `os.kill(pid, 0)`, so pid
+  liveness is useless — reaping yields the true exit code and
+  `failed-at-startup`), then lock-held → `running`, then the registry row
+  and launch record are correlated by timestamp (a record newer than the
+  row's `last_indexed` is the *current* attempt, so a stale `failed` row
+  can't end a fresh run's poll and a stale `indexing` row can't mask a dead
+  one), and a record older than a startup grace window with nothing running
+  → `abandoned`. Every observation is terminal or progressing — the loop
+  always exits.
+- **`src/jarvis/jobs.py`** owns that machinery: a per-slug `flock` build
+  lock (fail-fast `LOCK_NB`; the lock file is never unlinked — unlinking
+  lets a waiter flock a detached inode while a third process locks a fresh
+  one), the write-once launch record, and the state derivation. Shared by
+  the CLI writer and the MCP reader; no shared mutable handle exists.
+- **`--no-semantic` / `--semantic` CLI pair and `index_repo(semantic=)`.**
+  A tri-state like `--scip`: omitted means "stage runs when the extra is
+  installed". Deliberately *not* persisted — it is a per-run cost decision,
+  not a repo property.
+- **Agent-actionable `IndexNotFoundError` payloads** now carry
+  `recoveryTool: "indexRepo"` + `recoveryToolArgs` whether or not a registry
+  row exists — the row-less case (a never-indexed repo) is exactly the one
+  an agent hits first, and previously got bare `{"error": ...}`.
+
+### Fixed
+
+- **Two repos with the same basename silently overwrote each other's
+  index.** `/a/app` and `/b/app` both derive slug `app`, and the second
+  `upsert` overwrote the first's registration and artifacts. A derived slug
+  already bound to a *different still-existing* path is now rejected,
+  naming both paths; a moved repo (old path gone) is still allowed and
+  re-paths the row. The guard runs inside the build lock, so the check and
+  the write can't interleave.
+- **Concurrent index runs on one slug raced.** Nothing arbitrated two
+  writers: registry rows last-write-won and artifact writes interleaved.
+  `index_repo` now holds the build lock from before the duplicate guards
+  through the final publish; a loser gets `error: another index is already
+  running for '<slug>'` (rc 1), and watch runs that lose the race retry on
+  the next debounce event.
+- **`jarvis forget` could destroy state under a live writer.** Registry
+  row, graph edges, and artifacts were deleted with no coordination. Forget
+  now takes the build lock around its entire teardown and refuses with rc 1
+  while a writer holds it; the launch record and log are cleaned up as part
+  of forgetting.
+
+See `docs/superpowers/specs/2026-09-10-server-side-auto-index-design.md`
+and `docs/superpowers/plans/2026-09-10-server-side-auto-index.md` for the
+design and implementation plan.
+
 ## [0.8.1] - 2026-09-10
 
 No functional changes — the repository moved from
