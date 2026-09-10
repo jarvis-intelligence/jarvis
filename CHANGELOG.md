@@ -78,6 +78,14 @@ navigation for 17 languages without any external indexer — and the one-way
 
 ### Fixed
 
+- **A semantic chunk-capture failure no longer poisons the publish.** The
+  shared-parse cutover (TSI-09) moved chunk extraction into the capture step
+  that runs before the atomic pointer flip, so a chunker exception on one
+  file previously aborted the entire indexing run. Capture failures are now
+  isolated to the optional semantic stage: the first error is recorded,
+  collection stops, and the semantic finish step is never attempted — so the
+  previous LanceDB table stays live while the new syntax snapshot publishes,
+  with one warning to stderr.
 - **`README.md` now matches the shipped behavior**: requirements describe the
   pip-installed grammars and per-language coverage, the tool table documents
   `source`/`coverage` provenance and the SCIP-required contract, and every
