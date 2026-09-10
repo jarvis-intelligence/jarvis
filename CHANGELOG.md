@@ -1,7 +1,39 @@
 # Changelog
 
-## [0.8.0] - 2026-09-10
+## [0.8.1] - 2026-09-10
 
+No functional changes — the repository moved from
+`jarvis-intelligence/jarvis` to `phuongddx/jarvis` (the old path
+301-redirects; every existing clone, badge, and link keeps working), and the
+distribution identity follows it:
+
+### Changed
+
+- **MCP Registry listing is now `io.github.phuongddx/jarvis`.** The registry
+  derives its namespace from the publishing workflow's GitHub OIDC identity,
+  so a repo transfer forces a namespace change — the workflow could no longer
+  publish under the old org's namespace regardless of what `server.json`
+  declared. The `server.json` name, the README ownership marker, and the
+  `publish-pypi.yml` preflight literal that asserts it move together (they
+  must agree or the next release fails before upload). This release is the
+  first published under the new namespace; the old
+  `io.github.jarvis-intelligence/jarvis` entry is superseded and slated for
+  removal from the registry.
+- **PyPI trusted publishing re-pointed** to owner `phuongddx`, repo `jarvis`
+  (workflow `publish-pypi.yml`, empty environment, unchanged). The PyPI
+  package name `jarvis-mcp`, install commands, and all download URLs are
+  unaffected.
+
+### Fixed
+
+- **Living documentation and release tooling now reference the new repo
+  path** — README badge/clone/architecture-image URLs, the release runbook's
+  `gh --repo` commands and marker check, and the three docs files naming the
+  registry id. `jarvis-intelligence/jarvis-index` references are untouched by
+  design: that repo stays in the org and remains the distribution target for
+  `setup.sh` downloads, binary releases, and the plugin.
+
+## [0.8.0] - 2026-09-10
 Minor rather than patch: jarvis gains a build-free syntax baseline — every
 `jarvis index`/`reindex`/`watch` run now publishes declaration-level
 navigation for 17 languages without any external indexer — and the one-way
