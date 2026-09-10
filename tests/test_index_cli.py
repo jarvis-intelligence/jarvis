@@ -973,7 +973,7 @@ def test_reindex_forwards_stored_scheme_override(tmp_path: Path, monkeypatch):
     captured: dict = {}
 
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None, scip=None, watch=False):
+                        language=None, scip=None, semantic=True, watch=False):
         captured["path"] = path
         captured["slug"] = slug
         captured["scheme"] = scheme
@@ -1232,7 +1232,7 @@ def test_semantic_include_flag_reaches_index_repo_as_a_tuple(tmp_path, monkeypat
 
     def _fake_index_repo(repo_path, *, slug=None, root=None, scheme=None,
                          semantic_include=None, language=None, scip=None,
-                         watch=False):
+                         semantic=True, watch=False):
         captured["semantic_include"] = semantic_include
         return "myrepo"
 
@@ -1499,7 +1499,7 @@ def test_reindex_forwards_stored_language_override(tmp_path: Path, monkeypatch):
 
     captured: dict = {}
     def fake_index_repo(path, *, slug=None, root=None, scheme=None, semantic_include=None,
-                        language=None, scip=None, watch=False):
+                        language=None, scip=None, semantic=True, watch=False):
         captured["language"] = language
         return slug
 
@@ -3958,7 +3958,7 @@ def test_cmd_watch_runs_every_event_and_marks_watch_caller(
 
     def fake_index_repo(path, *, slug=None, root=None, scheme=None,
                         semantic_include=None, language=None, scip=None,
-                        watch=False):
+                        semantic=True, watch=False):
         captured["scip"] = scip
         captured["watch"] = watch
         captured["slug"] = slug
@@ -4085,3 +4085,49 @@ def test_semantic_chunk_capture_failure_discards_semantic_work(
         assert entry.semantic_indexed_at is None  # discarded, not marked
     finally:
         registry.close()
+
+
+def test_index_repo_semantic_false_skips_the_stage(tmp_path, monkeypatch):
+    """An agent-triggered index must never implicitly download embedding
+    weights. `semantic=False` skips prepare entirely -- not merely the
+    install offer, which is TTY-gated and therefore already unreachable."""
+    from jarvis import index_cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    calls: list[str] = []
+    monkeypatch.setattr(
+        index_cli, "_prepare_semantic_stage",
+        lambda *a, **k: calls.append("prepared") or None,
+    )
+    monkeypatch.setattr(index_cli, "check_scip_version", lambda: None)
+
+    def _run(cmd, *, cwd, step, env=None):
+        # Degrade path (narrowed FALL-04): a simulated SCIP failure keeps
+        # the fake run cheap while the rest of the pipeline still publishes.
+        if step.endswith(" index"):
+            from jarvis.index_cli import IndexingError
+            raise IndexingError(f"{step} failed (simulated real failure):\nexit 1")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr(index_cli, "_run", _run)
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+
+    index_cli.index_repo(repo_dir, semantic=False)
+    assert calls == []
+
+    index_cli.index_repo(repo_dir, semantic=True)
+    assert calls == ["prepared"]
+
+
+def test_no_semantic_flag_parses_to_false():
+    from jarvis import index_cli
+
+    parser = index_cli.build_parser()
+    assert parser.parse_args(["index", "/r", "--no-semantic"]).semantic is False
+    assert parser.parse_args(["index", "/r", "--semantic"]).semantic is True
+    assert parser.parse_args(["index", "/r"]).semantic is None
+    assert parser.parse_args(["reindex", "s", "--no-semantic"]).semantic is False
+    assert parser.parse_args(["watch", "/r", "--no-semantic"]).semantic is False

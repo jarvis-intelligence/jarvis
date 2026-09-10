@@ -1035,6 +1035,7 @@ def index_repo(
     repo_path: Path, *, slug: str | None = None, root: Path | None = None,
     scheme: str | None = None, semantic_include: tuple[str, ...] | None = None,
     language: str | None = None, scip: bool | None = None,
+    semantic: bool = True,
     watch: bool = False,
 ) -> str:
     """Runs the staged pipeline for one repo (spec TSI-04 §5 order) and
@@ -1081,6 +1082,10 @@ def index_repo(
     a new repo"; an explicit value updates it (spec TSI-07). `watch=True`
     marks a debounced watch caller so the suppression predicate may skip
     only the SCIP stage; explicit index/reindex calls always retry.
+
+    `semantic=False` skips the optional semantic stage even when the extra is
+    installed -- the MCP `indexRepo` path passes it so an agent tool call can
+    never implicitly download embedding weights.
     """
     from jarvis.syntax import ParserPool
 
@@ -1185,8 +1190,10 @@ def index_repo(
             prepared_chunks: dict = {}
             chunk_capture_error: Exception | None = None
             try:
-                sem_work = _prepare_semantic_stage(
-                    repo_path, slug, root, semantic_include, manifest)
+                sem_work = (
+                    _prepare_semantic_stage(repo_path, slug, root, semantic_include, manifest)
+                    if semantic else None
+                )
                 parse_for = frozenset()
                 if sem_work is not None:
                     from jarvis import semantic as _semantic
@@ -1483,6 +1490,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
             semantic_include=tuple(raw_include) if raw_include is not None else None,
             language=getattr(args, "language", None),
             scip=getattr(args, "scip", None),
+            semantic=getattr(args, "semantic", None) is not False,
         )
     except (UnsupportedLanguageError, NotAGitRepositoryError, IndexingError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1662,6 +1670,7 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
         semantic_include=list(repo.semantic_include),
         language=repo.language_override,
         scip=getattr(args, "scip", None),
+        semantic=getattr(args, "semantic", None) is not False,
     ))
 
 
@@ -1801,7 +1810,8 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             # Debounce semantics are unchanged; watch.py stays pure.
             index_repo(
                 repo_path, slug=slug, scheme=args.scheme, language=args.language,
-                scip=getattr(args, "scip", None), watch=True,
+                scip=getattr(args, "scip", None),
+                semantic=getattr(args, "semantic", None) is not False, watch=True,
             )
             print(f"[watch] {slug} reindexed")
         except Exception as exc:
@@ -1874,6 +1884,23 @@ def _add_scip_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_semantic_flag(parser: argparse.ArgumentParser) -> None:
+    """The mutually exclusive `--semantic` / `--no-semantic` pair. One
+    tri-state dest, mirroring `_add_scip_flag`: omitted means "leave the
+    default in force" (the stage runs when the extra is installed), explicit
+    means the caller decided. Unlike --scip this is NOT persisted -- it is a
+    per-run cost decision, not a property of the repo."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--semantic", dest="semantic", action="store_true", default=None,
+        help="build the semantic (vector) index when the `semantic` extra is installed",
+    )
+    group.add_argument(
+        "--no-semantic", dest="semantic", action="store_false", default=None,
+        help="skip the semantic stage even when the `semantic` extra is installed",
+    )
+
+
 def _reject_removed_options(argv: list[str]) -> None:
     for arg in argv:
         if arg.split("=", 1)[0] in _REMOVED_OPTIONS:
@@ -1922,6 +1949,7 @@ def build_parser() -> argparse.ArgumentParser:
              "persisted and reused by reindex/watch)",
     )
     _add_scip_flag(index_parser)
+    _add_semantic_flag(index_parser)
     index_parser.set_defaults(func=_cmd_index)
     # SEMA-02 structural gate: only `jarvis index` offers — reindex's
     # synthetic Namespace, watch's index_repo call, and MCP paths all
@@ -1938,6 +1966,7 @@ def build_parser() -> argparse.ArgumentParser:
     reindex_parser = subparsers.add_parser("reindex", help="re-run indexing for a registered repo")
     reindex_parser.add_argument("slug")
     _add_scip_flag(reindex_parser)
+    _add_semantic_flag(reindex_parser)
     reindex_parser.set_defaults(func=_cmd_reindex)
 
     forget_parser = subparsers.add_parser("forget", help="remove a repo's registration and published index")
@@ -1959,6 +1988,7 @@ def build_parser() -> argparse.ArgumentParser:
              "persisted and reused by reindex/watch)",
     )
     _add_scip_flag(watch_parser)
+    _add_semantic_flag(watch_parser)
     watch_parser.set_defaults(func=_cmd_watch)
 
     return parser
