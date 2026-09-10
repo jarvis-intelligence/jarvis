@@ -4,7 +4,7 @@
 
 **Goal:** Let an AI agent bootstrap a missing jarvis index itself, by adding an `indexRepo` MCP tool that spawns `jarvis index` as a detached child and a poll contract that always terminates.
 
-**Architecture:** A new `src/jarvis/jobs.py` owns everything about an in-flight index run — a per-slug `flock` build lock, a single-writer launch record, and one pure state-derivation function. `index_cli.py` (the writer) acquires the lock; `server.py` (the reader) writes the launch record, spawns the child, retains the handle, and reports state. No shared mutable handoff exists between parent and child, so no metadata mutex is needed.
+**Architecture:** A new `src/jarvis/jobs.py` owns everything about an in-flight index run — a per-slug `flock` build lock, a write-once launch record, and one pure state-derivation function. `index_cli.py` (the writer) acquires the lock; `server.py` (the reader) writes the launch record, spawns the child, retains the handle, and reports state. Records are written once and never mutated, so there is no read-then-write handoff anywhere and no metadata mutex is needed.
 
 **Tech Stack:** Python 3.12+, stdlib `fcntl` / `subprocess` / `json` / `sqlite3`, FastMCP (`mcp<2.0.0`), pytest.
 
@@ -57,8 +57,8 @@
 Create `tests/test_jobs.py`:
 
 ```python
-"""Tests for jobs.py: the per-slug build lock (flock), the single-writer
-launch record, and the ordered job-state derivation of the spec's section 9."""
+"""Tests for jobs.py: the per-slug build lock (flock), the write-once launch
+record, and the ordered job-state derivation of the spec's section 9."""
 
 from __future__ import annotations
 
@@ -66,6 +66,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -148,12 +149,39 @@ def test_launch_record_round_trips(tmp_path, monkeypatch):
 
 
 def test_launch_record_has_no_pid_or_token(tmp_path, monkeypatch):
-    """The record is single-writer and immutable: exactly two fields, so
-    there is nothing for a second party to check-then-mutate."""
+    """The record is write-once and immutable: exactly two fields, so there
+    is nothing for any party to check-then-mutate."""
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     jobs.write_launch_record("app", Path("/tmp/app.log"))
     raw = json.loads(config.index_launchfile("app").read_text(encoding="utf-8"))
     assert set(raw) == {"started_at", "log"}
+
+
+def test_concurrent_launch_record_writes_both_succeed(tmp_path, monkeypatch):
+    """Two indexRepo calls for the same slug genuinely reach this before
+    either child takes the build lock. A shared temp name lets one rename
+    the other's temp out from under it; the loser's os.replace then raises."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    errors: list[BaseException] = []
+    start = threading.Barrier(8)
+
+    def _writer(n: int) -> None:
+        try:
+            start.wait()
+            for _ in range(25):
+                jobs.write_launch_record("app", Path(f"/tmp/{n}.log"))
+        except BaseException as exc:  # noqa: BLE001 - recorded and re-asserted
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_writer, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert jobs.read_launch_record("app") is not None
+    assert list(config.index_launchfile("app").parent.glob("*.tmp")) == []
 
 
 def test_launch_record_overwrite_is_atomic_replace(tmp_path, monkeypatch):
@@ -207,14 +235,65 @@ def test_job_state_none_when_published(tmp_path, monkeypatch):
 
 
 def test_job_state_none_when_failed(tmp_path, monkeypatch):
+    """A stale record cannot resurrect a settled failure: the row is newer."""
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     jobs.write_launch_record("app", Path("/tmp/app.log"))
-    assert jobs.job_state("app", indexed=False, registry_status="failed") is None
+    later = datetime.now(UTC) + timedelta(seconds=5)
+    assert jobs.job_state("app", indexed=False, registry_status="failed",
+                          registry_updated_at=later) is None
 
 
 def test_job_state_abandoned_when_row_indexing_and_lock_free(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     state = jobs.job_state("app", indexed=False, registry_status="indexing")
+    assert state.state == "abandoned"
+
+
+def test_job_state_retry_after_a_failed_run_reports_starting(tmp_path, monkeypatch):
+    """The regression that silently breaks retries: a repo whose previous run
+    failed has a `failed` row, and a freshly spawned child has not registered
+    yet. Reading the stale row first reports 'nothing in flight', so the agent
+    spawns again forever."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    earlier = datetime.now(UTC) - timedelta(hours=1)
+    jobs.write_launch_record("app", Path("/tmp/app.log"))
+    state = jobs.job_state("app", indexed=False, registry_status="failed",
+                           registry_updated_at=earlier,
+                           child=_FakeChild(4242, None))
+    assert (state.state, state.pid) == ("starting", 4242)
+
+
+def test_job_state_retry_after_an_abandoned_run_reports_starting(tmp_path, monkeypatch):
+    """Same defect, other stale value: an `indexing` row left by an earlier
+    killed run must not terminate a new attempt's poll loop as 'abandoned'."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    earlier = datetime.now(UTC) - timedelta(hours=1)
+    jobs.write_launch_record("app", Path("/tmp/app.log"))
+    state = jobs.job_state("app", indexed=False, registry_status="indexing",
+                           registry_updated_at=earlier,
+                           child=_FakeChild(4242, None))
+    assert state.state == "starting"
+
+
+def test_job_state_reindex_of_a_published_repo_reports_starting(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    earlier = datetime.now(UTC) - timedelta(hours=1)
+    jobs.write_launch_record("app", Path("/tmp/app.log"))
+    state = jobs.job_state("app", indexed=True, registry_status="indexed",
+                           registry_updated_at=earlier,
+                           child=_FakeChild(4242, None))
+    assert state.state == "starting"
+
+
+def test_job_state_abandoned_once_the_child_registered_then_died(tmp_path, monkeypatch):
+    """After the child registers, `upsert` stamps `last_indexed` later than
+    the record, so the record stops being current and the row governs -- which
+    is exactly when `abandoned` is the right answer."""
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    jobs.write_launch_record("app", Path("/tmp/app.log"))
+    registered_at = datetime.now(UTC) + timedelta(seconds=5)
+    state = jobs.job_state("app", indexed=False, registry_status="indexing",
+                           registry_updated_at=registered_at)
     assert state.state == "abandoned"
 
 
@@ -252,17 +331,23 @@ def test_job_state_none_when_nothing_in_flight(tmp_path, monkeypatch):
     assert jobs.job_state("app", indexed=False, registry_status=None) is None
 
 
-def test_clear_job_files_removes_all_three(tmp_path, monkeypatch):
+def test_clear_job_files_preserves_the_lock_inode(tmp_path, monkeypatch):
+    """Unlinking a lock another process may have opened but not yet flocked
+    lets the next writer lock a fresh inode instead -- two writers, one repo.
+    The empty file is a trivial footprint; a broken mutex is not."""
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     jobs.write_launch_record("app", Path("/tmp/app.log"))
     config.index_log("app").parent.mkdir(parents=True, exist_ok=True)
     config.index_log("app").write_text("x", encoding="utf-8")
     with jobs.build_lock("app"):
         pass
+    inode = config.index_lockfile("app").stat().st_ino
+
     jobs.clear_job_files("app")
+
     assert not config.index_launchfile("app").exists()
     assert not config.index_log("app").exists()
-    assert not config.index_lockfile("app").exists()
+    assert config.index_lockfile("app").stat().st_ino == inode
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -315,10 +400,11 @@ Two coordination primitives, with a strict division of labour:
   no reclamation race.
 * **Launch record** — covers only the window between `Popen` returning and
   the child acquiring the lock. Written once by the spawning process before
-  the spawn, never mutated, never read or removed by the child. That
-  single-writer discipline is deliberate: an earlier design mutated the
+  the spawn, never mutated, never read or removed by the child. Writing each
+  record exactly once is the deliberate part: an earlier design mutated the
   record from both sides and had an unavoidable check-then-write race in
-  both directions.
+  both directions. Several parents may write records for the same slug
+  concurrently, so each write publishes through its own unique temp file.
 
 Liveness of a spawned-but-unregistered child comes from **reaping**, never
 from `os.kill(pid, 0)`: `start_new_session=True` does not double-fork, so an
@@ -331,6 +417,7 @@ import contextlib
 import fcntl
 import json
 import os
+import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -450,8 +537,17 @@ def write_launch_record(slug: str, log_path: Path, *,
 
     Write-temp-then-`os.replace`, matching the snapshot publish idiom: a
     reader sees the old record or the new one, never a torn one. Called
-    exactly once per launch, BEFORE `Popen`, so a fast child can never
-    observe a state where it has registered but no record exists.
+    BEFORE `Popen`, so a fast child can never observe a state where it has
+    registered but no record exists.
+
+    Each record is written once and never mutated -- that, not writer count,
+    is the property that removes the check-then-write race. Concurrent
+    `indexRepo` calls for the same slug genuinely can both land here before
+    either child takes the build lock, so the temp name MUST be unique per
+    write: a shared `<slug>.launch.tmp` lets one caller rename the other's
+    temp file out from under it and the loser's `os.replace` then raises
+    FileNotFoundError. With unique temps both renames succeed and the later
+    one wins, which is correct -- either record describes a live attempt.
     """
     path = config.index_launchfile(slug, root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -459,9 +555,16 @@ def write_launch_record(slug: str, log_path: Path, *,
         "started_at": datetime.now(UTC).isoformat(),
         "log": str(log_path),
     })
-    tmp = path.parent / f"{path.name}.tmp"
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp",
+                                    dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 def read_launch_record(slug: str, *,
@@ -483,6 +586,7 @@ def read_launch_record(slug: str, *,
 
 def job_state(
     slug: str, *, indexed: bool, registry_status: str | None,
+    registry_updated_at: datetime | None = None,
     child: _Reapable | None = None, root: Path | None = None,
     now: datetime | None = None,
 ) -> JobState | None:
@@ -490,40 +594,61 @@ def job_state(
     "no index run is in flight" -- the caller's other fields already say
     whether one succeeded or failed.
 
-    The ORDER is what makes a leftover launch record harmless: the record is
-    never deleted, so it is consulted only after the stronger published /
-    failed / registered signals have been ruled out. Callers must have
-    already reaped `child` -- or pass it here, since this calls `poll()`.
+    Attempt correlation is what the ordering turns on. A launch record newer
+    than the registry row describes the CURRENT attempt, and must be believed
+    over the row: otherwise a repo whose previous run failed reports `None`
+    (nothing in flight) while a freshly spawned child is still starting, and
+    the agent spawns again forever. Symmetrically, a row left at `indexing`
+    by an earlier abandoned run must not report `abandoned` for a new
+    attempt.
+
+    Once the child registers, `upsert` stamps `last_indexed` later than the
+    record, so the record stops being current and the row's own state governs
+    again -- which is exactly when `abandoned` becomes the right answer.
+
+    Callers must pass `child` rather than pre-reaping it; this calls `poll()`.
     """
     probe = lock_state(slug, root=root)
     if probe.held:  # row 1
         return JobState(state="running", pid=probe.pid, exit_code=None,
                         log=str(config.index_log(slug, root)))
-    if indexed or registry_status == "failed":  # rows 2, 3
-        return None
     record = read_launch_record(slug, root=root)
     log = record.log if record is not None else str(config.index_log(slug, root))
+    current_attempt = record is not None and (
+        registry_updated_at is None or record.started_at > registry_updated_at
+    )
+    if current_attempt:  # rows 5-8, promoted above the stale row state
+        if child is not None:
+            code = child.poll()
+            state = "starting" if code is None else "failed-at-startup"
+            return JobState(state=state, pid=child.pid, exit_code=code, log=log)
+        age = ((now or datetime.now(UTC)) - record.started_at).total_seconds()
+        if age < STARTUP_GRACE_SECONDS:
+            return JobState(state="starting", pid=None, exit_code=None, log=log)
+        return JobState(state="failed-at-startup", pid=None,
+                        exit_code=None, log=log)
+    if indexed or registry_status == "failed":  # rows 2, 3
+        return None
     if registry_status == "indexing":  # row 4
         return JobState(state="abandoned", pid=None, exit_code=None, log=log)
-    if record is None:  # row 9
-        return None
-    if child is not None:  # rows 5, 6
-        code = child.poll()
-        state = "starting" if code is None else "failed-at-startup"
-        return JobState(state=state, pid=child.pid, exit_code=code, log=log)
-    age = ((now or datetime.now(UTC)) - record.started_at).total_seconds()
-    if age < STARTUP_GRACE_SECONDS:  # row 7
-        return JobState(state="starting", pid=None, exit_code=None, log=log)
-    return JobState(state="failed-at-startup", pid=None,  # row 8
-                    exit_code=None, log=log)
+    return None  # row 9
 
 
 def clear_job_files(slug: str, *, root: Path | None = None) -> None:
-    """Remove every job artifact for a slug (`jarvis forget`). Best-effort:
-    forgetting a repo must not fail over a cleanup step."""
+    """Remove a slug's launch record and index log (`jarvis forget`).
+
+    Deliberately does NOT unlink the build lock. Removing a lock file another
+    process may have already opened but not yet flocked lets the next writer
+    create a fresh inode and lock that instead, so two writers would each
+    believe they hold the lock for the same repo. The empty lock file is a
+    trivial footprint; a broken mutex is not. Callers that are about to
+    destroy a repo's data must HOLD the lock while doing so -- see
+    `_cmd_forget`.
+
+    Best-effort: forgetting a repo must not fail over a cleanup step.
+    """
     for path in (config.index_launchfile(slug, root),
-                 config.index_log(slug, root),
-                 config.index_lockfile(slug, root)):
+                 config.index_log(slug, root)):
         with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
 ```
@@ -1055,22 +1180,29 @@ git commit -m "fix(index): reject a slug already bound to another live path"
 
 ---
 
-### Task 5: `jarvis forget` clears job files
+### Task 5: `jarvis forget` takes the lock, then clears job files
 
 **Files:**
-- Modify: `src/jarvis/index_cli.py:1756-1764` (`_cmd_forget`)
+- Modify: `src/jarvis/index_cli.py:1725-1765` (`_cmd_forget`)
 - Test: `tests/test_index_cli.py`
 
 **Interfaces:**
-- Consumes: `jobs.clear_job_files` (Task 1).
+- Consumes: `jobs.build_lock`, `jobs.BuildLockHeld`, `jobs.clear_job_files` (Task 1).
 - Produces: nothing new.
 
-- [ ] **Step 1: Write the failing test**
+**Why the lock:** `forget` deletes the published index, the Zoekt shards, and
+the LanceDB table. Doing that while a writer is mid-run corrupts the run and
+can resurrect artifacts the forget just removed. `clear_job_files`
+deliberately leaves the lock file itself in place (Task 1), so `forget` must
+*hold* the lock rather than delete it.
+
+- [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_forget_removes_job_files(tmp_path, monkeypatch, capsys):
+def test_forget_removes_job_files(tmp_path, monkeypatch):
     """`jarvis forget` removes everything jarvis stored for a repo (D-06) --
-    the lock, launch record, and index log included, so no footprint is left."""
+    launch record and index log included. The lock FILE survives on purpose:
+    unlinking it would let a waiter lock a detached inode."""
     from jarvis import index_cli, jobs
     from jarvis.registry import Registry
 
@@ -1085,8 +1217,6 @@ def test_forget_removes_job_files(tmp_path, monkeypatch, capsys):
 
     jobs.write_launch_record("app", config.index_log("app"))
     config.index_log("app").write_text("stderr", encoding="utf-8")
-    with jobs.build_lock("app"):
-        pass
 
     parser = index_cli._build_parser()
     args = parser.parse_args(["forget", "app"])
@@ -1094,24 +1224,79 @@ def test_forget_removes_job_files(tmp_path, monkeypatch, capsys):
 
     assert not config.index_launchfile("app").exists()
     assert not config.index_log("app").exists()
-    assert not config.index_lockfile("app").exists()
+
+
+def test_forget_refuses_while_a_writer_holds_the_lock(tmp_path, monkeypatch, capsys):
+    """Destroying a repo's index out from under a live writer is the failure
+    this guards. Tested against a HELD lock, not merely cleanup after
+    release."""
+    from jarvis import index_cli, jobs
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("app", str(repo), "python", None, "indexed")
+    finally:
+        registry.close()
+    jobs.write_launch_record("app", config.index_log("app"))
+
+    parser = index_cli._build_parser()
+    args = parser.parse_args(["forget", "app"])
+    with jobs.build_lock("app"):
+        assert args.func(args) == 1
+
+    # Nothing was destroyed, and the row still exists.
+    assert config.index_launchfile("app").exists()
+    assert "already running" in capsys.readouterr().err
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        assert registry.get("app") is not None
+    finally:
+        registry.close()
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run them to verify they fail**
 
-Run: `uv run pytest tests/test_index_cli.py -q -k forget_removes_job_files`
-Expected: FAIL — `assert not True` on the launch record
+Run: `uv run pytest tests/test_index_cli.py -q -k "forget_removes_job_files or forget_refuses"`
+Expected: FAIL — the launch record still exists after forget, and forget returns 0 while the lock is held
 
-- [ ] **Step 3: Clear the files**
+- [ ] **Step 3: Wrap the destructive half in the lock**
 
-In `_cmd_forget`, immediately after the existing `shutil.rmtree(config.swift_cache_dir(slug), ignore_errors=True)` line and before `print(f"forgot {slug}")`:
+`_cmd_forget` currently resolves the slug, looks up the row, and then deletes
+artifacts. Leave the resolution and lookup where they are; wrap everything
+from the first destructive call (`shutil.rmtree(index_dir)`) through the final
+`print` in the lock:
 
 ```python
-    # D-06 continued: the build lock, launch record, and index log are jarvis
-    # state too. Best-effort, like the sweeps above -- a cleanup failure must
-    # not fail a forget.
-    jobs.clear_job_files(slug)
+    try:
+        with jobs.build_lock(slug):
+            if index_dir.exists():
+                shutil.rmtree(index_dir)
+            _remove_zoekt_shards(slug)
+            shutil.rmtree(config.lancedb_dir() / f"{slug}.lance", ignore_errors=True)
+            # D-06: forgetting a repo removes everything jarvis stored for it.
+            # The scip-swift cache legitimately may not exist (never-Swift
+            # repo, or the binary never ran), hence ignore_errors like the
+            # lancedb sweep above.
+            shutil.rmtree(config.swift_cache_dir(slug), ignore_errors=True)
+            # D-06 continued: the launch record and index log are jarvis state
+            # too. Best-effort, like the sweeps above -- a cleanup failure must
+            # not fail a forget. The lock file itself is preserved: see
+            # jobs.clear_job_files.
+            jobs.clear_job_files(slug)
+    except jobs.BuildLockHeld as exc:
+        # Deleting a repo's index while a writer is mid-run corrupts that run
+        # and can leave artifacts the forget already removed.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 ```
+
+Keep the existing registry deletion where it already is relative to these
+calls — only the artifact deletion and the new `clear_job_files` move inside
+the lock. `print(f"forgot {slug}")` and `return 0` stay outside it.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -1184,7 +1369,9 @@ def test_index_repo_tool_spawns_and_reports_starting(tmp_path, monkeypatch):
     assert result["repo"] == "app"
     assert result["state"] == "starting"
     assert result["pid"] == 999
-    assert captured["argv"][:3] == ["/fake/jarvis", "index", str(repo.resolve())]
+    assert captured["argv"][:5] == [
+        "/fake/jarvis", "index", str(repo.resolve()), "--slug", "app",
+    ]
     assert "--no-semantic" in captured["argv"]
     # The record exists by the time the tool returns, so an immediate poll
     # can never see "nothing running".
@@ -1245,6 +1432,73 @@ def test_index_repo_tool_semantic_true_omits_the_flag(tmp_path, monkeypatch):
 
     assert "--no-semantic" not in captured["argv"]
     assert "--no-scip" in captured["argv"]
+
+
+def test_index_repo_tool_passes_a_registered_custom_slug(tmp_path, monkeypatch):
+    """A repo registered under an explicit --slug resolves by path, not by
+    basename. Without passing --slug through, the child derives the basename,
+    trips `_reject_duplicate_slug_for_path`, and dies -- while this tool has
+    already told the caller to poll the custom slug."""
+    from jarvis import config, server
+    from jarvis.registry import Registry
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert("custom-name", str(repo), "python", None, "indexed")
+    finally:
+        registry.close()
+
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(server.index_cli_module(), "ensure_git_repo", lambda p: None)
+
+    captured: dict = {}
+
+    class _Fake:
+        pid = 7
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(server.subprocess, "Popen",
+                        lambda argv, **kw: (captured.update(argv=argv), _Fake())[1])
+    result = server.index_repo_tool(path=str(repo))
+
+    assert result["repo"] == "custom-name"
+    assert result["reindex"] is True
+    assert captured["argv"][3:5] == ["--slug", "custom-name"]
+
+
+def test_index_repo_tool_does_not_spawn_a_second_child(tmp_path, monkeypatch):
+    """The lock probe leaves a window: a child spawned moments ago may not
+    hold the lock yet. Spawning again would drop the first handle, leaking a
+    zombie that can no longer be reaped."""
+    from jarvis import server
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo = tmp_path / "app"
+    repo.mkdir()
+    monkeypatch.setattr(server, "_jarvis_bin", lambda: "/fake/jarvis")
+    monkeypatch.setattr(server.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(server.index_cli_module(), "ensure_git_repo", lambda p: None)
+
+    class _Live:
+        pid = 11
+        def poll(self):
+            return None
+
+    monkeypatch.setitem(server._launched, "app", _Live())
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn a duplicate")
+
+    monkeypatch.setattr(server.subprocess, "Popen", _no_spawn)
+    result = server.index_repo_tool(path=str(repo))
+
+    assert result["alreadyRunning"] is True
+    assert result["pid"] == 11
 
 
 def test_index_repo_tool_preflight_missing_zoekt(tmp_path, monkeypatch):
@@ -1455,6 +1709,15 @@ def _spawn_index(path: str, *, semantic: bool,
         return {"repo": slug, "path": str(resolved), "status": "indexing",
                 "state": "running", "pid": probe.pid,
                 "log": str(config.index_log(slug)), "alreadyRunning": True}
+    existing_child = _launched.get(slug)
+    if existing_child is not None and existing_child.poll() is None:
+        # The lock probe alone leaves a window: a child spawned moments ago
+        # may not have taken the lock yet, and spawning a second one would
+        # both lose the first handle (leaking a zombie we can no longer reap)
+        # and guarantee one child exits rc 1 on the lock.
+        return {"repo": slug, "path": str(resolved), "status": "indexing",
+                "state": "starting", "pid": existing_child.pid,
+                "log": str(config.index_log(slug)), "alreadyRunning": True}
 
     flags: list[str] = []
     if not semantic:
@@ -1475,7 +1738,13 @@ def _spawn_index(path: str, *, semantic: bool,
     log_file = open(log_path, "ab")
     try:
         child = subprocess.Popen(
-            [jarvis_bin, "index", str(resolved), *flags],
+            # `--slug` is explicit and NOT optional: `resolve_slug_for_path`
+            # may have returned a slug the child would never derive on its own
+            # (a repo registered under a custom --slug resolves by path, not
+            # by basename). Without it the child derives the basename, hits
+            # `_reject_duplicate_slug_for_path`, and dies -- while this tool
+            # has already reported the custom slug to the caller.
+            [jarvis_bin, "index", str(resolved), "--slug", slug, *flags],
             stdout=subprocess.DEVNULL,
             stderr=log_file,
             stdin=subprocess.DEVNULL,
@@ -1651,8 +1920,14 @@ def _indexing_fields(repo: str, indexed: bool) -> dict[str, Any]:
     Never raises: a status response must survive a bug in here.
     """
     try:
+        entry = _registry_entry(repo)
         state = jobs.job_state(
-            repo, indexed=indexed, registry_status=_registry_status(repo),
+            repo, indexed=indexed,
+            registry_status=entry.status if entry is not None else None,
+            # Attempt correlation: a launch record newer than the row belongs
+            # to the CURRENT attempt, so stale `failed` / `indexing` state
+            # from a previous run cannot terminate this poll loop.
+            registry_updated_at=entry.last_indexed if entry is not None else None,
             child=_launched.get(repo),
         )
     except Exception:  # Broad on purpose, same contract as the helpers above.
@@ -1838,7 +2113,7 @@ Do **not** touch the `<!-- mcp-name: io.github.jarvis-intelligence/jarvis -->` m
 
 - [ ] **Step 2: Update `docs/codebase-summary.md`**
 
-Add `jobs.py` to the module index, described as: *in-flight index-run coordination — per-slug `flock` build lock, single-writer launch record, ordered job-state derivation; shared by the CLI writer and the MCP reader.*
+Add `jobs.py` to the module index, described as: *in-flight index-run coordination — per-slug `flock` build lock, write-once launch record, ordered job-state derivation; shared by the CLI writer and the MCP reader.*
 
 - [ ] **Step 3: Append a roadmap entry**
 
