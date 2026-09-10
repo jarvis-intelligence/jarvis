@@ -2200,7 +2200,7 @@ Document the two new flags in the configuration section:
 so an agent tool call never implicitly downloads embedding weights.
 ```
 
-Do **not** touch the `<!-- mcp-name: io.github.jarvis-intelligence/jarvis -->` marker on line 3 — `publish-pypi.yml`'s preflight hard-fails without it.
+Do **not** touch the `<!-- mcp-name: io.github.phuongddx/jarvis -->` marker on line 3 — `publish-pypi.yml`'s preflight hard-fails without it (it checks for `mcp-name: io.github.phuongddx/jarvis` at workflow line 68; an earlier draft of this plan said `jarvis-intelligence/jarvis` — that was stale, the repo enforces the phuongddx form).
 
 - [ ] **Step 2: Update `docs/codebase-summary.md`**
 
