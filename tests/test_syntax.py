@@ -1,7 +1,9 @@
 """Unit tests for the shared grammar provider (src/jarvis/syntax.py)."""
 from __future__ import annotations
 
+import subprocess
 import sys
+import textwrap
 
 import pytest
 
@@ -353,3 +355,55 @@ def test_syntax_id_is_deterministic_and_prefixed():
 
 def test_every_factory_language_appears_in_the_extraction_corpus():
     assert {case[0] for case in CASES} == set(FACTORIES)
+
+
+def test_declaration_walk_survives_a_large_module_in_fresh_interpreters(tmp_path):
+    """Regression guard for jarvis-index#14: the tree-sitter 0.26.0 binding
+    corrupts the heap during `_walk_declarations` (nondeterministic
+    SIGSEGV/SIGBUS, allocation-layout dependent), killing `jarvis index`
+    before anything publishes. A synthetic large-but-plain module is the
+    reliable trigger -- 12/12 native crashes under tree-sitter 0.26.0 and
+    0/12 under 0.25.2 on this exact corpus. Each iteration runs the walk in
+    a fresh interpreter so a native crash surfaces as a nonzero child exit
+    code instead of taking pytest (and the whole suite) down with it.
+    """
+    parts = ["from __future__ import annotations\n"]
+    for i in range(300):
+        parts.append(
+            "\n@staticmethod\n"
+            f"def decorated_{i}(value_{i}: int | None = None, *args: int, **kwargs: str) -> dict[str, list[int]]:\n"
+            f'    """Docstring {i}."""\n'
+            f"    local_{i} = {{k: [v + {i} for v in range(3)] for k in kwargs}}\n"
+            f"    return local_{i}\n"
+            f"\nclass Widget_{i}:\n"
+            f"    attr_{i}: int = {i}\n"
+            f'    def method_{i}(self, other: "Widget_{i}") -> "Widget_{i}":\n'
+            f"        fn_{i} = lambda x: x + {i}\n"
+            "        return self\n"
+        )
+    module = tmp_path / "large_module.py"
+    module.write_text("\n".join(parts), encoding="utf-8")
+
+    child = textwrap.dedent(
+        """
+        import sys
+
+        from jarvis.syntax import ParserPool, extract_file
+
+        source = open(sys.argv[1], "rb").read()
+        result = extract_file("large_module.py", source, "python", pool=ParserPool())
+        print(f"state={result.state} symbols={len(result.symbols)}")
+        """
+    )
+    for _ in range(5):
+        run = subprocess.run(
+            [sys.executable, "-c", child, str(module)],
+            capture_output=True, timeout=120,
+        )
+        assert run.returncode == 0, (
+            f"walk crashed natively (exit {run.returncode}); "
+            f"stderr tail: {run.stderr.decode(errors='replace')[-500:]}"
+        )
+        assert b"state=parsed" in run.stdout
+        reported = int(run.stdout.split(b"symbols=")[1])
+        assert reported > 0

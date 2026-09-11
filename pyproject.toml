@@ -65,7 +65,13 @@ dependencies = [
     # distribution and language coverage"): the syntax baseline must work
     # offline from prebuilt abi3 wheels, and the chunker shares this same
     # curated loader instead of the optional language-pack grab-bag.
-    "tree-sitter==0.26.0",
+    # Runtime pinned to 0.25.2, NOT 0.26.0: the 0.26.0 binding refactor
+    # corrupts the heap during the declaration walk -- nondeterministic
+    # SIGSEGV/SIGBUS, allocation-layout dependent, reliably triggered by
+    # test_declaration_walk_survives_a_large_module_in_fresh_interpreters
+    # (jarvis-index#14). Grammar versions are unaffected; 0.25.2 ran the
+    # full index pipeline clean where 0.26.0 crashed 8-11 out of 12 runs.
+    "tree-sitter==0.25.2",
     "tree-sitter-python==0.25.0",
     "tree-sitter-javascript==0.25.0",
     "tree-sitter-typescript==0.23.2",
