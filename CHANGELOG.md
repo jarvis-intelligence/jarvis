@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.9.1] - 2026-09-11
+
+### Fixed
+
+- **`jarvis index` crashed natively in the tree-sitter syntax baseline
+  (jarvis-index#14).** The tree-sitter 0.26.0 runtime's binding refactor
+  corrupts the heap non-deterministically during the declaration walk:
+  SIGSEGV/SIGBUS at mobile crash sites (attribute read, GC pass, point
+  construction), allocation-layout dependent — one added print line in the
+  walk loop makes the same input survive, which is why 0.9.0's wheel-build
+  test gates never saw it. Measured at 12 runs per cell on the same input:
+  8/12 and 11/12 native crashes under 0.26.0 with either grammar version,
+  0/12 under 0.25.2 with identical grammars — the runtime, not the grammar
+  pairing, is the broken side. GuardMalloc traps no out-of-bounds write and
+  isolated per-API probes run clean, so only real-sized sibling-frame walks
+  trigger it; the exact C-level mechanism is unconfirmed (it would need an
+  ASAN build of the binding) and is documented as such in the issue. Fix:
+  pin `tree-sitter==0.25.2` with all 16 grammar pins unchanged, plus a
+  subprocess-isolated regression test that walks a synthetic
+  300-definition module in five fresh interpreters and fails on any
+  nonzero child exit (12/12 native crashes under 0.26.0, 0/12 under
+  0.25.2). Verified against the compiled release wheel (the original
+  crasher reproduces 0/12 post-fix) and the full wheel-only resolution
+  matrix (12/12 cp312–314 × darwin/linux cells resolve 0.25.2, no source
+  builds).
+
 ## [0.9.0] - 2026-09-10
 
 Minor rather than patch: jarvis gains its tenth MCP tool — an agent can now
