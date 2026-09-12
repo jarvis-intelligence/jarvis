@@ -77,7 +77,7 @@ def _storage_sizes(slug: str) -> dict[str, int]:
     zoekt_dir = config.data_dir() / ".zoekt"
     zoekt = sum(
         f.stat().st_size
-        for f in zoekt_dir.glob(f"{slug}_*")
+        for f in zoekt_dir.glob(f"{slug}_v*")
         if f.is_file()
     ) if zoekt_dir.exists() else 0
     lance = _dir_bytes(config.lancedb_dir() / f"{slug}.lance")

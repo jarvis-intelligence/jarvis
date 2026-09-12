@@ -54,7 +54,8 @@ slug is the confirmation.
   network by construction.
 - **Host guard.** Requests whose `Host` header is not `127.0.0.1` or
   `localhost` are rejected with 403, which blocks DNS-rebinding; POSTs must
-  also carry a localhost `Origin`, and an unparseable origin fails closed.
+  carry a localhost `Origin` when one is present; an unparseable origin
+  fails closed.
 - **Path confinement.** The source viewer serves only files inside the
   repo's own working tree: absolute paths and `..` segments are rejected,
   and the resolved target must stay under the repo root.

@@ -51,7 +51,7 @@ p { margin: 0; }
 .pulse { animation: live-pulse 1.6s ease-in-out infinite; }
 .banner { margin: 0 0 16px; padding: 10px 12px; border-left: 2px solid var(--status-degraded); background: var(--canvas-soft); color: var(--body); font-size: 14px; line-height: 20px; }
 .banner.failed { border-left-color: var(--status-failed); color: var(--status-failed); }.banner.degraded { color: var(--status-degraded); }
-.index-form { display: grid; grid-template-columns: minmax(260px, 2fr) 1fr 1fr 1fr auto; align-items: end; gap: 12px; margin: 0 0 16px; padding: 16px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--canvas-card); }
+.index-form { display: grid; grid-template-columns: minmax(260px, 2fr) 1fr auto; align-items: end; gap: 12px; margin: 0 0 16px; padding: 16px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--canvas-card); }
 .index-form label, .tool-form label { display: grid; gap: 4px; color: var(--body-mid); font-size: 14px; line-height: 20px; }
 .repo-status { display: flex; align-items: center; gap: 8px; }.log-toggle { width: 32px; min-width: 32px; min-height: 32px; font-size: 12px; }
 .index-form .toggle-label { display: flex; align-items: center; min-height: 34px; gap: 8px; color: var(--body); }.form-actions { display: flex; align-items: center; gap: 12px; }.field-error { grid-column: 1 / -1; color: var(--status-failed); font-size: 14px; }

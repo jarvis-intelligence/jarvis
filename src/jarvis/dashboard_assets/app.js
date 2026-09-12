@@ -204,7 +204,7 @@ function repoRow(row) {
     repoCell(el("span", { class: "mono-md", text: formatBytes(row.storageBytes && row.storageBytes.total) }), "cell-size"),
     repoCell(el("span", { class: "mono-md", text: relativeTime(row.lastIndexed) }), "cell-time"),
     repoCell(el("div", { class: "row-actions" }, [
-      button("⟳", "outline icon-pill", () => reindex(row)),
+      button("⟳", "outline icon-pill", event => { event.currentTarget.disabled = true; reindex(row); }),
       overflowMenu(row),
     ])),
   ]);
@@ -233,22 +233,18 @@ function logPane(slug) {
 
 function indexForm() {
   const path = el("input", { name: "path", required: true, placeholder: "/path/to/repository", class: "mono-input" });
-  const slug = el("input", { name: "slug", placeholder: "optional slug", class: "mono-input" });
-  const language = el("select", { name: "language" }, ["auto", "python", "typescript", "ruby", "java"].map(value => el("option", { value, text: value })));
-  const scheme = el("select", { name: "scheme" }, [el("option", { value: "scip", text: "SCIP baseline" }), el("option", { value: "none", text: "no SCIP" })]);
+  const scheme = el("select", { name: "scheme" }, [el("option", { value: "scip", text: "on" }), el("option", { value: "none", text: "off" })]);
   const semantic = el("input", { type: "checkbox", name: "semantic" });
   const error = el("p", { class: "field-error", hidden: true });
   const form = el("form", { class: "index-form", onsubmit: async event => {
     event.preventDefault(); error.hidden = true;
-    const payload = { path: path.value.trim(), slug: slug.value.trim(), language: language.value, semantic: semantic.checked, scip: scheme.value === "scip" };
+    const payload = { path: path.value.trim(), semantic: semantic.checked, scip: scheme.value === "scip" };
     const result = await api("/api/repos/index", { method: "POST", body: JSON.stringify(payload) });
     if (result.error) { error.textContent = result.error; error.hidden = false; return; }
     state.indexForm = false; toast("index started", payload.path); await renderRepos();
   } }, [
     el("label", { text: "repository path" }, path),
-    el("label", { text: "slug" }, slug),
-    el("label", { text: "language" }, language),
-    el("label", { text: "index scheme" }, scheme),
+    el("label", { text: "SCIP" }, scheme),
     el("label", { class: "toggle-label" }, [semantic, " semantic search"]), error,
     el("div", { class: "form-actions" }, [el("button", { type: "submit", class: "pill primary", text: "Run index" }), button("Cancel", "link-pill", () => { state.indexForm = false; renderRepos(); })]),
   ]);
