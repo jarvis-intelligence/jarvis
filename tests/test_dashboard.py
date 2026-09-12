@@ -57,3 +57,89 @@ def test_forget_repo_unknown_slug_fails_cleanly(tmp_path: Path, monkeypatch):
 
     ok, message = index_cli.forget_repo("nope")
     assert not ok and "no such repo" in message
+
+# ---- test server harness -------------------------------------------------
+
+import http.server
+import json
+
+from jarvis import dashboard
+
+
+class _Server:
+    """Ephemeral-port dashboard server on a private DashboardApi."""
+
+    def __init__(self, api: dashboard.DashboardApi | None = None):
+        self.api = api or dashboard.DashboardApi()
+        handler = dashboard.make_handler(self.api)
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    @property
+    def url(self) -> str:
+        host, port = self.httpd.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def get(self, path: str, headers: dict | None = None):
+        req = urllib.request.Request(self.url + path, headers=headers or {})
+        return self._run(req)
+
+    def post(self, path: str, body: dict, headers: dict | None = None):
+        payload = json.dumps(body).encode()
+        req = urllib.request.Request(
+            self.url + path, data=payload, method="POST",
+            headers={"Content-Type": "application/json", **(headers or {})})
+        return self._run(req)
+
+    def _run(self, req):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read() or b"{}")
+        except urllib.error.HTTPError as err:
+            return err.code, json.loads(err.read() or b"{}")
+
+
+def test_host_header_guard_rejects_foreign_host(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, body = srv.get("/api/overview", headers={"Host": "evil.com"})
+        assert status == 403
+        assert "error" in body
+
+
+def test_host_header_guard_accepts_localhost(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, _ = srv.get("/api/overview", headers={"Host": "localhost"})
+        assert status == 200
+
+
+def test_unknown_api_path_is_404_json(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, body = srv.get("/api/nope")
+        assert status == 404 and body == {"error": "not found: /api/nope"}
+
+
+def test_wrong_method_is_405(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, body = srv.post("/api/overview", {})
+        assert status == 405 and "error" in body
+
+
+def test_index_served_with_html_content_type(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        with urllib.request.urlopen(srv.url + "/", timeout=10) as resp:
+            assert resp.status == 200
+            assert resp.headers["Content-Type"].startswith("text/html")
+            assert b"<html" in resp.read()

@@ -1,0 +1,19 @@
+:root {
+  --canvas: #0a0a0a; --canvas-card: #191919; --canvas-soft: #1a1c20;
+  --canvas-mid: #363a3f; --hairline: #212327;
+  --ink: #ffffff; --body: #dadbdf; --body-mid: #82878d; --ink-hover: #fafaf7;
+  --accent-sunset: #ff7a17; --accent-sunset-soft: #ffc285; --accent-breeze: #a0c3ec;
+  --accent-dusk: #7c3aed; --accent-twilight: #c4b5fd;
+  --status-ok: #ffffff; --status-partial: #ffc285; --status-degraded: #ff7a17;
+  --status-failed: #ff5c5c; --status-live: #ff7a17; --stale: #ff5c5c;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--canvas); color: var(--body);
+  font: 400 16px/24px system-ui, -apple-system, sans-serif; }
+#topbar { height: 56px; border-bottom: 1px solid var(--hairline);
+  display: flex; align-items: center; padding: 0 24px; }
+.wordmark { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--ink); }
+.accent { color: var(--accent-sunset); }
+#view { max-width: 1440px; margin: 0 auto; padding: 24px 32px; }
+.body-mid { color: var(--body-mid); }
