@@ -534,8 +534,6 @@ def test_search_semantic_busy_rejects_second_query(tmp_path: Path, monkeypatch):
         # surfaced through the per-signal error field, never a hang.
         second = srv.get("/api/search?q=two&repo=demo")
         assert second[0] == 200 and "busy" in second[1]["semanticError"]
-        # After the task finishes, the gate is released again.
-        time_mod.sleep(0.6)
         # After the task finishes, the gate is released again. Poll rather
         # than sleep a fixed amount: CI load can stretch the 0.5s task.
         deadline = time_mod.time() + 5
