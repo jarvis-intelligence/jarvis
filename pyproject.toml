@@ -131,6 +131,11 @@ build-backend = "setuptools.build_meta"
 package-dir = { "" = "src" }
 packages = ["jarvis"]
 
+[tool.setuptools.package-data]
+# Dashboard SPA assets ride in every wheel; check_wheel_contents.py
+# guards their presence at release time.
+jarvis = ["dashboard_assets/*.html", "dashboard_assets/*.js", "dashboard_assets/*.css"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
