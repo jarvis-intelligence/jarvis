@@ -609,15 +609,7 @@ body { margin: 0; background: var(--canvas); color: var(--body);
 .body-mid { color: var(--body-mid); }
 ```
 
-- [ ] **Step 4: Run to verify the new tests pass** (overview 200s are stubbed: `DashboardApi.__init__` registers nothing yet — add a minimal `/api/overview` in this task returning version/dataDir so the 200-guard tests pass; Task 4 replaces it with the real payload):
-
-In `DashboardApi.__init__`:
-
-```python
-from jarvis import __version__ if False else None  # placeholder guard removed in Task 4
-```
-
-No — concretely, this task ships a minimal overview handler so guard tests are green:
+- [ ] **Step 4: Run to verify the new tests pass** — `DashboardApi.__init__` registers exactly one route in this task: a minimal `/api/overview` (Task 4 upgrades it with zoekt state, repo count, and disk totals). Add to `DashboardApi`:
 
 ```python
     def _overview(self, query, body):
@@ -742,6 +734,10 @@ def _storage_sizes(slug: str) -> dict[str, int]:
     return {"scip": scip, "zoekt": zoekt, "lance": lance, "total": scip + zoekt + lance}
 ```
 
+
+`DashboardApi` additions (registered in `__init__` after the Task 3 overview `_add`; `_overview` from Task 3 is upgraded here to include zoekt state, repo count, disk total):
+
+```python
     def _overview(self, query, body):
         server = self._server_module()
         try:
