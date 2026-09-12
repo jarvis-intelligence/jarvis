@@ -486,3 +486,38 @@ def test_search_semantic_timeout_degrades(tmp_path: Path, monkeypatch):
         assert status == 200
         assert "timed out" in body["semanticError"]
         assert body["lexical"] is not None
+
+
+def test_search_semantic_busy_rejects_second_query(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    from jarvis import dashboard, server
+    import jarvis.search as search_mod
+    import time as time_mod
+
+    class FakeLifecycle:
+        def ensure_running(self):
+            return "http://zoekt"
+
+    monkeypatch.setattr(server, "_zoekt_lifecycle", FakeLifecycle())
+    monkeypatch.setattr(search_mod, "search_zoekt",
+                        lambda base, q: search_mod.ZoektSearchResult(hits=[], total_matches=0, file_count=0))
+    monkeypatch.setattr(dashboard, "_SEMANTIC_TIMEOUT", 0.05)
+
+    def slow_search(*args, **kwargs):
+        time_mod.sleep(0.5)
+        return {"results": [], "total": 0}
+
+    monkeypatch.setattr("jarvis.semantic.semantic_search", slow_search)
+    with _Server() as srv:
+        # First query acquires the gate, its caller times out at 0.05s — but
+        # the underlying task keeps the gate for 0.5s.
+        first = srv.get("/api/search?q=one&repo=demo")
+        assert first[0] == 200 and "timed out" in first[1]["semanticError"]
+        # Second query while the first task is still running → 503-class busy,
+        # surfaced through the per-signal error field, never a hang.
+        second = srv.get("/api/search?q=two&repo=demo")
+        assert second[0] == 200 and "busy" in second[1]["semanticError"]
+        # After the task finishes, the gate is released again.
+        time_mod.sleep(0.6)
+        third = srv.get("/api/search?q=three&repo=demo")
+        assert third[0] == 200 and "timed out" in third[1]["semanticError"]

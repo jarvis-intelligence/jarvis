@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.10.0] - unreleased
+## [0.10.0] - 2026-09-12
 
 Minor rather than patch: jarvis gains a localhost operator dashboard — the
 registry, index runs, and all ten MCP tools become watchable and drivable
@@ -32,6 +32,22 @@ from a browser without anything leaving the machine.
   shell, one JS module, one stylesheet on the xAI token sheet) rides in
   every wheel via package-data, with `check_wheel_contents.py` guarding its
   presence at release time.
+- **WAI-ARIA tab navigation.** `nav.tab-nav` is a real tablist — `role="tab"`
+  per view, `aria-controls`/`aria-selected`, roving tabindex, and
+  ArrowLeft/ArrowRight/Home/End activation — over an xAI-token visual
+  contract (near-black surfaces, hairline borders, white primary pills,
+  monospace instrument labels, a restrained sunset-orange accent), with
+  `:focus-visible` outlines, dot-plus-label status cues (never color alone),
+  and `prefers-reduced-motion` support.
+- **Serialized semantic worker in the dashboard.** Concurrent first-use of
+  the `semanticSearch` embedding stack (bge-m3/sentence-transformers) from
+  the dashboard's HTTP threads segfaulted the process on macOS/arm64 — two
+  model loads racing in one interpreter. All dashboard embedding traffic now
+  runs through a single worker thread and callers wait at most 20s: a cold
+  first load (model download) degrades that one signal to a "timed out"
+  error while the load finishes, and later calls hit the warm model. A
+  child of this fix also hardened `jsonNode` against the `null` fields real
+  `documentSymbols` payloads contain, which crashed response rendering.
 
 See `docs/superpowers/specs/2026-09-12-dashboard-design.md` and
 `docs/superpowers/plans/2026-09-12-dashboard.md` for the design and

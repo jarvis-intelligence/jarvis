@@ -308,6 +308,16 @@ jarvis dashboard          # serves http://127.0.0.1:6080 and opens a browser
 A localhost web console over the same `~/.jarvis` data the CLI and MCP server
 read — watch index runs and call the tools from a browser, no MCP client
 involved:
+<p align="center">
+  <img src="docs/assets/dashboard-repos.png" width="860" alt="jarvis console, Repos view: two indexed repos with status chips, freshness, SCIP state, storage sizes, and reindex/forget actions">
+</p>
+<p align="center">
+  <img src="docs/assets/dashboard-search.png" width="860" alt="jarvis console, Search: one query fanned to Zoekt lexical, semantic-vector, and SCIP-symbol results with term highlighting">
+</p>
+<p align="center">
+  <img src="docs/assets/dashboard-detail.png" width="424" alt="jarvis console, repo detail: published snapshots, per-tool capabilities, recovery guidance, package-graph edges, storage footprint">&nbsp;
+  <img src="docs/assets/dashboard-playground.png" width="424" alt="jarvis console, Playground: findReferences invoked with typed parameters, raw JSON response with error framing">
+</p>
 
 - **Repos** — every registered repo with status, freshness, and a live tail of
   its index log; index a path, reindex, or forget a repo (forget makes you

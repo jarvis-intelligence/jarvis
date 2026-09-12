@@ -43,11 +43,30 @@ _SEMANTIC_TIMEOUT = 20.0
 _semantic_worker = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic")
 
 
+_semantic_gate = threading.Semaphore(1)
+
+
 def _guarded_semantic(fn):
     """Run an embedding-touching callable on the serialized semantic worker.
-    The timeout bounds the caller: the worker keeps loading, so a retry
-    after a timeout hits the warm model cache."""
-    future = _semantic_worker.submit(fn)
+    Two bounds: a non-blocking gate rejects a second query while one is in
+    flight (503 — the single worker would otherwise bury fresh searches
+    behind a backlog of abandoned ones), and the caller's wait is capped at
+    `_SEMANTIC_TIMEOUT` (504 — the worker keeps loading, so a retry after a
+    timeout hits the warm model cache)."""
+    if not _semantic_gate.acquire(blocking=False):
+        raise DashboardError(503, "semantic search is busy — an embedding query is already in flight; retry in a moment")
+
+    def task():
+        try:
+            return fn()
+        finally:
+            _semantic_gate.release()
+
+    try:
+        future = _semantic_worker.submit(task)
+    except BaseException:
+        _semantic_gate.release()
+        raise
     try:
         return future.result(timeout=_SEMANTIC_TIMEOUT)
     except concurrent.futures.TimeoutError as exc:
