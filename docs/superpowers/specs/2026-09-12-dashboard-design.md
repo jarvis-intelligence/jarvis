@@ -178,17 +178,32 @@ screen.
 
 ## Packaging
 
-- `[tool.setuptools.package-data] jarvis = ["dashboard_assets/*.html",
-  "dashboard_assets/*.js", "dashboard_assets/*.css"]`. No new package entry;
-  the asset dir has no `.py` files so it needs no `__init__.py`.
-- Cython interplay: `StripCompiledSources` (`setup.py:15-27`) filters only
-  `.py` modules — assets pass through compiled wheels untouched.
+**Current baseline: the wheel ships no data files at all.** `pyproject.toml`
+has only `[tool.setuptools] package-dir` + `packages` — no
+`[tool.setuptools.package-data]`, no `include-package-data`, and no MANIFEST
+(`pyproject.toml:126-132`). Nothing outside `.py`/compiled modules reaches
+the wheel today, so asset shipping is a concrete packaging change, not an
+existing mechanism:
+
+- **Add to `pyproject.toml`** a new section:
+  `[tool.setuptools.package-data] jarvis = ["dashboard_assets/*.html",
+  "dashboard_assets/*.js", "dashboard_assets/*.css"]`.
+  The `package-data` mapping includes files in built wheels directly —
+  `include-package-data`/MANIFEST are not needed for it. No new package
+  entry in `packages`; the asset dir has no `.py` files so it needs no
+  `__init__.py`.
+- Cython interplay: `StripCompiledSources` (`setup.py:15-27`) overrides only
+  `build_py.find_package_modules` — data files flow through a different
+  discovery path — so assets pass through compiled wheels untouched.
   `dashboard.py` itself is picked up by the flat `src/jarvis/*.py` glob
   (`setup.py:39`) and compiles like every other module. No setup.py change.
 - `scripts/check_wheel_contents.py` gains a carve-out allowing
-  `dashboard_assets/*` as expected non-code wheel payload.
+  `dashboard_assets/*` as expected non-code wheel payload (today it would
+  fail the wheel on any non-code file).
 - Assets load via `importlib.resources.files("jarvis") /
   "dashboard_assets"` — identical behavior dev vs wheel.
+- Verification: `python scripts/check_wheel_contents.py dist/*.whl` plus a
+  `zipinfo dist/*.whl | grep dashboard_assets` line in the release checklist.
 
 ## Testing
 
