@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.10.0] - unreleased
+
+Minor rather than patch: jarvis gains a localhost operator dashboard — the
+registry, index runs, and all ten MCP tools become watchable and drivable
+from a browser without anything leaving the machine.
+
+### Added
+
+- **`jarvis dashboard`, a localhost web console over `~/.jarvis`.** Four
+  views: **Repos** (every registered repo's status and freshness with live
+  index-log tails), **repo detail** (published snapshots and which one the
+  `current` pointer selects, per-tool capabilities, recovery guidance,
+  package-graph edges, storage footprint), **Search** (one query fanned to
+  Zoekt lexical, semantic-vector, and SCIP-symbol results, with an
+  in-browser source viewer), and a **Playground** that invokes any of the
+  ten MCP tools with typed parameters and shows the raw response.
+- **Operator actions reuse the `indexRepo` spawn seam.** Dashboard index and
+  reindex call `server._spawn_index` — the same detached `jarvis index`
+  children, write-once launch records, and per-slug build lock the MCP tool
+  uses, so browser-initiated and agent-initiated runs arbitrate through one
+  mechanism (a slug already in flight gets 409, never a queued second
+  writer). **Forget** is the CLI's own `forget_repo` — build lock honored,
+  refuses under a live writer — behind a typed-slug confirmation.
+- **Zero new dependencies.** The server is stdlib `http.server`
+  (`ThreadingHTTPServer`) behind a Host-header guard plus an Origin check on
+  POSTs; it binds `127.0.0.1` only and is deliberately unauthenticated —
+  single-tenant, the same contract as the MCP server. The frontend is three
+  framework-free static files served via `importlib.resources`.
+- **xAI-styled assets ship in the wheel.** `dashboard_assets/` (one HTML
+  shell, one JS module, one stylesheet on the xAI token sheet) rides in
+  every wheel via package-data, with `check_wheel_contents.py` guarding its
+  presence at release time.
+
+See `docs/superpowers/specs/2026-09-12-dashboard-design.md` and
+`docs/superpowers/plans/2026-09-12-dashboard.md` for the design and
+implementation plan.
+
 ## [0.9.1] - 2026-09-11
 
 ### Fixed

@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>jarvis console</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="top-bar">
+    <p class="wordmark">jarvis <span aria-hidden="true" class="mark">▮</span> console</p>
+    <div class="runtime">
+      <span class="machine" id="appVersion"></span>
+      <span class="status" id="zoektRuntime" aria-live="polite"></span>
+    </div>
+  </header>
+
+  <nav class="tab-nav" role="tablist" aria-label="Console views">
+    <button class="tab" id="tab-repos" type="button" data-view="repos" role="tab" aria-controls="view-repos" aria-selected="true" tabindex="0">Repos</button>
+    <button class="tab" id="tab-detail" type="button" data-view="detail" role="tab" aria-controls="view-detail" aria-selected="false" tabindex="-1" hidden>Repo Detail</button>
+    <button class="tab" id="tab-search" type="button" data-view="search" role="tab" aria-controls="view-search" aria-selected="false" tabindex="-1">Search</button>
+    <button class="tab" id="tab-playground" type="button" data-view="playground" role="tab" aria-controls="view-playground" aria-selected="false" tabindex="-1">Playground</button>
+  </nav>
+
+  <div class="status-strip" id="statusStrip">
+    <span class="mono">data dir <span class="machine" id="dataDirText"></span></span>
+    <span class="mono"><span class="machine" id="repoCount"></span></span>
+    <span class="mono"><span class="machine" id="diskTotal"></span> on disk</span>
+    <span class="mono">zoekt-webserver <span class="machine" id="zoektStrip"></span></span>
+  </div>
+
+  <main>
+    <!-- Repos -->
+    <section class="view" id="view-repos" role="tabpanel" aria-labelledby="tab-repos">
+      <div class="view-head">
+        <div>
+          <p class="eyebrow">── indexed repositories</p>
+          <h1 class="view-title">Repos</h1>
+        </div>
+        <button class="btn" id="newRepoToggle" aria-expanded="false" aria-controls="newRepoPanel">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+          index new repo
+        </button>
+      </div>
+      <div class="banner" id="conflictBanner" role="status" hidden></div>
+
+      <section class="card inline-panel" id="newRepoPanel" aria-labelledby="newRepoTitle" hidden>
+        <p class="eyebrow" id="newRepoTitle">── new index</p>
+        <h2 class="section-title">Index a repository</h2>
+        <form id="newRepoForm" novalidate>
+          <div class="panel-grid">
+            <div class="field">
+              <label class="label" for="repoPath">Repository path</label>
+              <input class="input mono" id="repoPath" name="repoPath" type="text" placeholder="~/Projects/repo" autocomplete="off" required>
+              <p class="form-error" id="repoPathError" hidden>Enter an absolute or ~-relative repository path.</p>
+            </div>
+            <div class="field">
+              <span class="label" id="repoSemanticLabel">Semantic search</span>
+              <label class="switch"><input type="checkbox" id="repoSemantic" aria-labelledby="repoSemanticLabel"><span class="muted" id="repoSemanticState">off</span></label>
+              <p class="helper">builds vector embeddings (requires the semantic extra; large first download)</p>
+            </div>
+            <div class="field">
+              <label class="label" for="repoScip">SCIP enrichment</label>
+              <select class="select" id="repoScip">
+                <option value="auto">auto (keep persisted choice)</option>
+                <option value="on">on</option>
+                <option value="off">off</option>
+              </select>
+              <p class="helper">off still publishes the syntax baseline + Zoekt search</p>
+            </div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn btn-primary" type="submit">Run index</button>
+            <button class="link" type="button" id="newRepoCancel">Cancel</button>
+          </div>
+        </form>
+      </section>
+
+      <div class="empty-state" id="reposEmpty" hidden>
+        <h2 class="empty-title">No repositories indexed</h2>
+        <p>Run <code>jarvis index /path/to/repo</code> or use the button above.</p>
+        <div class="command-well"><span>jarvis index /path/to/repo</span><button class="icon-pill btn" type="button" data-copy="jarvis index /path/to/repo" aria-label="Copy index command"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8" height="8"/><path d="M11 3H3v8"/></svg></button></div>
+      </div>
+
+      <div class="table-wrap" id="reposTableWrap">
+        <table class="repo-table">
+          <caption class="sr-only">Indexed repositories with health, freshness, capabilities, size, and actions</caption>
+          <thead><tr>
+            <th scope="col">Status</th><th scope="col">Repo</th><th scope="col">Lang</th><th scope="col">Freshness</th>
+            <th scope="col">SCIP</th><th scope="col">Sem</th><th scope="col">Size</th><th scope="col">Last indexed</th><th scope="col"><span class="sr-only">Actions</span></th>
+          </tr></thead>
+          <tbody id="reposBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Repo Detail -->
+    <section class="view" id="view-detail" role="tabpanel" aria-labelledby="tab-detail" hidden>
+      <div class="view-head"><div><p class="eyebrow" id="detailEyebrow">── repo</p><h1 class="view-title" id="detailTitle"></h1></div></div>
+      <div id="detailContent" class="detail-grid"></div>
+    </section>
+
+    <!-- Search -->
+    <section class="view" id="view-search" role="tabpanel" aria-labelledby="tab-search" hidden>
+      <div class="view-head"><div><p class="eyebrow">── code search</p><h1 class="view-title">Search</h1></div></div>
+      <form class="search-bar" id="searchForm">
+        <label class="sr-only" for="searchQuery">Search code, symbols, or meaning</label>
+        <input class="search-input" id="searchQuery" type="search" value="" placeholder="where is token refresh handled?" autocomplete="off">
+        <label class="sr-only" for="searchRepo">Repository filter</label>
+        <select class="select" id="searchRepo" style="width:160px"><option value="all">all repos</option></select>
+        <button class="btn btn-primary icon-pill" type="submit" aria-label="Run search">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13 13 3M7 3h6v6"/></svg>
+        </button>
+      </form>
+      <div id="searchEmpty">
+        <p class="muted" style="font-size:18px;line-height:28px;margin:var(--space-7) 0;">search code, symbols, or meaning</p>
+      </div>
+      <div id="searchResults" hidden>
+        <div class="search-meta"><span class="mono ink" id="searchLatency"></span><span class="eyebrow">fused</span></div>
+        <div class="search-columns">
+          <div class="result-col lexical"><p class="eyebrow">lexical · zoekt</p><div id="lexicalResults"></div></div>
+          <div class="result-col semantic"><p class="eyebrow">semantic · fused</p><div id="semanticResults"></div></div>
+          <div class="result-col symbols"><p class="eyebrow">symbols</p><div id="symbolResults"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Playground -->
+    <section class="view" id="view-playground" role="tabpanel" aria-labelledby="tab-playground" hidden>
+      <div class="view-head"><div><p class="eyebrow">── mcp playground</p><h1 class="view-title">Playground</h1></div></div>
+      <div class="playground-grid">
+        <div class="card tool-rail" id="toolRail" role="listbox" aria-label="MCP tools"></div>
+        <section class="card playground-panel" aria-labelledby="activeToolName">
+          <p class="eyebrow">── tool invocation</p>
+          <h2 class="section-title mono ink" id="activeToolName"></h2>
+          <form id="toolForm">
+            <div class="param-grid" id="toolParams"></div>
+            <div class="panel-actions">
+              <button class="btn btn-primary" id="runTool" type="submit">run ⏎</button>
+              <span class="mono muted" id="toolLatency" hidden></span>
+            </div>
+          </form>
+          <div class="panel-divider"></div>
+          <p class="eyebrow">── response</p>
+          <div class="response-well" id="toolResponse"><span class="muted">Run a tool to inspect its JSON response.</span></div>
+        </section>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Source viewer -->
+<div class="overlay" id="sourceOverlay" hidden>
+  <div class="modal source-modal" role="dialog" aria-modal="true" aria-labelledby="sourcePath">
+    <header class="source-header">
+      <span class="source-path" id="sourcePath"></span>
+      <div style="display:flex;align-items:center;gap:var(--space-3);">
+        <button class="btn icon-pill" id="copySourcePath" aria-label="Copy source path"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8" height="8"/><path d="M11 3H3v8"/></svg></button>
+        <button class="btn icon-pill" id="closeSource" aria-label="Close source viewer"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+      </div>
+    </header>
+    <div class="source-code" id="sourceCode" tabindex="0"></div>
+  </div>
+</div>
+
+<!-- Package graph -->
+<div class="overlay" id="graphOverlay" hidden>
+  <div class="modal graph-modal" role="dialog" aria-modal="true" aria-labelledby="graphTitle">
+    <header><p class="eyebrow">── package graph</p><h2 class="section-title" id="graphTitle"></h2></header>
+    <div class="graph-stage" id="graphStage" aria-label="Package dependency graph"></div>
+    <footer style="display:flex;justify-content:space-between;align-items:center;gap:var(--space-4);padding:0 var(--space-5) var(--space-5);">
+      <span class="helper">Hover or focus a package to highlight its 2-hop neighborhood.</span>
+      <button class="btn" id="closeGraph">Close</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Forget confirmation -->
+<div class="overlay" id="forgetOverlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="forgetTitle">
+    <h2 class="modal-title" id="forgetTitle">Forget repo?</h2>
+    <p>Removes the index, search shards, and registry entry. The repository on disk is untouched.</p>
+    <div class="field" style="margin-top:var(--space-4);">
+      <label class="label mono" for="forgetConfirm">type <span id="forgetSlugLabel"></span> to confirm</label>
+      <input class="input mono" id="forgetConfirm" autocomplete="off">
+    </div>
+    <div class="modal-actions">
+      <button class="link" id="cancelForget" type="button">Cancel</button>
+      <button class="btn btn-destructive" id="confirmForget" type="button" disabled>forget</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-region" id="toastRegion" role="status" aria-live="polite"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

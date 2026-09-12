@@ -23,6 +23,9 @@ def test_compiled_wheel_with_allowlisted_sources_passes(tmp_path):
         "jarvis/__init__.py",
         "jarvis/scip_pb2.py",
         "jarvis/query.cpython-312-darwin.so",
+        "jarvis/dashboard_assets/index.html",
+        "jarvis/dashboard_assets/app.js",
+        "jarvis/dashboard_assets/style.css",
         "jarvis_mcp-0.0.0.dist-info/RECORD",
     ])
     assert check_wheel_contents.check(wheel) == []
@@ -61,3 +64,19 @@ def test_missing_allowlisted_files_is_reported(tmp_path):
     problems = check_wheel_contents.check(wheel)
     assert any("jarvis/__init__.py" in p for p in problems)
     assert any("jarvis/scip_pb2.py" in p for p in problems)
+
+
+def test_missing_dashboard_asset_is_reported(tmp_path):
+    lean = _wheel(tmp_path, ["jarvis/__init__.py", "jarvis/scip_pb2.py",
+                             "jarvis/query.cpython-312-darwin.so"])
+    problems = check_wheel_contents.check(str(lean))
+    assert any("dashboard assets" in p for p in problems)
+
+
+def test_dashboard_assets_present_passes(tmp_path):
+    full = _wheel(tmp_path, ["jarvis/__init__.py", "jarvis/scip_pb2.py",
+                             "jarvis/query.cpython-312-darwin.so",
+                             "jarvis/dashboard_assets/index.html",
+                             "jarvis/dashboard_assets/app.js",
+                             "jarvis/dashboard_assets/style.css"])
+    assert check_wheel_contents.check(str(full)) == []

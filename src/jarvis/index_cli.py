@@ -1812,12 +1812,14 @@ def _remove_zoekt_shards(slug: str, root: Path | None = None) -> list[Path]:
     return removed
 
 
-def _cmd_forget(args: argparse.Namespace) -> int:
+def forget_repo(slug: str) -> tuple[bool, str]:
+    """The full `jarvis forget` body, shared with the dashboard's
+    POST /api/repos/{slug}/forget. Returns (ok, message); callers decide
+    how to surface it (CLI prints, dashboard JSONs)."""
     try:
-        slug = config.repo_slug(args.slug)
+        slug = config.repo_slug(slug)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return False, str(exc)
     try:
         with jobs.build_lock(slug):
             registry = Registry(config.data_dir() / "registry.db")
@@ -1827,8 +1829,7 @@ def _cmd_forget(args: argparse.Namespace) -> int:
             finally:
                 registry.close()
             if not existed:
-                print(f"error: no such repo: {slug}", file=sys.stderr)
-                return 1
+                return False, f"no such repo: {slug}"
             if entry is not None:
                 _unpin_zoekt_repo_name(Path(entry.path))
             # Package-edge teardown (spec TSI-08: refresh forget for all new
@@ -1862,9 +1863,16 @@ def _cmd_forget(args: argparse.Namespace) -> int:
         # Destroying a repo's row, graph edges, and artifacts while a writer
         # is mid-run corrupts that run and can resurrect artifacts the forget
         # already removed.
-        print(f"error: {exc}", file=sys.stderr)
+        return False, str(exc)
+    return True, f"forgot {slug}"
+
+
+def _cmd_forget(args: argparse.Namespace) -> int:
+    ok, message = forget_repo(args.slug)
+    if not ok:
+        print(f"error: {message}", file=sys.stderr)
         return 1
-    print(f"forgot {slug}")
+    print(message)
     return 0
 
 
@@ -1946,6 +1954,18 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     finally:
         observer.stop()
         observer.join()
+    return 0
+
+
+def _cmd_dashboard(args: argparse.Namespace) -> int:
+    """Serve the localhost dashboard (blocks until Ctrl-C)."""
+    from jarvis import dashboard
+
+    try:
+        dashboard.serve(args.port, open_browser=not args.no_open)
+    except OSError as exc:  # e.g. port already in use
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -2066,6 +2086,14 @@ def build_parser() -> argparse.ArgumentParser:
     forget_parser = subparsers.add_parser("forget", help="remove a repo's registration and published index")
     forget_parser.add_argument("slug")
     forget_parser.set_defaults(func=_cmd_forget)
+
+    dashboard_parser = subparsers.add_parser(
+        "dashboard", help="serve the localhost operator dashboard")
+    dashboard_parser.add_argument("--port", type=int, default=None,
+                                  help="port (default: JARVIS_DASHBOARD_PORT or 6080)")
+    dashboard_parser.add_argument("--no-open", action="store_true",
+                                  help="do not open the browser automatically")
+    dashboard_parser.set_defaults(func=_cmd_dashboard)
 
     watch_parser = subparsers.add_parser("watch", help="watch a repo and debounce-reindex on change")
     watch_parser.add_argument("path", help="path to the repo to watch")

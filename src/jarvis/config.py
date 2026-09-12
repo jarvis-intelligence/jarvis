@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 from jarvis.index_reader import IndexConnectionCache
@@ -112,3 +113,26 @@ def new_connection_cache(root: Path | None = None) -> IndexConnectionCache:
 
 def get_connection(cache: IndexConnectionCache, slug: str):
     return cache.get_connection(PROJECT, slug, BRANCH)
+
+
+DASHBOARD_DEFAULT_PORT = 6080
+
+
+def dashboard_port() -> int:
+    """`JARVIS_DASHBOARD_PORT` overrides the localhost dashboard port; an
+    invalid value (unparseable, or outside the 1-65535 TCP port range)
+    degrades to the default rather than breaking `jarvis dashboard` (same
+    contract as zoekt's port override)."""
+    raw = os.environ.get("JARVIS_DASHBOARD_PORT", "")
+    try:
+        port = int(raw) if raw else DASHBOARD_DEFAULT_PORT
+        if not 1 <= port <= 65535:
+            raise ValueError(raw)
+    except ValueError:
+        print(
+            f"warning: invalid JARVIS_DASHBOARD_PORT {raw!r}; "
+            f"using {DASHBOARD_DEFAULT_PORT}",
+            file=sys.stderr,
+        )
+        return DASHBOARD_DEFAULT_PORT
+    return port

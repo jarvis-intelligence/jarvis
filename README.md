@@ -244,6 +244,7 @@ jarvis list
 jarvis status foo
 jarvis reindex foo
 jarvis forget foo
+jarvis dashboard [--port N] [--no-open]    # localhost web console over ~/.jarvis
 ```
 
 `status` (as shown by both `list` and `status`) is one of `indexing` (run in
@@ -297,6 +298,37 @@ Indexing a Swift repo with code-signed app-extension targets additionally requir
 then fails provisioning for every signed target before compiling anything. Because `setup.sh`
 skips any dependency that is merely *present*, an existing install is **not** upgraded by
 re-running it — use `sh ./setup.sh --only scip-swift --force`.
+
+## Dashboard
+
+```bash
+jarvis dashboard          # serves http://127.0.0.1:6080 and opens a browser
+```
+
+A localhost web console over the same `~/.jarvis` data the CLI and MCP server
+read — watch index runs and call the tools from a browser, no MCP client
+involved:
+
+- **Repos** — every registered repo with status, freshness, and a live tail of
+  its index log; index a path, reindex, or forget a repo (forget makes you
+  type the slug to confirm).
+- **Repo detail** — one repo's published snapshots, per-tool capabilities,
+  recovery guidance, package-graph edges, and storage footprint.
+- **Search** — one query answered three ways (Zoekt lexical, semantic vector,
+  SCIP symbols), scoped to one repo or across all, with an in-browser source
+  viewer for any hit.
+- **Playground** — invoke any of the ten MCP tools with typed parameters and
+  inspect the raw JSON response.
+
+Index and reindex spawn the same detached `jarvis index` children as the
+`indexRepo` MCP tool — same launch records, same per-slug build lock — and a
+second run for a slug already in flight is rejected. Forget reuses the CLI's
+own teardown. `--port` overrides the port; `JARVIS_DASHBOARD_PORT` does the
+same via the environment (invalid values fall back to 6080 with a warning);
+`--no-open` skips the browser. The server binds `127.0.0.1` only and rejects
+non-localhost `Host` headers; like the MCP server it has no auth — a console
+for your machine, not a network service. Details and troubleshooting:
+[`docs/dashboard.md`](docs/dashboard.md).
 
 ## Watching a repo (auto-reindex)
 
@@ -468,6 +500,7 @@ uv run pytest -m integration         # real-binary pipeline
 - [`docs/codebase-summary.md`](docs/codebase-summary.md) — module map, test coverage
 - [`docs/code-standards.md`](docs/code-standards.md) — code patterns and conventions
 - [`docs/project-roadmap.md`](docs/project-roadmap.md) — all phases complete, future ideas
+- [`docs/dashboard.md`](docs/dashboard.md) — dashboard views, actions, security model, troubleshooting
 
 All 4 planned phases are shipped — see
 [`plans/0724-2316-jarvis-mcp-implementation/plan.md`](plans/0724-2316-jarvis-mcp-implementation/plan.md).

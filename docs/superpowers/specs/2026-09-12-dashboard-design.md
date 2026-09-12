@@ -200,8 +200,9 @@ existing mechanism:
   `dashboard.py` itself is picked up by the flat `src/jarvis/*.py` glob
   (`setup.py:39`) and compiles like every other module. No setup.py change.
 - `scripts/check_wheel_contents.py` gains a carve-out allowing
-  `dashboard_assets/*` as expected non-code wheel payload (today it would
-  fail the wheel on any non-code file).
+  `dashboard_assets/*` as expected non-code wheel payload (the guard gains
+  a *presence* expectation for the three assets — a package-data regression
+  fails the release check).
 - Assets load via `importlib.resources.files("jarvis") /
   "dashboard_assets"` — identical behavior dev vs wheel.
 - Verification: `python scripts/check_wheel_contents.py dist/*.whl` plus a
