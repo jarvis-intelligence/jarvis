@@ -405,6 +405,15 @@ class DashboardApi:
     """Route table and handlers. dispatch() never raises: it maps
     DashboardError and unexpected exceptions onto (status, {"error": ...})."""
 
+    def __init__(self) -> None:
+        # Static routes, populated via _add by this task and Tasks 4-7:
+        # path -> (handler, methods). Dynamic /api/repos/{slug}/... segments
+        # resolve through _resolve_dynamic (Tasks 4-6).
+        self._routes: dict[str, tuple[Any, frozenset[str]]] = {}
+
+    def _add(self, path: str, methods: frozenset[str], handler: Any) -> None:
+        self._routes[path] = (handler, methods)
+
     def dispatch(self, method: str, path: str,
                  query: dict[str, list[str]], body: dict[str, Any],
                  ) -> tuple[int, dict[str, Any]]:
@@ -420,22 +429,16 @@ class DashboardApi:
             return 500, {"error": str(exc)}
 
     def _route(self, path: str) -> tuple[Any, frozenset[str]]:
-        from jarvis.dashboard_routes import ROUTES  # populated by Tasks 4-7
-
-        routes = ROUTES  # dict[str, (methods, callable)]
-        if path in routes:
-            methods, fn = routes[path]
-            return fn, methods
-        # /api/repos/{slug}/... dynamic segments resolve in Task 4-6.
-        resolved = self._resolve_dynamic(path)
+        if path in self._routes:
+            handler, methods = self._routes[path]
+            return handler, methods
+        resolved = self._resolve_dynamic(path)  # /api/repos/{slug}/... — Tasks 4-6
         if resolved is not None:
             return resolved
         raise DashboardError(404, f"not found: {path}")
 
-    def _resolve_dynamic(self, path: str):
-        raise DashboardError(404, f"not found: {path}")
-
-    # handlers appended by Tasks 4-7
+    def _resolve_dynamic(self, path: str) -> tuple[Any, frozenset[str]] | None:
+        return None  # dynamic segments arrive with Tasks 4-6
 
 
 def make_handler(api: DashboardApi) -> type[BaseHTTPRequestHandler]:
@@ -535,17 +538,7 @@ def serve(port: int | None = None, *, open_browser: bool = True) -> None:
         httpd.server_close()
 ```
 
-Note: `_route` references `dashboard_routes` which Tasks 4-7 will NOT create — instead, Tasks 4-7 register handler methods on `DashboardApi` and populate a `self._routes` dict in `__init__`. Simplify now: implement `_route` as a lookup against `self._routes: dict[str, tuple[frozenset[str], Any]]` built in `DashboardApi.__init__` (empty in this task) plus `_resolve_dynamic`. The `dashboard_routes` import above is replaced by:
-
-```python
-class DashboardApi:
-    def __init__(self) -> None:
-        # Populated by Tasks 4-7 via self._add(path, methods, handler).
-        self._routes: dict[str, tuple[frozenset[str], Any]] = {}
-
-    def _add(self, path: str, methods: frozenset[str], handler: Any) -> None:
-        self._routes[path] = (handler, methods)
-```
+(`__init__`/`_add` ship in the skeleton above — Tasks 4-7 only call `self._add(...)`; no other module is involved in routing.)
 
 And asset shells — `index.html` (real content replaced by Task 9, but functional now):
 
