@@ -150,8 +150,9 @@ Static assets from `dashboard_assets/` with correct content-type and
 immediately. The dashboard never runs the pipeline in-process. The in-flight
 `_launched` Popen bookkeeping is shared logic extracted from `server.py`, not
 duplicated. `BuildLockHeld` maps to HTTP 409 with the holder pid.
-`jobs.job_state`'s ordered evaluation (running → abandoned →
-failed-at-startup) reports progress; the frontend polls `/api/repos`.
+`jobs.job_state`'s first-match evaluation (states: `running`, `starting`,
+`failed-at-startup`, `abandoned`) reports progress; the frontend polls
+`/api/repos`.
 
 ## Security model
 
