@@ -2,6 +2,8 @@
 
 **Date:** 2026-09-12
 **Status:** Approved design (brainstorming session, all sections user-approved)
+**UI/UX design brief** (designer handoff, xAI design system):
+[`2026-09-12-dashboard-uiux-brief.md`](2026-09-12-dashboard-uiux-brief.md)
 **Target release:** 0.10.0
 
 ## Problem
