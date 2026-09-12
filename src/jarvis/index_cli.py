@@ -1812,12 +1812,14 @@ def _remove_zoekt_shards(slug: str, root: Path | None = None) -> list[Path]:
     return removed
 
 
-def _cmd_forget(args: argparse.Namespace) -> int:
+def forget_repo(slug: str) -> tuple[bool, str]:
+    """The full `jarvis forget` body, shared with the dashboard's
+    POST /api/repos/{slug}/forget. Returns (ok, message); callers decide
+    how to surface it (CLI prints, dashboard JSONs)."""
     try:
-        slug = config.repo_slug(args.slug)
+        slug = config.repo_slug(slug)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return False, str(exc)
     try:
         with jobs.build_lock(slug):
             registry = Registry(config.data_dir() / "registry.db")
@@ -1827,8 +1829,7 @@ def _cmd_forget(args: argparse.Namespace) -> int:
             finally:
                 registry.close()
             if not existed:
-                print(f"error: no such repo: {slug}", file=sys.stderr)
-                return 1
+                return False, f"no such repo: {slug}"
             if entry is not None:
                 _unpin_zoekt_repo_name(Path(entry.path))
             # Package-edge teardown (spec TSI-08: refresh forget for all new
@@ -1862,9 +1863,16 @@ def _cmd_forget(args: argparse.Namespace) -> int:
         # Destroying a repo's row, graph edges, and artifacts while a writer
         # is mid-run corrupts that run and can resurrect artifacts the forget
         # already removed.
-        print(f"error: {exc}", file=sys.stderr)
+        return False, str(exc)
+    return True, f"forgot {slug}"
+
+
+def _cmd_forget(args: argparse.Namespace) -> int:
+    ok, message = forget_repo(args.slug)
+    if not ok:
+        print(f"error: {message}", file=sys.stderr)
         return 1
-    print(f"forgot {slug}")
+    print(message)
     return 0
 
 
