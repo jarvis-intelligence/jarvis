@@ -422,3 +422,24 @@ def test_search_degrades_each_signal_independently(tmp_path: Path, monkeypatch):
         assert body["lexical"]["hits"][0]["path"] == "a.py"
         assert body.get("semanticError") or body["semantic"] is None
         assert "elapsedMs" in body
+
+
+def test_cli_wires_dashboard_subcommand():
+    from jarvis import index_cli
+
+    parser = index_cli.build_parser()
+    args = parser.parse_args(["dashboard", "--port", "1234", "--no-open"])
+    assert args.func is index_cli._cmd_dashboard
+    assert args.port == 1234 and args.no_open is True
+
+
+def test_cmd_dashboard_delegates_to_serve(monkeypatch):
+    from jarvis import dashboard, index_cli
+
+    calls = {}
+    monkeypatch.setattr(dashboard, "serve",
+                        lambda port, open_browser: calls.update(port=port, open=open_browser))
+    rc = index_cli._cmd_dashboard(
+        index_cli.build_parser().parse_args(["dashboard", "--no-open"]))
+    assert rc == 0
+    assert calls == {"port": None, "open": False}

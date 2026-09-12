@@ -1957,6 +1957,18 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dashboard(args: argparse.Namespace) -> int:
+    """Serve the localhost dashboard (blocks until Ctrl-C)."""
+    from jarvis import dashboard
+
+    try:
+        dashboard.serve(args.port, open_browser=not args.no_open)
+    except OSError as exc:  # e.g. port already in use
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 
 _REMOVED_OPTIONS: dict[str, str] = {
     # Superseded by reversible --scip/--no-scip and the always-on syntax
@@ -2074,6 +2086,14 @@ def build_parser() -> argparse.ArgumentParser:
     forget_parser = subparsers.add_parser("forget", help="remove a repo's registration and published index")
     forget_parser.add_argument("slug")
     forget_parser.set_defaults(func=_cmd_forget)
+
+    dashboard_parser = subparsers.add_parser(
+        "dashboard", help="serve the localhost operator dashboard")
+    dashboard_parser.add_argument("--port", type=int, default=None,
+                                  help="port (default: JARVIS_DASHBOARD_PORT or 6080)")
+    dashboard_parser.add_argument("--no-open", action="store_true",
+                                  help="do not open the browser automatically")
+    dashboard_parser.set_defaults(func=_cmd_dashboard)
 
     watch_parser = subparsers.add_parser("watch", help="watch a repo and debounce-reindex on change")
     watch_parser.add_argument("path", help="path to the repo to watch")
