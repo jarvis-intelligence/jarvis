@@ -257,9 +257,17 @@ function indexForm() {
 
 async function reindex(row) {
   const result = await api(`/api/repos/${encodeURIComponent(row.slug)}/reindex`, { method: "POST", body: "{}" });
-  if (result._status === 409) { state.banner = `already indexing${result.pid ? ` (pid ${result.pid})` : ""}`; await renderRepos(); return; }
-  if (result.error) { state.banner = result.error; await renderRepos(); return; }
-  toast("reindex started", row.slug); await renderRepos();
+  if (result._status === 409) {
+    await renderRepos(`already indexing${result.pid ? ` (pid ${result.pid})` : ""}`);
+    return;
+  }
+  if (result.error) {
+    await renderRepos(result.error);
+    return;
+  }
+  state.banner = null;
+  toast("reindex started", row.slug);
+  await renderRepos();
 }
 
 function forgetModal(row) {
@@ -275,6 +283,10 @@ function forgetModal(row) {
   confirm.addEventListener("click", async () => {
     const result = await api(`/api/repos/${encodeURIComponent(row.slug)}/forget`, { method: "POST", body: JSON.stringify({ confirm: typed.value }) });
     if (result.error) { modal.append(inlineError(result.error)); return; }
+    state.logs.delete(row.slug);
+    state.logOffsets.delete(row.slug);
+    state.collapsedLogs.delete(row.slug);
+    state.previousStatuses.delete(row.slug);
     closeOverlay();
     const oldRow = document.querySelector(`[data-slug="${CSS.escape(row.slug)}"]`);
     if (oldRow) { oldRow.classList.add("leaving"); window.setTimeout(() => oldRow.remove(), 150); }
@@ -291,10 +303,11 @@ function openOverlay(content) {
 }
 function closeOverlay() { const overlay = document.getElementById("overlay"); overlay.hidden = true; overlay.replaceChildren(); }
 
-async function renderRepos() {
+async function renderRepos(freshBanner) {
   const response = await api("/api/repos");
   if (currentRoute().name !== "repos") return;
   if (response.error) { document.getElementById("view").replaceChildren(title("INDEXED REPOSITORIES", "Repos"), inlineError(response.error)); return; }
+  state.banner = freshBanner || null;
   for (const row of response.repos || []) {
     if (state.previousStatuses.get(row.slug) === "indexing" && row.status === "indexed") {
       toast("indexed", row.slug);
