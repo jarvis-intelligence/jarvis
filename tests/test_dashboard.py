@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -143,3 +144,41 @@ def test_index_served_with_html_content_type(tmp_path: Path, monkeypatch):
             assert resp.status == 200
             assert resp.headers["Content-Type"].startswith("text/html")
             assert b"<html" in resp.read()
+
+
+def test_malformed_content_length_is_400_json(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        req = urllib.request.Request(
+            srv.url + "/api/overview", data=b"{}", method="POST",
+            headers={"Content-Length": "garbage"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status, body = resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as err:
+            status, body = err.code, json.loads(err.read())
+        assert status == 400 and "error" in body
+
+
+def test_malformed_origin_is_rejected_json(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, body = srv.post("/api/overview", {}, headers={"Origin": "http://[::1"})
+        assert status == 403 and "error" in body
+
+
+def test_malformed_request_path_is_400_json(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        host, port = srv.httpd.server_address[:2]
+        with socket.create_connection((host, port), timeout=10) as sock:
+            sock.sendall(b"GET http://x[ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    data = b"".join(chunks)
+    assert data.startswith(b"HTTP/1.1 400")
+    assert b'"error"' in data

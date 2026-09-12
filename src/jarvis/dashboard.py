@@ -111,7 +111,10 @@ def make_handler(api: DashboardApi) -> type[BaseHTTPRequestHandler]:
             if self.command == "POST":
                 origin = self.headers.get("Origin")
                 if origin is not None:
-                    origin_host = urlparse(origin).hostname
+                    try:
+                        origin_host = urlparse(origin).hostname
+                    except ValueError:
+                        origin_host = None  # unparseable origin: fail closed
                     if origin_host not in _ALLOWED_HOSTNAMES:
                         self._send(403, {"error": f"forbidden Origin {origin!r}"})
                         return False
@@ -142,7 +145,11 @@ def make_handler(api: DashboardApi) -> type[BaseHTTPRequestHandler]:
         def _dispatch(self, body: dict[str, Any]) -> None:
             if not self._guard():
                 return
-            parsed = urlparse(self.path)
+            try:
+                parsed = urlparse(self.path)
+            except ValueError:
+                self._send(400, {"error": "invalid request path"})
+                return
             if parsed.path == "/" or parsed.path == "/index.html":
                 self._serve_static("index.html")
                 return
@@ -161,8 +168,12 @@ def make_handler(api: DashboardApi) -> type[BaseHTTPRequestHandler]:
             self._dispatch({})
 
         def do_POST(self) -> None:  # noqa: N802
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._send(400, {"error": "invalid Content-Length"})
+                return
+            raw = self.rfile.read(length) if length > 0 else b"{}"
             try:
                 body = json.loads(raw or b"{}")
             except json.JSONDecodeError:
