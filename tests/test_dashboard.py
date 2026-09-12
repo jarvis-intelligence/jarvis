@@ -459,3 +459,30 @@ def test_assets_are_wired_and_served(tmp_path: Path, monkeypatch):
             with urllib.request.urlopen(f"{srv.url}/{name}", timeout=10) as resp:
                 assert resp.status == 200
                 assert ctype in resp.headers["Content-Type"]
+
+
+def test_search_semantic_timeout_degrades(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    from jarvis import dashboard, server
+    import jarvis.search as search_mod
+    import time as time_mod
+
+    class FakeLifecycle:
+        def ensure_running(self):
+            return "http://zoekt"
+
+    monkeypatch.setattr(server, "_zoekt_lifecycle", FakeLifecycle())
+    monkeypatch.setattr(search_mod, "search_zoekt",
+                        lambda base, q: search_mod.ZoektSearchResult(hits=[], total_matches=0, file_count=0))
+    monkeypatch.setattr(dashboard, "_SEMANTIC_TIMEOUT", 0.05)
+
+    def slow_search(*args, **kwargs):
+        time_mod.sleep(0.4)
+        return {"results": [], "total": 0}
+
+    monkeypatch.setattr("jarvis.semantic.semantic_search", slow_search)
+    with _Server() as srv:
+        status, body = srv.get("/api/search?q=hello&repo=demo")
+        assert status == 200
+        assert "timed out" in body["semanticError"]
+        assert body["lexical"] is not None

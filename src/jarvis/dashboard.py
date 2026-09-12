@@ -11,6 +11,7 @@ catch returns {"error": ...} JSON and logs to stderr.
 
 from __future__ import annotations
 
+import concurrent.futures
 import importlib.resources
 import json
 import sys
@@ -29,6 +30,29 @@ _ASSET_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
 }
+
+
+# Semantic search embeds its query with a native torch stack that does not
+# tolerate concurrent first-use initialization: two simultaneous model loads
+# in one process have segfaulted (observed on macOS/arm64). All embedding
+# traffic is therefore serialized through a single worker, and callers wait
+# at most _SEMANTIC_TIMEOUT seconds — a cold first load (model download)
+# surfaces as a per-signal "timed out" degradation instead of hanging the
+# response, and later calls hit the warm cache.
+_SEMANTIC_TIMEOUT = 20.0
+_semantic_worker = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic")
+
+
+def _guarded_semantic(fn):
+    """Run an embedding-touching callable on the serialized semantic worker.
+    The timeout bounds the caller: the worker keeps loading, so a retry
+    after a timeout hits the warm model cache."""
+    future = _semantic_worker.submit(fn)
+    try:
+        return future.result(timeout=_SEMANTIC_TIMEOUT)
+    except concurrent.futures.TimeoutError as exc:
+        raise DashboardError(504, "semantic search timed out — the embedding model is still loading; retry shortly") from exc
+
 
 _TOOL_NAMES = {
     "documentSymbols": "document_symbols",
@@ -237,7 +261,7 @@ class DashboardApi:
                 raise DashboardError(400, f"missing required parameter {pname!r}")
         kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}
         t0 = time.perf_counter()
-        result = fn(**kwargs)
+        result = _guarded_semantic(lambda: fn(**kwargs)) if name == "semanticSearch" else fn(**kwargs)
         return 200, {"result": result,
                      "elapsedMs": round((time.perf_counter() - t0) * 1000, 1)}
 
@@ -269,10 +293,10 @@ class DashboardApi:
             try:
                 from jarvis import semantic
 
-                out["semantic"] = semantic.semantic_search(
+                out["semantic"] = _guarded_semantic(lambda: semantic.semantic_search(
                     repo, q, 10,
                     zoekt_base_url=server._zoekt_base_url_or_none(),
-                    scip_conn=server._scip_conn_or_none(repo))
+                    scip_conn=server._scip_conn_or_none(repo)))
             except Exception as exc:
                 out["semanticError"] = str(exc)
             try:
