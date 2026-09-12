@@ -115,6 +115,8 @@ class DashboardApi:
         self._add("/api/overview", frozenset({"GET"}), self._overview)
         self._add("/api/repos", frozenset({"GET"}), self._repos)
         self._add("/api/graph", frozenset({"GET"}), self._graph)
+        self._add("/api/repos/index", frozenset({"POST"}), self._index_action)
+
     def _add(self, path: str, methods: frozenset[str], handler: Any) -> None:
         self._routes[path] = (handler, methods)
 
@@ -154,6 +156,13 @@ class DashboardApi:
                 return (lambda q, b, s=slug: self._log_tail(s, q, b), frozenset({"GET"}))
             if len(parts) == 4 and parts[3] == "file":
                 return (lambda q, b, s=slug: self._source_slice(s, q, b), frozenset({"GET"}))
+            if len(parts) == 4 and parts[3] == "reindex":
+                return (lambda q, b, s=slug: self._reindex_action(s, q, b),
+                        frozenset({"POST"}))
+            if len(parts) == 4 and parts[3] == "forget":
+                return (lambda q, b, s=slug: self._forget_action(s, q, b),
+                        frozenset({"POST"}))
+
         return None
 
     def _server_module(self):
@@ -341,6 +350,40 @@ class DashboardApi:
             lines = fh.readlines()
         selected = [ln.rstrip("\n") for ln in lines[max(start - 1, 0):max(end, 0)]]
         return 200, {"path": rel, "start": start, "end": end, "lines": selected}
+
+    def _spawn_or_error(self, path: str, semantic: bool, scip: bool | None):
+        server = self._server_module()
+        payload = server._spawn_index(path, semantic=semantic, scip=scip)
+        if "error" in payload:
+            raise DashboardError(400, payload["error"])
+        if payload.get("alreadyRunning"):
+            payload.pop("alreadyRunning")
+            return 409, payload
+        return 202, payload
+
+    def _index_action(self, query, body):
+        path = body.get("path")
+        if not path or not isinstance(path, str):
+            raise DashboardError(400, "body must include a string 'path'")
+        semantic = bool(body.get("semantic", False))
+        scip = body.get("scip") if body.get("scip") is None else bool(body["scip"])
+        return self._spawn_or_error(path, semantic, scip)
+
+    def _reindex_action(self, slug: str, query, body):
+        entry = self._repo_entry_or_404(slug)
+        return self._spawn_or_error(entry.path, bool(body.get("semantic", False)),
+                                    body.get("scip"))
+
+    def _forget_action(self, slug: str, query, body):
+        self._repo_entry_or_404(slug)
+        if body.get("confirm") != slug:
+            raise DashboardError(400, f"confirm must be the exact slug {slug!r}")
+        from jarvis import index_cli
+        ok, message = index_cli.forget_repo(slug)
+        if not ok:
+            status = 409 if "lock" in message.lower() else 400
+            raise DashboardError(status, message)
+        return 200, {"ok": True, "message": message}
 
     def _graph(self, query, body):
         nodes, edges = _graph_edges()

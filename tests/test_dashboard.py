@@ -13,6 +13,15 @@ import pytest
 
 from jarvis import config
 
+def _run_git(repo: Path, *commands: str) -> None:
+    import subprocess
+
+    for command in commands:
+        subprocess.run(
+            ["git", "-C", str(repo), *command.split()],
+            check=True, capture_output=True,
+        )
+
 
 def test_dashboard_port_default(monkeypatch):
     monkeypatch.delenv("JARVIS_DASHBOARD_PORT", raising=False)
@@ -295,3 +304,57 @@ def test_source_viewer_rejects_traversal(tmp_path: Path, monkeypatch):
         for bad in ("../escape.py", "/etc/passwd", "a/../../b.py"):
             status, body = srv.get(f"/api/repos/demo/file?p={urllib.parse.quote(bad)}")
             assert status == 400 and "error" in body, bad
+
+
+def test_index_action_maps_spawn_payload(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n")
+    _run_git(repo, "init", "config user.email t@t", "config user.name t", "add a.py", "commit -m x")
+    from jarvis import dashboard, server
+
+    def fake_spawn(path, *, semantic, scip):
+        return {"repo": "repo", "path": str(repo), "status": "indexing",
+                "state": "starting", "pid": 4242, "log": "/tmp/x.log"}
+
+    monkeypatch.setattr(server, "_spawn_index", fake_spawn)
+    with _Server() as srv:
+        status, body = srv.post("/api/repos/index", {"path": str(repo)})
+        assert status == 202 and body["pid"] == 4242
+
+
+def test_reindex_conflict_maps_to_409(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    _seed_registry(tmp_path)
+    from jarvis import dashboard, server
+
+    def fake_spawn(path, *, semantic, scip):
+        return {"repo": "demo", "alreadyRunning": True, "state": "running", "pid": 99}
+
+    monkeypatch.setattr(server, "_spawn_index", fake_spawn)
+    with _Server() as srv:
+        status, body = srv.post("/api/repos/demo/reindex", {})
+        assert status == 409 and body["pid"] == 99
+
+
+def test_forget_requires_typed_confirm(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    _seed_registry(tmp_path)
+    with _Server() as srv:
+        status, body = srv.post("/api/repos/demo/forget", {"confirm": "wrong"})
+        assert status == 400 and "confirm" in body["error"]
+
+
+def test_forget_executes_and_reports(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    _seed_registry(tmp_path)
+    from jarvis import index_cli
+
+    calls = []
+    monkeypatch.setattr(index_cli, "forget_repo",
+                        lambda slug: calls.append(slug) or (True, "forgot demo"))
+    with _Server() as srv:
+        status, body = srv.post("/api/repos/demo/forget", {"confirm": "demo"})
+        assert status == 200 and body == {"ok": True, "message": "forgot demo"}
+        assert calls == ["demo"]
