@@ -16,12 +16,14 @@ import json
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from jarvis import config
 
 _ALLOWED_HOSTNAMES = {"127.0.0.1", "localhost"}
+_LOG_CHUNK = 64_000
 _ASSET_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -148,6 +150,10 @@ class DashboardApi:
                     lambda query, body, repo_slug=slug: self._repo_detail(repo_slug, query, body),
                     frozenset({"GET"}),
                 )
+            if len(parts) == 4 and parts[3] == "log":
+                return (lambda q, b, s=slug: self._log_tail(s, q, b), frozenset({"GET"}))
+            if len(parts) == 4 and parts[3] == "file":
+                return (lambda q, b, s=slug: self._source_slice(s, q, b), frozenset({"GET"}))
         return None
 
     def _server_module(self):
@@ -292,6 +298,49 @@ class DashboardApi:
             "recovery": recovery_for(entry),
         })
         return 200, row
+
+    def _log_tail(self, slug: str, query, body):
+        self._repo_entry_or_404(slug)
+        log = config.index_log(slug)
+        try:
+            offset = int(query.get("offset", ["0"])[0])
+        except ValueError:
+            raise DashboardError(400, "offset must be an integer")
+        if offset < 0:
+            offset = 0
+        try:
+            size = log.stat().st_size
+        except OSError:
+            return 200, {"chunk": "", "nextOffset": 0, "size": 0}
+        with log.open("rb") as fh:
+            fh.seek(offset)
+            chunk = fh.read(_LOG_CHUNK).decode(errors="replace")
+        return 200, {
+            "chunk": chunk,
+            "nextOffset": min(offset + len(chunk.encode()), size),
+            "size": size,
+        }
+
+    def _source_slice(self, slug: str, query, body):
+        entry = self._repo_entry_or_404(slug)
+        rel = query.get("p", [""])[0]
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            raise DashboardError(400, f"invalid path {rel!r}")
+        root = Path(entry.path).resolve()
+        target = (root / rel).resolve()
+        if target != root and root not in target.parents:
+            raise DashboardError(400, f"path escapes repo root: {rel}")
+        if not target.is_file():
+            raise DashboardError(404, f"no such file: {rel}")
+        try:
+            start = int(query.get("start", ["1"])[0])
+            end = int(query.get("end", [str(start + 200)])[0])
+        except ValueError:
+            raise DashboardError(400, "start/end must be integers")
+        with target.open(errors="replace") as fh:
+            lines = fh.readlines()
+        selected = [ln.rstrip("\n") for ln in lines[max(start - 1, 0):max(end, 0)]]
+        return 200, {"path": rel, "start": start, "end": end, "lines": selected}
 
     def _graph(self, query, body):
         nodes, edges = _graph_edges()

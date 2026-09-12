@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -249,3 +250,48 @@ def test_repos_does_not_create_registry(tmp_path: Path, monkeypatch):
         status, body = srv.get("/api/repos")
     assert status == 200 and body == {"repos": []}
     assert not (tmp_path / "registry.db").exists()
+
+
+def test_log_tail_streams_by_offset(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    _seed_registry(tmp_path)
+    log = config.index_log("demo")
+    log.write_bytes(b"first line\nsecond line\n")
+    monkeypatch.setattr(dashboard, "_LOG_CHUNK", 11)
+    with _Server() as srv:
+        status, body = srv.get("/api/repos/demo/log?offset=0")
+        assert status == 200 and body["chunk"].startswith("first line")
+        mid = body["nextOffset"]
+        monkeypatch.setattr(dashboard, "_LOG_CHUNK", 12)
+        status, body2 = srv.get(f"/api/repos/demo/log?offset={mid}")
+        assert status == 200 and body2["chunk"].startswith("second line")
+        assert body2["nextOffset"] == log.stat().st_size
+
+
+def test_log_tail_missing_log_is_empty_not_error(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    _seed_registry(tmp_path)
+    with _Server() as srv:
+        status, body = srv.get("/api/repos/demo/log?offset=0")
+        assert status == 200 and body == {"chunk": "", "nextOffset": 0, "size": 0}
+
+
+def test_source_viewer_serves_confined_slice(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.py").write_text("one\ntwo\nthree\n")
+    _seed_registry(tmp_path)
+    with _Server() as srv:
+        status, body = srv.get("/api/repos/demo/file?p=mod.py&start=2&end=3")
+        assert status == 200
+        assert body["lines"] == ["two", "three"]
+
+
+def test_source_viewer_rejects_traversal(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    _seed_registry(tmp_path)
+    with _Server() as srv:
+        for bad in ("../escape.py", "/etc/passwd", "a/../../b.py"):
+            status, body = srv.get(f"/api/repos/demo/file?p={urllib.parse.quote(bad)}")
+            assert status == 400 and "error" in body, bad
