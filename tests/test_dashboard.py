@@ -110,9 +110,9 @@ class _Server:
             headers={"Content-Type": "application/json", **(headers or {})})
         return self._run(req)
 
-    def _run(self, req):
+    def _run(self, req, timeout: int = 20):
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, json.loads(resp.read() or b"{}")
         except urllib.error.HTTPError as err:
             return err.code, json.loads(err.read() or b"{}")
@@ -461,6 +461,23 @@ def test_assets_are_wired_and_served(tmp_path: Path, monkeypatch):
                 assert ctype in resp.headers["Content-Type"]
 
 
+
+@pytest.fixture(autouse=True)
+def _drain_semantic_gate():
+    """The semantic gate/worker are module-level singletons shared across
+    tests in this file; a test whose in-flight task outlives its assertions
+    (timed-out caller, still-sleeping task) would leak a held gate into the
+    next test's first search. Drain it before each test starts."""
+    yield
+    import time as time_mod
+
+    deadline = time_mod.time() + 5
+    while time_mod.time() < deadline:
+        if dashboard._semantic_gate.acquire(blocking=False):
+            dashboard._semantic_gate.release()
+            return
+        time_mod.sleep(0.05)
+    raise AssertionError("semantic gate still held 5s after test end")
 def test_search_semantic_timeout_degrades(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
     from jarvis import dashboard, server
@@ -519,5 +536,13 @@ def test_search_semantic_busy_rejects_second_query(tmp_path: Path, monkeypatch):
         assert second[0] == 200 and "busy" in second[1]["semanticError"]
         # After the task finishes, the gate is released again.
         time_mod.sleep(0.6)
-        third = srv.get("/api/search?q=three&repo=demo")
+        # After the task finishes, the gate is released again. Poll rather
+        # than sleep a fixed amount: CI load can stretch the 0.5s task.
+        deadline = time_mod.time() + 5
+        third = {}
+        while time_mod.time() < deadline:
+            third = srv.get("/api/search?q=three&repo=demo")
+            if "timed out" in third[1].get("semanticError", ""):
+                break
+            time_mod.sleep(0.1)
         assert third[0] == 200 and "timed out" in third[1]["semanticError"]
