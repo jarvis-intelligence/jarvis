@@ -2,12 +2,24 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>jarvis console</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header id="topbar"><span class="wordmark">jarvis <span class="accent">▮</span> console</span></header>
-<main id="view"><p class="body-mid">loading…</p></main>
+<header id="topbar">
+  <span class="wordmark">jarvis <span class="accent">▮</span> console</span>
+  <span id="top-right" class="top-meta"></span>
+</header>
+<nav id="tabs" aria-label="Console sections">
+  <a href="#/repos" data-tab="repos">Repos</a>
+  <a href="#/repo" data-tab="repo" hidden>Repo detail</a>
+  <a href="#/search" data-tab="search">Search</a>
+  <a href="#/playground" data-tab="playground">Playground</a>
+</nav>
+<div id="status-strip" class="mono-md"></div>
+<main id="view"></main>
+<div id="overlay" hidden></div>
 <script src="/app.js"></script>
 </body>
 </html>

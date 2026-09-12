@@ -443,3 +443,19 @@ def test_cmd_dashboard_delegates_to_serve(monkeypatch):
         index_cli.build_parser().parse_args(["dashboard", "--no-open"]))
     assert rc == 0
     assert calls == {"port": None, "open": False}
+
+def test_assets_are_wired_and_served(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    html = dashboard.assets_bytes("index.html").decode()
+    assert 'src="/app.js"' in html and 'href="/style.css"' in html
+    js = dashboard.assets_bytes("app.js").decode()
+    for route in ("#/repos", "#/search", "#/playground"):
+        assert route in js
+    css = dashboard.assets_bytes("style.css").decode()
+    for token in ("--canvas:", "--accent-sunset:", "--status-failed:"):
+        assert token in css
+    with _Server() as srv:
+        for name, ctype in (("app.js", "text/javascript"), ("style.css", "text/css")):
+            with urllib.request.urlopen(f"{srv.url}/{name}", timeout=10) as resp:
+                assert resp.status == 200
+                assert ctype in resp.headers["Content-Type"]
