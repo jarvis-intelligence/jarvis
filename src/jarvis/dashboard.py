@@ -51,6 +51,56 @@ def _version() -> str:
         return "dev"
 
 
+def _dir_bytes(path) -> int:
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) if path.exists() else 0
+
+
+def _storage_sizes(slug: str) -> dict[str, int]:
+    scip = _dir_bytes(config.index_dir(slug))
+    zoekt_dir = config.data_dir() / ".zoekt"
+    zoekt = sum(
+        f.stat().st_size
+        for f in zoekt_dir.glob(f"{slug}_*")
+        if f.is_file()
+    ) if zoekt_dir.exists() else 0
+    lance = _dir_bytes(config.lancedb_dir() / f"{slug}.lance")
+    return {"scip": scip, "zoekt": zoekt, "lance": lance, "total": scip + zoekt + lance}
+
+
+def _graph_edges() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Return graph nodes and dependent-to-dependency edges read-only."""
+    import sqlite3
+
+    db_path = config.data_dir() / "registry.db"
+    if not db_path.exists():
+        return [], []
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        try:
+            nodes = [
+                {"id": package_id, "repo": repo, "name": name}
+                for package_id, repo, name in conn.execute("SELECT id, repo, name FROM packages")
+            ]
+
+            edges = [
+                {"from": from_package_id, "to": to_package_id}
+                for from_package_id, to_package_id in conn.execute(
+                    "SELECT from_package_id, to_package_id FROM edges"
+                )
+            ]
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return [], []
+    finally:
+        conn.close()
+    return nodes, edges
+
+
+def _registry_exists() -> bool:
+    return (config.data_dir() / "registry.db").exists()
+
+
 class DashboardApi:
     """Route table and handlers. dispatch() never raises: it maps
     DashboardError and unexpected exceptions onto (status, {"error": ...})."""
@@ -61,7 +111,8 @@ class DashboardApi:
         # resolve through _resolve_dynamic (Tasks 4-6).
         self._routes: dict[str, tuple[Any, frozenset[str]]] = {}
         self._add("/api/overview", frozenset({"GET"}), self._overview)
-
+        self._add("/api/repos", frozenset({"GET"}), self._repos)
+        self._add("/api/graph", frozenset({"GET"}), self._graph)
     def _add(self, path: str, methods: frozenset[str], handler: Any) -> None:
         self._routes[path] = (handler, methods)
 
@@ -89,10 +140,162 @@ class DashboardApi:
         raise DashboardError(404, f"not found: {path}")
 
     def _resolve_dynamic(self, path: str) -> tuple[Any, frozenset[str]] | None:
-        return None  # dynamic segments arrive with Tasks 4-6
+        parts = path.strip("/").split("/")
+        if len(parts) >= 3 and parts[:2] == ["api", "repos"]:
+            slug = parts[2]
+            if len(parts) == 3:
+                return (
+                    lambda query, body, repo_slug=slug: self._repo_detail(repo_slug, query, body),
+                    frozenset({"GET"}),
+                )
+        return None
+
+    def _server_module(self):
+        from jarvis import server
+        return server
 
     def _overview(self, query, body):
-        return 200, {"version": _version(), "dataDir": str(config.data_dir())}
+        server = self._server_module()
+        try:
+            base = server._zoekt().base_url_if_running()
+            zoekt_running = base is not None
+        except Exception:
+            base, zoekt_running = None, False
+        data_dir = config.data_dir()
+        disk = (
+            _dir_bytes(data_dir / "scip")
+            + _dir_bytes(data_dir / ".zoekt")
+            + _dir_bytes(data_dir / "lancedb")
+        )
+        if _registry_exists():
+            registry = self._registry()
+            try:
+                repos = len(registry.list())
+            finally:
+                registry.close()
+        else:
+            repos = 0
+        return 200, {
+            "version": _version(),
+            "dataDir": str(data_dir),
+            "zoektBase": base,
+            "zoektRunning": zoekt_running,
+            "repos": repos,
+            "diskBytes": disk,
+        }
+
+    def _registry(self):
+        from jarvis.registry import Registry
+        return Registry(config.data_dir() / "registry.db")
+
+    def _repo_row(self, entry) -> dict[str, Any]:
+        from jarvis.registry import recovery_for
+
+        server = self._server_module()
+        freshness: dict[str, Any] | None = None
+        indexing: dict[str, Any] | None = None
+        indexed = False
+        try:
+            indexed, snapshot = server._service().get_index_status(entry.slug, entry.path)
+            freshness = {
+                "commit": snapshot.commit,
+                "freshness": snapshot.freshness.value,
+                "stale": snapshot.stale,
+                "generation": snapshot.generation,
+            }
+        except Exception:
+            pass
+        try:
+            fields = server._indexing_fields(entry.slug, indexed)
+            indexing = fields.get("indexing")
+        except Exception:
+            pass
+        return {
+            "slug": entry.slug,
+            "path": entry.path,
+            "language": entry.language,
+            "status": entry.status,
+            "scipState": entry.scip_state,
+            "scipEnabled": entry.scip_enabled,
+            "semanticIndexedAt": entry.semantic_indexed_at.isoformat()
+            if entry.semantic_indexed_at
+            else None,
+            "semanticDeclined": entry.semantic_declined,
+            "lastIndexed": entry.last_indexed.isoformat(),
+            "freshness": freshness,
+            "indexing": indexing,
+            "recovery": recovery_for(entry),
+            "storageBytes": _storage_sizes(entry.slug),
+        }
+
+    def _repos(self, query, body):
+        if not _registry_exists():
+            return 200, {"repos": []}
+        registry = self._registry()
+        try:
+            entries = registry.list()
+        finally:
+            registry.close()
+        return 200, {"repos": [self._repo_row(entry) for entry in entries]}
+
+    def _repo_entry_or_404(self, slug: str):
+        if not _registry_exists():
+            raise DashboardError(404, f"no such repo: {slug}")
+        registry = self._registry()
+        try:
+            entry = registry.get(slug)
+        finally:
+            registry.close()
+        if entry is None:
+            raise DashboardError(404, f"no such repo: {slug}")
+        return entry
+
+    def _repo_detail(self, slug: str, query, body):
+        from jarvis.registry import recovery_for
+
+        entry = self._repo_entry_or_404(slug)
+        server = self._server_module()
+        row = self._repo_row(entry)
+        index_dir = config.index_dir(slug)
+        try:
+            current = (index_dir / "current").read_text().strip()
+        except OSError:
+            current = None
+        snapshots = [
+            {
+                "name": snapshot.name,
+                "bytes": snapshot.stat().st_size,
+                "mtime": snapshot.stat().st_mtime,
+                "current": snapshot.name == current,
+            }
+            for snapshot in sorted(
+                index_dir.glob("index-*.db"), key=lambda candidate: -candidate.stat().st_mtime
+            )
+        ] if index_dir.exists() else []
+        capabilities = server.get_index_status(slug, entry.path)
+        nodes, edges = _graph_edges()
+        own_ids = {node["id"] for node in nodes if node["repo"] == slug}
+        by_id = {node["id"]: f"{node['repo']}:{node['name']}" for node in nodes}
+        depends_on = sorted({by_id[edge["to"]] for edge in edges if edge["from"] in own_ids})
+        depended_on_by = sorted(
+            {by_id[edge["from"]] for edge in edges if edge["to"] in own_ids}
+        )
+        try:
+            log_path = str(config.index_log(slug))
+        except Exception:
+            log_path = None
+        row.update({
+            "snapshots": snapshots,
+            "capabilities": capabilities,
+            "graph": {"dependsOn": depends_on, "dependedOnBy": depended_on_by},
+            "logPath": log_path,
+            "recovery": recovery_for(entry),
+        })
+        return 200, row
+
+    def _graph(self, query, body):
+        nodes, edges = _graph_edges()
+        return 200, {"nodes": nodes, "edges": edges}
 
 
 def make_handler(api: DashboardApi) -> type[BaseHTTPRequestHandler]:

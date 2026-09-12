@@ -182,3 +182,70 @@ def test_malformed_request_path_is_400_json(tmp_path: Path, monkeypatch):
     data = b"".join(chunks)
     assert data.startswith(b"HTTP/1.1 400")
     assert b'"error"' in data
+
+
+def _seed_registry(tmp_path: Path, status: str = "indexed") -> None:
+    from jarvis.registry import Registry
+
+    registry = Registry(config.data_dir() / "registry.db")
+    registry.upsert("demo", str(tmp_path / "repo"), "python", "abc123", status)
+    registry.close()
+
+
+def test_repos_lists_registry_rows(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    _seed_registry(tmp_path)
+    with _Server() as srv:
+        status, body = srv.get("/api/repos")
+        assert status == 200
+        row = next(r for r in body["repos"] if r["slug"] == "demo")
+        assert row["language"] == "python"
+        assert row["status"] == "indexed"
+        assert row["storageBytes"]["total"] >= 0
+        assert "freshness" in row  # may be null — key always present
+
+
+def test_repo_detail_404_unknown_slug(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, body = srv.get("/api/repos/ghost")
+        assert status == 404 and "error" in body
+
+
+def test_repo_detail_includes_snapshots_and_recovery(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    _seed_registry(tmp_path, status="degraded")
+    index_dir = config.index_dir("demo")
+    index_dir.mkdir(parents=True)
+    (index_dir / "index-deadbeef-1.db").write_bytes(b"x")
+    (index_dir / "current").write_text("index-deadbeef-1.db")
+    with _Server() as srv:
+        status, body = srv.get("/api/repos/demo")
+        assert status == 200
+        assert body["snapshots"][0]["name"] == "index-deadbeef-1.db"
+        assert body["snapshots"][0]["current"] is True
+        assert body["recovery"]  # degraded rows derive a recovery command
+
+
+def test_graph_returns_nodes_and_edges(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    from jarvis.graph import GraphStore
+
+    store = GraphStore(config.data_dir() / "registry.db")
+    pkg = store.upsert_package(repo="demo", name="pip:demo")
+    dep = store.upsert_package(repo="other", name="pip:dep")
+    store.add_edge(from_package_id=dep, to_package_id=pkg)
+    store.close()
+    with _Server() as srv:
+        status, body = srv.get("/api/graph")
+        assert status == 200
+        assert any(n["name"] == "pip:demo" for n in body["nodes"])
+        assert {"from": dep, "to": pkg} in body["edges"]
+
+
+def test_repos_does_not_create_registry(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, body = srv.get("/api/repos")
+    assert status == 200 and body == {"repos": []}
+    assert not (tmp_path / "registry.db").exists()
