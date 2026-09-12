@@ -30,6 +30,21 @@ _ASSET_TYPES = {
     ".css": "text/css; charset=utf-8",
 }
 
+_TOOL_NAMES = {
+    "documentSymbols": "document_symbols",
+    "goToDefinition": "go_to_definition",
+    "findReferences": "find_references",
+    "callHierarchy": "call_hierarchy",
+    "typeHierarchy": "type_hierarchy",
+    "getIndexStatus": "get_index_status",
+    "searchCode": "search_code",
+    "semanticSearch": "semantic_search_tool",
+    "blastRadius": "blast_radius_tool",
+    "indexRepo": "index_repo_tool",
+}
+
+
+
 
 class DashboardError(Exception):
     """Handler-level failure carrying its HTTP status."""
@@ -116,6 +131,10 @@ class DashboardApi:
         self._add("/api/repos", frozenset({"GET"}), self._repos)
         self._add("/api/graph", frozenset({"GET"}), self._graph)
         self._add("/api/repos/index", frozenset({"POST"}), self._index_action)
+        self._add("/api/search", frozenset({"GET"}), self._search)
+        self._add("/api/tools", frozenset({"GET"}), self._tool_catalog)
+
+
 
     def _add(self, path: str, methods: frozenset[str], handler: Any) -> None:
         self._routes[path] = (handler, methods)
@@ -163,11 +182,113 @@ class DashboardApi:
                 return (lambda q, b, s=slug: self._forget_action(s, q, b),
                         frozenset({"POST"}))
 
+        if len(parts) == 4 and parts[:2] == ["api", "tools"] and parts[3] == "invoke":
+            name = parts[2]
+            return (
+                lambda query, body, tool_name=name: self._tool_invoke(tool_name, query, body),
+                frozenset({"POST"}),
+            )
+
+
         return None
 
     def _server_module(self):
         from jarvis import server
         return server
+
+    def _tool_catalog(self, query, body):
+        import inspect
+
+        server = self._server_module()
+        tools = []
+        for mcp_name, attr in _TOOL_NAMES.items():
+            fn = getattr(server, attr)
+            doc = (fn.__doc__ or "").strip().splitlines()[0]
+            params = []
+            signature = inspect.signature(fn)
+            for pname, param in signature.parameters.items():
+                annotation = param.annotation
+                type_name = (getattr(annotation, "__name__", None)
+                             or str(annotation).replace("typing.", "")
+                             or "str")
+                if pname in ("repo_path", "repo", "path", "symbol", "query",
+                             "symbol_or_package"):
+                    type_name = "str"
+                params.append({"name": pname, "type": type_name,
+                               "required": param.default is inspect.Parameter.empty,
+                               "default": None if param.default is inspect.Parameter.empty
+                               else param.default})
+            tools.append({"name": mcp_name, "description": doc, "params": params})
+        return 200, {"tools": tools}
+
+    def _tool_invoke(self, name: str, query, body):
+        import inspect
+        import time
+
+        server = self._server_module()
+        attr = _TOOL_NAMES.get(name)
+        if attr is None:
+            raise DashboardError(404, f"no such tool: {name}")
+        fn = getattr(server, attr)
+        signature = inspect.signature(fn)
+        kwargs = dict(body)
+        for pname, param in signature.parameters.items():
+            if param.default is inspect.Parameter.empty and pname not in kwargs:
+                raise DashboardError(400, f"missing required parameter {pname!r}")
+        kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}
+        t0 = time.perf_counter()
+        result = fn(**kwargs)
+        return 200, {"result": result,
+                     "elapsedMs": round((time.perf_counter() - t0) * 1000, 1)}
+
+    def _search(self, query, body):
+        import time
+
+        q = (query.get("q", [""])[0] or "").strip()
+        if not q:
+            raise DashboardError(400, "query parameter 'q' is required")
+        repo = query.get("repo", [None])[0]
+        server = self._server_module()
+        out: dict[str, Any] = {"query": q, "repo": repo, "scoped": repo is not None,
+                               "lexical": None, "semantic": None, "symbols": None}
+        t0 = time.perf_counter()
+        try:
+            from jarvis.search import search_zoekt
+
+            base = server._zoekt().ensure_running()
+            result = search_zoekt(base, f"r:{repo} {q}" if repo else q)
+            out["lexical"] = {
+                "hits": [{"repo": h.repo, "path": h.path, "lineNumber": h.line_number,
+                          "lineText": h.line_text} for h in result.hits],
+                "total": result.total_matches,
+                "truncated": result.total_matches > len(result.hits),
+            }
+        except Exception as exc:
+            out["lexicalError"] = str(exc)
+        if repo is not None:
+            try:
+                from jarvis import semantic
+
+                out["semantic"] = semantic.semantic_search(
+                    repo, q, 10,
+                    zoekt_base_url=server._zoekt_base_url_or_none(),
+                    scip_conn=server._scip_conn_or_none(repo))
+            except Exception as exc:
+                out["semanticError"] = str(exc)
+            try:
+                from jarvis.symbol_search import search_symbols
+
+                conn = server._scip_conn_or_none(repo)
+                if conn is not None:
+                    out["symbols"] = [
+                        {"path": h.file_path, "startLine": h.start_line,
+                         "endLine": h.end_line, "name": h.dotted_path, "kind": h.kind}
+                        for h in search_symbols(conn, q)
+                    ]
+            except Exception as exc:
+                out["symbolsError"] = str(exc)
+        out["elapsedMs"] = round((time.perf_counter() - t0) * 1000, 1)
+        return 200, out
 
     def _overview(self, query, body):
         server = self._server_module()

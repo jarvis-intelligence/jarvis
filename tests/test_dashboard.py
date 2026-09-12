@@ -358,3 +358,67 @@ def test_forget_executes_and_reports(tmp_path: Path, monkeypatch):
         status, body = srv.post("/api/repos/demo/forget", {"confirm": "demo"})
         assert status == 200 and body == {"ok": True, "message": "forgot demo"}
         assert calls == ["demo"]
+
+
+def test_tool_catalog_lists_ten_tools(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, body = srv.get("/api/tools")
+        assert status == 200
+        names = {t["name"] for t in body["tools"]}
+        assert names == {"documentSymbols", "goToDefinition", "findReferences",
+                         "callHierarchy", "typeHierarchy", "getIndexStatus",
+                         "searchCode", "semanticSearch", "blastRadius", "indexRepo"}
+
+
+def test_tool_invoke_calls_server_function(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    from jarvis import server
+
+    def fake_get_status(repo, repo_path=None):
+        return {"repo": repo, "indexed": False}
+
+    monkeypatch.setattr(server, "get_index_status", fake_get_status)
+    with _Server() as srv:
+        status, body = srv.post("/api/tools/getIndexStatus/invoke", {"repo": "demo"})
+        assert status == 200
+        assert body["result"] == {"repo": "demo", "indexed": False}
+
+
+def test_tool_invoke_unknown_tool_404(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, body = srv.post("/api/tools/nope/invoke", {})
+        assert status == 404
+
+
+def test_tool_invoke_missing_required_param_400(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    with _Server() as srv:
+        status, body = srv.post("/api/tools/findReferences/invoke", {})
+        assert status == 400 and "repo" in body["error"]
+
+
+def test_search_degrades_each_signal_independently(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    from jarvis import server
+    from jarvis.search import ZoektHit, ZoektSearchResult
+
+    class FakeLifecycle:
+        def ensure_running(self):
+            return "http://zoekt"
+
+    monkeypatch.setattr(server, "_zoekt_lifecycle", FakeLifecycle())
+
+    import jarvis.search as search_mod
+    monkeypatch.setattr(search_mod, "search_zoekt",
+                        lambda base, q: ZoektSearchResult(
+                            hits=[ZoektHit(repo="demo", path="a.py",
+                                           line_number=3, line_text="hit line")],
+                            total_matches=1, file_count=1))
+    with _Server() as srv:
+        status, body = srv.get("/api/search?q=hit&repo=demo")
+        assert status == 200
+        assert body["lexical"]["hits"][0]["path"] == "a.py"
+        assert body.get("semanticError") or body["semantic"] is None
+        assert "elapsedMs" in body
