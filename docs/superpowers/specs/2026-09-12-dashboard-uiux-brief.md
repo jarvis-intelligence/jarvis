@@ -73,7 +73,7 @@ shadows, no glassmorphism, no gradients except where explicitly specified.
 
 | Token | Hex | Use |
 |---|---|---|
-| `accent-sunset` | `#ff7a17` | THE accent: live/indexing states, active signals, primary emphasis moments. Also the link/hover color inside mono blocks |
+| `accent-sunset` | `#ff7a17` | THE accent: live/indexing states, active signals, primary emphasis moments. Link/hover color on `canvas` surfaces; inside `canvas-mid` wells use `accent-sunset-soft` (§7) |
 | `accent-sunset-soft` | `#ffc285` | `partial` status, softer emphasis |
 | `accent-breeze` | `#a0c3ec` | Semantic-search column identity, secondary data accents |
 | `accent-dusk` | `#7c3aed` | Reserved: package-graph edges only |
@@ -309,7 +309,8 @@ jarvis                                    ● INDEXED · generation 14 · 412 MB
   column's identity (`accent-breeze` for semantic; `body-mid` for the
   others). Column widths 1:1:0.6.
 - **Hit card**: path (`mono-md`, `ink`) : line, 2-line snippet
-  (`canvas-mid` block) with matched terms in `accent-sunset`; semantic hits
+  (`canvas-mid` block) with matched terms in `accent-sunset-soft` (AA on
+  `canvas-mid`, §7); semantic hits
   add a `score` + signal-provenance line (`body-mid`); symbol hits show
   kind (fn/class/method) + defining path.
 - **Click any hit → source viewer overlay**: full-screen modal, 80% width —
@@ -406,6 +407,7 @@ nodes.
   | Pair | Ratio | AA body |
   |---|---|---|
   | `ink` on `canvas` | 19.8:1 | ✓ |
+  | `body` on `canvas` / `canvas-card` / `canvas-mid` | 14.3 / 12.7 / 8.3:1 | ✓ |
   | `body-mid` `#82878d` on `canvas` / `canvas-card` / `canvas-soft` | 5.5 / 4.9 / 4.7:1 | ✓ |
   | `accent-sunset` on `canvas` | 7.6:1 | ✓ |
   | `accent-sunset-soft` on `canvas-mid` | 7.3:1 | ✓ |
@@ -413,9 +415,11 @@ nodes.
   | `status-partial` `#ffc285` on `canvas` | 12.6:1 | ✓ |
 
   Two rules follow from the numbers: (1) **inside `canvas-mid` wells**
-  (logs, code, JSON) emphasis uses `accent-sunset-soft`, never
+  (logs, code, JSON) emphasis *text* uses `accent-sunset-soft`, never
   `accent-sunset` (4.4:1 there) and never `body-mid` (3.2:1 there) —
-  well text is `body`/`ink`; (2) `body-mid` is cleared for captions on
+  well text is `body`/`ink`; `accent-sunset` remains valid inside wells
+  for non-text UI indicators (the streaming `▌` cursor, bar fills) which
+  need only 3:1; (2) `body-mid` is cleared for captions on
   all surfaces down to `canvas-soft`, but not inside wells.
 - Status is **never color-only**: dot + mono label always travel together.
 - Focus: 1px `ink` outline on all interactive elements via
