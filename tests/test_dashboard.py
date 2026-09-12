@@ -26,3 +26,9 @@ def test_dashboard_port_invalid_degrades(monkeypatch, capsys):
     monkeypatch.setenv("JARVIS_DASHBOARD_PORT", "not-a-port")
     assert config.dashboard_port() == 6080
     assert "JARVIS_DASHBOARD_PORT" in capsys.readouterr().err
+
+
+def test_dashboard_port_out_of_range_degrades(monkeypatch, capsys):
+    monkeypatch.setenv("JARVIS_DASHBOARD_PORT", "70000")
+    assert config.dashboard_port() == 6080
+    assert "JARVIS_DASHBOARD_PORT" in capsys.readouterr().err

@@ -120,11 +120,14 @@ DASHBOARD_DEFAULT_PORT = 6080
 
 def dashboard_port() -> int:
     """`JARVIS_DASHBOARD_PORT` overrides the localhost dashboard port; an
-    invalid value degrades to the default rather than breaking `jarvis
-    dashboard` (same contract as zoekt's port override)."""
+    invalid value (unparseable, or outside the 1-65535 TCP port range)
+    degrades to the default rather than breaking `jarvis dashboard` (same
+    contract as zoekt's port override)."""
     raw = os.environ.get("JARVIS_DASHBOARD_PORT", "")
     try:
-        return int(raw) if raw else DASHBOARD_DEFAULT_PORT
+        port = int(raw) if raw else DASHBOARD_DEFAULT_PORT
+        if not 1 <= port <= 65535:
+            raise ValueError(raw)
     except ValueError:
         print(
             f"warning: invalid JARVIS_DASHBOARD_PORT {raw!r}; "
@@ -132,3 +135,4 @@ def dashboard_port() -> int:
             file=sys.stderr,
         )
         return DASHBOARD_DEFAULT_PORT
+    return port
