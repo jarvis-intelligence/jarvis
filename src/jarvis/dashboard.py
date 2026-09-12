@@ -451,7 +451,11 @@ class DashboardApi:
                 index_dir.glob("index-*.db"), key=lambda candidate: -candidate.stat().st_mtime
             )
         ] if index_dir.exists() else []
-        capabilities = server.get_index_status(slug, entry.path)
+        # `get_index_status` returns the full tool envelope; the renderer
+        # wants the inner `capabilities` object plus `last_index_run`.
+        status_payload = server.get_index_status(slug, entry.path)
+        capabilities = status_payload.get("capabilities") or {}
+        last_run = status_payload.get("last_index_run") or {}
         nodes, edges = _graph_edges()
         own_ids = {node["id"] for node in nodes if node["repo"] == slug}
         by_id = {node["id"]: f"{node['repo']}:{node['name']}" for node in nodes}
@@ -466,6 +470,7 @@ class DashboardApi:
         row.update({
             "snapshots": snapshots,
             "capabilities": capabilities,
+            "last_index_run": last_run,
             "graph": {"dependsOn": depends_on, "dependedOnBy": depended_on_by},
             "logPath": log_path,
             "recovery": recovery_for(entry),
