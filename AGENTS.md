@@ -43,6 +43,7 @@ Single-tenant by design: `config.py` pins `PROJECT = BRANCH = "_"`; no auth, no 
   - `graph.py` — package graph (`extract_package_names`, `GraphStore`, `populate_graph_for_repo`, `blast_radius`) + `registry.py` — repo registry, both SQLite over `registry.db` (`busy_timeout=5000`; must be `close()`d via try/finally).
   - `semantic.py` + `chunker.py` + `embeddings.py` — optional semantic path (LanceDB, tree-sitter AST chunking at function/class boundaries, sentence-transformers `BAAI/bge-m3` default; all imports deferred).
   - `scip_decoder.py` — isolation seam; `scip_pb2.py` — vendored gencode; `config.py` — paths/slugs/pinning, owns `JARVIS_DATA_DIR`/`JARVIS_FALLBACK_SEARCH_ONLY`; `models.py` — frozen result dataclasses + `Freshness` StrEnum; `watch.py` — pure thread-free `Debouncer` (injectable clock) + `should_ignore_path`.
+  - `dashboard.py` + `dashboard_assets/` — stdlib localhost console; imports server singletons; never spawns the pipeline in-process.
 - `tests/` — mirrors src ~1:1 (`test_<module>.py` ↔ `<module>.py`); `tests/fixtures/` holds a synthetic real-schema index builder, a zstd/protobuf blob encoder, and mini repos (`mini_py_repo`, `mini_swift_repo`, `mini_java_repo`, `mini_xcode_repo`).
 - `scripts/` — `check_versions.py` (version lockstep guard), `check_wheel_contents.py` (compiled-wheel guard).
 - `docs/` — `code-standards.md` (canonical style contract, 482 lines, 12 documented patterns), `system-architecture.md` (7-layer architecture), `project-overview-pdr.md` (product definition record, scope/non-goals), `codebase-summary.md` (module index + call-graph walkthroughs; note: one internal count inconsistency, "12 test modules" text vs. its own 16-file table — trust the actual `tests/` listing), `project-roadmap.md` (dated changelog of landed phases, includes the Aug-5 version reset to 0.0.1), `journals/` (per-phase decision journals), rendered HTML doc (`index.html` — presentation artifact, not source of truth), plus historical `superpowers/{specs,plans}/` design docs.
@@ -72,6 +73,7 @@ uv run jarvis index /path/to/repo [--slug name] [--language java|python|swift|ty
                                    [--scheme name] [--semantic-include path] [--search-only]
 uv run jarvis list | status <slug> | reindex <slug> | forget <slug>
 uv run jarvis watch /path/to/repo [--debounce 5.0] [--scheme name] [--language name]
+uv run jarvis dashboard [--port N] [--no-open]  # localhost web console (blocks; default port 6080)
 uv run jarvis-server                     # MCP stdio entry point
 ```
 
