@@ -30,6 +30,10 @@ MCP client. Your code and indexes never leave your machine.
 
 [The problem](#the-problem) · [Quick start](#quick-start) · [MCP tools](#mcp-tools) · [How it works](#how-it-works) · [Dashboard](#dashboard) · [Requirements and limits](#requirements-and-limits) · [Configuration](#configuration) · [Documentation](#documentation)
 
+<p align="center">
+  <img src="docs/assets/demo.gif" width="780" alt="grep returns noisy results (comments, markdown, similarly named symbols) vs jarvis findReferences returning 10 exact file:line:col occurrences">
+</p>
+
 ## The problem
 
 LLM coding agents understand code through **text**. They grep, read files, and
