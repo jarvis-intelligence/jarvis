@@ -9,31 +9,53 @@
 [![License: MIT](https://img.shields.io/pypi/l/jarvis-mcp.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-server-2e5aa8)](https://modelcontextprotocol.io)
 
-**Local-first code intelligence for coding agents.** Precomputed SCIP navigation
-(go-to-definition, find-references, call/type hierarchy, document symbols), Zoekt
-lexical search, natural-language semantic search, and cross-repo blast radius —
-exposed as ten MCP tools for Claude Code, Cursor, or any MCP client.
+**Your coding agent should not spend its context window on grep.**
 
-One indexing CLI writes up, one stdio runtime reads down — the storage seam in
-`~/.jarvis` is the only contract between them. **No server, no auth, no network,
-nothing leaves your machine.**
+When your agent asks *"where is `AuthService` used?"*, it greps for the string,
+receives comments, test fixtures, imports, and similarly named symbols in the
+same pile, then opens file after file to figure out which hits are real. It may
+find a usage but miss the call path. Each turn burns more context on
+rediscovery instead of your actual task.
 
-[What is it?](#what-is-it) · [How it works](#how-it-works) · [Quick start](#quick-start) · [MCP tools](#mcp-tools) · [Requirements and limits](#requirements-and-limits) · [Indexing](#indexing-a-repo) · [Configuration](#configuration) · [Documentation](#documentation)
+jarvis precomputes a local code-intelligence layer so your agent calls
+`findReferences` for exact occurrences, `goToDefinition` for the defining
+range, `callHierarchy` for incoming/outgoing calls, and `semanticSearch` for
+plain-language questions — **ten MCP tools** for Claude Code, Cursor, or any
+MCP client. Your code and indexes never leave your machine.
+
+| | |
+|---|---|
+| **Without jarvis** | Agent greps → gets comments, tests, imports mixed with real hits → opens files to filter → guesses at call sites → burns context window on search instead of reasoning |
+| **With jarvis** | Agent calls `findReferences("AuthService")` → exact file-and-range occurrences from a precomputed SCIP index → `callHierarchy` for the call graph → `semanticSearch("where is token refresh handled?")` in plain language → answers in milliseconds |
+
+[The problem](#the-problem) · [Quick start](#quick-start) · [MCP tools](#mcp-tools) · [How it works](#how-it-works) · [Dashboard](#dashboard) · [Requirements and limits](#requirements-and-limits) · [Configuration](#configuration) · [Documentation](#documentation)
+
+## The problem
+
+LLM coding agents understand code through **text**. They grep, read files, and
+search — but grep matches strings, not symbols. A search for `AuthService`
+returns comments, docs, test fixtures, and imports alongside real usage. The
+agent then burns context window re-reading files to distinguish signal from
+noise, and still misses call sites when the symbol is renamed, aliased, or
+imported differently.
+
+This is the wrong primitive. What agents need is **structural code
+intelligence**: precise definitions, exact references, call paths, and type
+hierarchies — indexed once per repo, answered in milliseconds.
+
+**jarvis gives your agent that layer locally.** No cloud service, no code
+leaving your machine, no runtime overhead on unindexed repos.
+
+> `grep` finds text. [Serena](https://github.com/oraios/serena) edits code.
+> jarvis answers structural questions locally — definitions, references, call
+> paths, and cross-repo impact — through ten MCP tools your agent already knows
+> how to call.
 
 ## What is it?
 
-**Without jarvis**, asking your agent *"where is `AuthService` used?"* means
-grepping for the string, re-reading whole files to filter false positives, and
-guessing at call sites — burning context window on **search** instead of
-**reasoning**.
-
-**With jarvis**, the agent calls `findReferences` and gets exact file-and-range
-occurrences from a precomputed SCIP index, `callHierarchy` for the call graph,
-and `semanticSearch` for questions like *"where is token refresh handled?"* in
-plain language.
-
-Think of it as `grep`, but matching **symbols, definitions, and references** —
-indexed once per repo, answered in milliseconds.
+jarvis is a local-first code-intelligence MCP server. One indexing CLI writes
+precomputed indexes into `~/.jarvis`; one stdio runtime reads them down and
+exposes ten tools. The two share no other contract.
 
 - **Declaration-level navigation without any indexer** — a Tree-sitter syntax
   baseline (17 languages) is built on every `jarvis index` run from pip-installed
@@ -49,6 +71,82 @@ jarvis is deliberately narrow: one language per repo, macOS/Linux only, and
 indexing is an explicit step — see [Requirements and limits](#requirements-and-limits)
 before installing.
 
+## Quick start
+
+### Fastest try (no external binaries needed)
+
+The Tree-sitter syntax baseline ships inside the pip package. Install and go:
+
+```bash
+uv tool install jarvis-mcp
+jarvis index /path/to/your/repo
+claude mcp add jarvis --scope user -- jarvis-server
+```
+
+That's it. Ask your agent *"outline the symbols in `src/auth.py`"* and it will
+call `documentSymbols` instead of reading the whole file.
+
+### Full precise navigation (optional SCIP/Zoekt enrichment)
+
+For exact references, call hierarchy, and type hierarchy on supported languages
+(TypeScript/TSX, Python, Java/Kotlin, Swift), install the external indexer
+binaries first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
+jarvis index /path/to/your/repo
+```
+
+Ask your agent *"find all references to `AuthService`"* and it will call
+`findReferences` instead of grepping.
+
+<details>
+<summary>Other MCP clients (Cursor, Claude Desktop, any stdio client)</summary>
+
+```json
+{
+  "mcpServers": {
+    "jarvis": {
+      "command": "jarvis-server"
+    }
+  }
+}
+```
+
+If your client can't find `jarvis-server` on `PATH` (GUI apps often don't
+inherit your shell's), use the absolute path from `which jarvis-server`.
+</details>
+
+<details>
+<summary>Claude Code with the plugin instead</summary>
+
+```
+/plugin marketplace add jarvis-intelligence/jarvis-index
+/plugin install jarvis@jarvis
+```
+
+The plugin registers the MCP server and ships three agent skills.
+</details>
+
+<details>
+<summary>Running from a clone instead</summary>
+
+```bash
+git clone https://github.com/phuongddx/jarvis && cd jarvis
+uv sync
+claude mcp add jarvis --scope user -- uv --directory "$(pwd)" run jarvis-server
+```
+</details>
+
+<details>
+<summary>Optional extras</summary>
+
+```bash
+uv tool install "jarvis-mcp[watch]"      # + watchdog, for `jarvis watch`
+uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers, for semanticSearch
+```
+</details>
+
 ## How it works
 
 <p align="center">
@@ -56,6 +154,8 @@ before installing.
     src="https://raw.githubusercontent.com/phuongddx/jarvis/main/docs/assets/jarvis-architecture.png"
     width="880"
     alt="jarvis architecture: a writer CLI and an MCP reader inside the jarvis system boundary, both talking to four stores in the local data dir — the immutable SCIP index, Zoekt shards, LanceDB vectors, and the registry — plus the git repo and a lazily spawned zoekt-webserver">
+</p>
+
 1. **Index.** `jarvis index /repo` builds a Tree-sitter syntax baseline for every
    supported file first, then optionally runs the language's SCIP indexer and
    converts the result to SQLite, builds Zoekt shards (plus optional
@@ -89,83 +189,10 @@ logic is ported from an internal reference implementation; the enterprise shell
 (FastAPI, Postgres, hosted-git auth, Cloud Build) is dropped in favor of a
 single stdio process reading local SQLite files.
 
-## Quick start
-
-**1. Install the external indexer binaries** (only needed for optional SCIP
-navigation and Zoekt search — the Tree-sitter syntax baseline ships inside the
-pip package and needs no external binary): scip, zoekt, per-language indexers:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
-```
-
-**2. Install jarvis:**
-
-```bash
-uv tool install jarvis-mcp
-```
-
-**3. Index a repo** (slug defaults to the directory name):
-
-```bash
-jarvis index /path/to/your/repo
-```
-
-**4. Register the MCP server.** Using Claude Code, install the plugin and it
-registers itself:
-
-```
-/plugin marketplace add jarvis-intelligence/jarvis-index
-/plugin install jarvis@jarvis
-```
-
-Any other MCP client (or Claude Code without the plugin) registers manually:
-
-```bash
-claude mcp add jarvis --scope user -- jarvis-server
-```
-
-That's it — ask your agent *"find all references to `AuthService`"* and it will
-call `findReferences` instead of grepping.
-
-<details>
-<summary>Other MCP clients (Cursor, Claude Desktop, any stdio client)</summary>
-
-```json
-{
-  "mcpServers": {
-    "jarvis": {
-      "command": "jarvis-server"
-    }
-  }
-}
-```
-
-If your client can't find `jarvis-server` on `PATH` (GUI apps often don't
-inherit your shell's), use the absolute path from `which jarvis-server`.
-</details>
-
-<details>
-<summary>Running from a clone instead</summary>
-
-```bash
-git clone https://github.com/phuongddx/jarvis && cd jarvis
-uv sync
-claude mcp add jarvis --scope user -- uv --directory "$(pwd)" run jarvis-server
-```
-</details>
-
-<details>
-<summary>Optional extras</summary>
-
-```bash
-uv tool install "jarvis-mcp[watch]"      # + watchdog, for `jarvis watch`
-uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers, for semanticSearch
-```
-</details>
-
 ## MCP tools
 
+| Tool | What it does |
+|------|-------------|
 | `goToDefinition` | Resolve a symbol to its defining file and range — SCIP when the file has SCIP definition coverage, otherwise the syntax baseline's declaration; each location carries `source` (`"scip"` or `"tree-sitter"`) and `positionEncoding` |
 | `findReferences` | Every occurrence of a symbol across the indexed repo — **SCIP-only**: without usable SCIP occurrence data it returns `requiredCapability`/`reason`/`recovery`, never an empty list |
 | `callHierarchy` | Incoming/outgoing calls for a symbol — **SCIP-only** (same contract as `findReferences`) |
@@ -188,6 +215,26 @@ Every nav tool takes `repo` (the slug from `jarvis index`) plus a
 tool-specific `symbol` or `path`. All tools report failure the same way — a
 `{"error": "..."}` payload rather than a transport-level error, so a query bug
 never kills the stdio server.
+
+## Dashboard
+
+```bash
+jarvis dashboard          # serves http://127.0.0.1:6080 and opens a browser
+```
+
+A localhost web console over the same `~/.jarvis` data the CLI and MCP server
+read — watch index runs and call the tools from a browser, no MCP client
+involved:
+
+| | |
+|---|---|
+| <img src="https://raw.githubusercontent.com/phuongddx/jarvis/main/docs/assets/dashboard-repos.png" alt="Repositories view — index runs, status, freshness" width="430"> | <img src="https://raw.githubusercontent.com/phuongddx/jarvis/main/docs/assets/dashboard-search.png" alt="Search view — Zoekt lexical search from the browser" width="430"> |
+| <img src="https://raw.githubusercontent.com/phuongddx/jarvis/main/docs/assets/dashboard-detail.png" alt="Repo detail — index runs, extraction counts, package graph" width="430"> | <img src="https://raw.githubusercontent.com/phuongddx/jarvis/main/docs/assets/dashboard-playground.png" alt="Tool playground — call any MCP tool from a form" width="430"> |
+
+Binds `127.0.0.1` only. No auth by design — it serves the same local files, to
+your local machine, over localhost.
+
+See [`docs/dashboard.md`](docs/dashboard.md) for the full views/actions/troubleshooting reference.
 
 ## Requirements and limits
 
@@ -299,125 +346,57 @@ then fails provisioning for every signed target before compiling anything. Becau
 skips any dependency that is merely *present*, an existing install is **not** upgraded by
 re-running it — use `sh ./setup.sh --only scip-swift --force`.
 
-## Dashboard
+### Watching a repo
 
 ```bash
-jarvis dashboard          # serves http://127.0.0.1:6080 and opens a browser
+uv tool install "jarvis-mcp[watch]"
+jarvis watch /path/to/your/repo [--debounce 5.0]
 ```
 
-A localhost web console over the same `~/.jarvis` data the CLI and MCP server
-read — watch index runs and call the tools from a browser, no MCP client
-involved:
-<p align="center">
-  <img src="docs/assets/dashboard-repos.png" width="860" alt="jarvis console, Repos view: two indexed repos with status chips, freshness, SCIP state, storage sizes, and reindex/forget actions">
-</p>
-<p align="center">
-  <img src="docs/assets/dashboard-search.png" width="860" alt="jarvis console, Search: one query fanned to Zoekt lexical, semantic-vector, and SCIP-symbol results with term highlighting">
-</p>
-<p align="center">
-  <img src="docs/assets/dashboard-detail.png" width="424" alt="jarvis console, repo detail: published snapshots, per-tool capabilities, recovery guidance, package-graph edges, storage footprint">&nbsp;
-  <img src="docs/assets/dashboard-playground.png" width="424" alt="jarvis console, Playground: findReferences invoked with typed parameters, raw JSON response with error framing">
-</p>
-
-- **Repos** — every registered repo with status, freshness, and a live tail of
-  its index log; index a path, reindex, or forget a repo (forget makes you
-  type the slug to confirm).
-- **Repo detail** — one repo's published snapshots, per-tool capabilities,
-  recovery guidance, package-graph edges, and storage footprint.
-- **Search** — one query answered three ways (Zoekt lexical, semantic vector,
-  SCIP symbols), scoped to one repo or across all, with an in-browser source
-  viewer for any hit.
-- **Playground** — invoke any of the ten MCP tools with typed parameters and
-  inspect the raw JSON response.
-
-Index and reindex spawn the same detached `jarvis index` children as the
-`indexRepo` MCP tool — same launch records, same per-slug build lock — and a
-second run for a slug already in flight is rejected. Forget reuses the CLI's
-own teardown. `--port` overrides the port; `JARVIS_DASHBOARD_PORT` does the
-same via the environment (invalid values fall back to 6080 with a warning);
-`--no-open` skips the browser. The server binds `127.0.0.1` only and rejects
-non-localhost `Host` headers; like the MCP server it has no auth — a console
-for your machine, not a network service. Details and troubleshooting:
-[`docs/dashboard.md`](docs/dashboard.md).
-
-## Watching a repo (auto-reindex)
-
-```bash
-jarvis watch /path/to/your/repo             # debounce defaults to 5s
-jarvis watch /path/to/your/repo --debounce 3
-jarvis watch /path/to/your/repo --scheme MyScheme
-jarvis watch /path/to/your/repo --language python
-jarvis watch /path/to/your/repo --no-scip   # persist SCIP-off for this repo
-```
-
-Each debounced reindex runs the same staged pipeline as `jarvis index`. When a
-SCIP attempt already failed at the current commit, a watch run skips only that
-SCIP retry (the syntax baseline still publishes); a new commit, an explicit
-`jarvis reindex`, or an explicit `--scip` retries enrichment.
-
-Runs in the foreground (not a daemon) using `watchdog` — install it with the
-`watch` extra. A burst of file changes (e.g. an editor's atomic save touching
-several files) coalesces into exactly **one** reindex. The reindex fires once
-`--debounce` seconds (default 5) have passed since the *last* file change —
-this prevents thrashing on rapid edits. `.git`, `node_modules`, `.venv`,
-`__pycache__`, `dist`, and `build` are ignored.
+Runs a debounced auto-reindex on file changes (foreground, not a daemon —
+Ctrl+C to stop). Same staged pipeline as `jarvis index`, same recovery
+behavior.
 
 ## Tool details
 
-- **`getIndexStatus`** takes an optional `repo_path` (the repo's local git
-  working directory) to compare the published commit against
-  `git rev-parse HEAD`. Omitted, freshness is reported without a staleness
-  check — never `stale: true` without evidence.
-- **`searchCode`** takes `query` plus an optional `repo` filter. On first call
-  it lazy-spawns an embedded `zoekt-webserver` (pidfile'd so a second jarvis
-  process reuses it instead of spawning a duplicate; killed on clean exit via
-  `atexit`).
-- **`blastRadius`** takes `repo` plus `symbol_or_package` (e.g. `"npm:@scope/
-  name"`, the same `"{manager}:{name}"` string `jarvis index` derives from
-  each repo's SCIP symbols). Returns every other indexed repo whose package
-  depends on it, up to 2 hops, each tagged with its hop distance. The package
-  graph has no per-node timestamp, so `freshness` is always `"unknown"` here —
-  an honest limitation of the schema, not a bug. Cross-repo edges resolve by
-  exact package name against whatever has *already* been indexed: index the
-  dependency first, or re-run `jarvis index`/`reindex` after indexing it,
-  for an edge to appear. Each reindex retracts that repo's own stale edges
-  before recomputing them, so a removed dependency's edge disappears too —
-  the graph always reflects each repo's *last* index run, not an
-  accumulation of every run it's ever had.
-- **`semanticSearch`** takes `repo` plus a natural-language `query`. Requires the
-  optional `semantic` extra. Results fuse a LanceDB vector search over
-  tree-sitter-chunked code with `searchCode`'s Zoekt hits via reciprocal rank
-  fusion. Raises a clear error if the repo has never been indexed with the extra
-  installed (`jarvis reindex <slug>` after installing it builds the missing
-  table); indexing itself is non-fatal — a failure there never blocks the rest
-  of `jarvis index`. Semantic indexing also respects `.gitignore` (on top of
-  the hardcoded ignore-directory list) and skips any file over 1 MB, in addition
-  to the existing generated-file banner/long-line detection —
-  `--semantic-include` overrides all three.
+### `getIndexStatus`
 
-### Known upstream limitations
+Returns the published index's commit, staleness vs. the working tree, and
+`capabilities.tools` / `capabilities.syntax` — a per-tool provider map and
+per-file syntax-extraction counts. Stale but doesn't fail: a derivation bug
+degrades to null fields, never a server error.
 
-These are real behaviors of the underlying SCIP tooling (`scip expt-convert`
-as of v0.9.0, `scip-java`, `scip-kotlinc`), not jarvis bugs:
+### `searchCode`
 
-- **`typeHierarchy` returns an explicit `{"error": ...}`**, not empty arrays, on
-  indexes built with an unpatched upstream `scip` — that converter declares
-  `global_symbols.relationships` in its schema but never writes it. An empty
-  result would wrongly assert "no supertypes"; the error says "cannot tell"
-  instead. setup.sh installs a fork build carrying the fix, so a fresh
-  `jarvis reindex <slug>` makes the tool work. Reported upstream:
-  [scip-code/scip#464](https://github.com/scip-code/scip/issues/464), fix
-  [scip-code/scip#465](https://github.com/scip-code/scip/pull/465) (open, CI green).
-- **`displayName` / `kind` are backfilled from the symbol string.** The converter never populates
-  `global_symbols.display_name`/`.kind`, so `query.py`'s `_display_and_kind` parses both from the
-  SCIP symbol string whenever the database columns are empty (which they still normally are) —
-  `documentSymbols` returns real values in practice; only a genuinely unparseable symbol falls
-  through to `null`.
-- **`searchCode`'s `repo` filter matches Zoekt's own repository name**, which
-  `jarvis index` now names after the slug via `zoekt-index -meta` — so this
-  no longer diverges for repos indexed with current code. Shards published by
-  an older jarvis still carry their old directory-derived name until you
-  `jarvis reindex <slug>`.
+POSTs to a lazily spawned `zoekt-webserver` (port from `JARVIS_ZOEKT_PORT`,
+default `6070`). Accepts a query string (Zoekt query syntax: `sym:`, `file:`,
+`lang:`, `case:`, negation, quoted phrases, or-grouping) and an optional `repo`
+filter.
+
+### `blastRadius`
+
+Reads a package dependency graph extracted at index time from `registry.db` —
+BFS up to 2 hops over `depends_on` edges. Answers "which other indexed repos
+break if I change this package?"
+
+### `semanticSearch`
+
+Fuses three ranked lists via reciprocal rank fusion:
+vector hits (LanceDB, self-hosted `BAAI/bge-m3` by default), Zoekt lexical
+hits, and SCIP symbol-definition matches. Zoekt and symbol signals degrade
+gracefully (best-effort) if unavailable. Requires the optional `semantic`
+extra.
+
+## Known upstream limitations
+
+These are toolchain issues outside jarvis's control, documented so you know
+what to expect:
+
+- **`zoekt`'s repo-name matching** previously diverged from the slug when
+  `zoekt-index` named the shard after the directory instead. Current code pins
+  the name via `zoekt-index -meta`, so `searchCode`'s `repo` filter matches the
+  slug for repos indexed with current code. Shards published by an older jarvis
+  still carry their old directory-derived name until you `jarvis reindex <slug>`.
 - **`scip-java` can't index Android/Gradle repos at all** — its Gradle plugin
   keys off Gradle's standard source sets, which AGP replaces with its variant
   model, so the build emits zero SCIP shards
